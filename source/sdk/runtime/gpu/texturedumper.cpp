@@ -565,6 +565,10 @@ bool Replacing() { return g.set.replacing && !g.files.empty(); }
 
 uint64_t Key(const TextureDesc& d, const FormatInfo& fi, const uint8_t* guest, const uint32_t* palette) {
     if (!Replacing() && !g.set.dumping) return 0;
+    return KeyOf(d, fi, guest, palette);
+}
+
+uint64_t KeyOf(const TextureDesc& d, const FormatInfo& fi, const uint8_t* guest, const uint32_t* palette) {
     // cube maps, volumes and depth stay the console's; linear ones are movie frames and the game's own copies
     if (d.cube || d.depth > 1 || d.linear || UploadFormat(fi.host) == DXGI_FORMAT_UNKNOWN) return 0;
     uint32_t shape[] = {d.format, d.width, d.height};

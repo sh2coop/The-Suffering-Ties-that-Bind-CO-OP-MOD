@@ -1496,6 +1496,7 @@ HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     uint32_t flat_stride = 0;
     const uint8_t* flat_vertices = StreamVertices(a[1], flat_stride);
     ClassifyDraw(flat_vertices, flat_stride, a[2]);
+    g_state.variant = gpu::g_draw_variant ? gpu::g_draw_variant(ctx, g_state) : 0;  // [local change, The Suffering: Ties That Bind]
     if (g_backend) g_backend->Draw(ForDraw(), a[0], a[1], a[2], nullptr);
     return 0;
 }
@@ -1506,6 +1507,7 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     SyncDeferred();
     const uint8_t* indices = a[2] ? static_cast<const uint8_t*>(HostPtr(a[2])) : nullptr;
     ClassifyDraw(nullptr, 0, 0);
+    g_state.variant = gpu::g_draw_variant ? gpu::g_draw_variant(ctx, g_state) : 0;  // [local change, The Suffering: Ties That Bind]
     if (g_backend) g_backend->Draw(ForDraw(), a[0], 0, a[1], indices);
     return 0;
 }

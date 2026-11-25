@@ -2595,3 +2595,156 @@ X86_FUNC(sub_0017C450) {
     ctx.ecx = ecx;
     ctx.eax = (ctx.eax & ~0xFFu) | (outside & 0xFF);
 }
+
+// ---- which draws are Player 2's model ------------------------------------------------------------------------------
+// The runtime asks for every draw (gpu::g_draw_variant). S2_DRAW_TRACE=<frame>: every draw of that frame with its
+// first texture, the world transform's place and who called (the code addresses on the game's stack).
+#include "gpu/texture.h"
+#include "gpu/texturedumper.h"
+#include <filesystem>
+#include <fstream>
+#include "app/app.h"
+namespace game_coop {
+bool g_drawing_second = false;  // the engine is drawing Player 2's object (0x1D1970)
+
+// Player 2's outfit (decided 2026-11-24: blue trousers and a black tank top; straps, boots, skin and blood as they
+// are). His model is drawn with the same textures as Player 1's. Two of them are the clothes: the trousers
+// (256 x 256, all of it the orange cloth) and the one with the tank top in its lower part (from row 172; above it
+// boots and straps). The runtime draws a texture pack's "player2" images in their place for the draws marked as his
+// (State::variant 1). Those two images are made here, on the player's PC, out of the game's own textures the first
+// time his model is drawn with them, and kept in textures\replacement\player2 beside the program: nothing of the
+// game's art is in the program. The textures are known by the name the texture dumps give them.
+constexpr uint64_t kTrousers = 0x9bda0bdae0112ab5ull, kTankTop = 0x6011d07b0583df74ull;
+constexpr uint32_t kTankFromRow = 172;
+void Outfit(const gpu::State& s) {
+    static std::map<uint32_t, uint64_t> seen;  // texture data address -> its first bytes when it was looked at
+    static const bool off = std::getenv("S2_COOP_NO_OUTFIT") != nullptr;
+    gpu::TextureDesc d;
+    if (off || !s.textures[0] || !gpu::Describe(s.textures[0], d) || d.width != 256 || d.height != 256) return;
+    const gpu::FormatInfo& fi = gpu::Format(d.format);
+    if (fi.host != gpu::Host::BC1 || !mem::IsCommitted(d.data + 32768)) return;
+    const uint8_t* guest = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
+    uint64_t first;
+    std::memcpy(&first, guest + 4096, 8);
+    auto it = seen.find(d.data);
+    if (it != seen.end() && it->second == first) return;
+    seen[d.data] = first;
+    uint64_t key = gpu::texturedumper::KeyOf(d, fi, guest, nullptr);
+    if (key != kTrousers && key != kTankTop) return;
+    namespace fs = std::filesystem;
+    fs::path dir = app::ExeDir() / "textures" / "replacement" / "player2";
+    char name[64];
+    std::snprintf(name, sizeof name, "256x256_%016llx_coop.dds", (unsigned long long)key);
+    std::error_code ec;
+    if (fs::exists(dir / name, ec)) return;
+    // DXT1 blocks: two 565 colours and 16 two-bit picks
+    std::vector<uint8_t> blocks;
+    uint32_t pitch = 0;
+    gpu::DecodeLevel(d, 0, 0, guest, nullptr, blocks, pitch);
+    if (pitch < 64 * 8 || blocks.size() < size_t(pitch) * 64) return;
+    std::vector<uint8_t> file(128 + 256 * 256 * 4, 0);
+    auto put = [&](size_t at, uint32_t v) { std::memcpy(&file[at], &v, 4); };
+    put(0, 0x20534444), put(4, 124), put(8, 0x100F), put(12, 256), put(16, 256), put(20, 256 * 4);  // "DDS ", caps, height, width, pitch
+    put(76, 32), put(80, 0x41), put(88, 32), put(92, 0x00FF0000), put(96, 0x0000FF00), put(100, 0x000000FF), put(104, 0xFF000000);
+    put(108, 0x1000);
+    for (uint32_t by = 0; by < 64; by++)
+        for (uint32_t bx = 0; bx < 64; bx++) {
+            const uint8_t* b = blocks.data() + size_t(by) * pitch + size_t(bx) * 8;
+            uint32_t c[2] = {uint32_t(b[0] | b[1] << 8), uint32_t(b[2] | b[3] << 8)}, rgb[4][3];
+            for (int k = 0; k < 2; k++) {
+                uint32_t r = c[k] >> 11, g = (c[k] >> 5) & 63, bl = c[k] & 31;
+                rgb[k][0] = (r << 3) | (r >> 2), rgb[k][1] = (g << 2) | (g >> 4), rgb[k][2] = (bl << 3) | (bl >> 2);
+            }
+            for (int ch = 0; ch < 3; ch++) {
+                rgb[2][ch] = c[0] > c[1] ? (2 * rgb[0][ch] + rgb[1][ch]) / 3 : (rgb[0][ch] + rgb[1][ch]) / 2;
+                rgb[3][ch] = c[0] > c[1] ? (rgb[0][ch] + 2 * rgb[1][ch]) / 3 : 0;
+            }
+            uint32_t picks = uint32_t(b[4] | b[5] << 8 | b[6] << 16 | uint32_t(b[7]) << 24);
+            for (uint32_t t = 0; t < 16; t++) {
+                uint32_t x = bx * 4 + (t & 3), y = by * 4 + (t >> 2);
+                const uint32_t* col = rgb[(picks >> (2 * t)) & 3];
+                float r = float(col[0]), g = float(col[1]), bl = float(col[2]);
+                if (key == kTrousers) {
+                    // orange cloth to blue denim: its brightness is its red; what is dark (the stripe, the seams) stays dark
+                    float v = r;
+                    r = v * 0.20f, g = v * 0.40f, bl = std::min(255.0f, v * 0.86f);
+                } else if (y >= kTankFromRow) {
+                    // grey-white cloth to black; blood (much more red than green) is left as it is
+                    bool blood = r > g * 1.45f && r > 60.0f;
+                    if (!blood) r *= 0.17f, g *= 0.17f, bl *= 0.19f;
+                }
+                uint8_t* out = &file[128 + (size_t(y) * 256 + x) * 4];
+                out[0] = uint8_t(bl), out[1] = uint8_t(g), out[2] = uint8_t(r), out[3] = 255;
+            }
+        }
+    fs::create_directories(dir, ec);
+    std::ofstream(dir / name, std::ios::binary).write(reinterpret_cast<const char*>(file.data()), std::streamsize(file.size()));
+    LOGR("coop: Player 2's outfit: %s made from the game's own texture, in %s", key == kTrousers ? "blue trousers" : "black tank top",
+         dir.string().c_str());
+}
+uint32_t DrawVariant(X86Context& ctx, const gpu::State& s) {
+    static const uint64_t trace_at = std::getenv("S2_DRAW_TRACE") ? uint64_t(std::atoll(std::getenv("S2_DRAW_TRACE"))) : 0;
+    if (trace_at && g_frames == trace_at) {
+        gpu::TextureDesc d;
+        bool has = s.textures[0] && gpu::Describe(s.textures[0], d);
+        char line[600];
+        int n = std::snprintf(line, sizeof line, "draw trace: tex %08X %ux%u fmt %X data %08X world %.2f %.2f %.2f view2 %d from", s.textures[0], has ? d.width : 0,
+                              has ? d.height : 0, has ? d.format : 0, has ? d.data : 0, s.transforms[256][12], s.transforms[256][13], s.transforms[256][14],
+                              int(g_screen_pass));
+        int found = 0;
+        for (uint32_t at = ctx.esp; at < ctx.esp + 0x400 && found < 12; at += 4) {
+            if (!mem::IsCommitted(at + 4)) break;
+            uint32_t v = kernel::R32(at);
+            if (v >= 0x11000 && v < 0x24A000) n += std::snprintf(line + n, sizeof line - n, " %06X", v), found++;
+        }
+        // where the players are in the vertex program's constants: as a register's x y z, or as the w of three
+        // registers in a row (the last column of a 3 x 4 matrix)
+        if (g_second_object && g_player_object) {
+            float p1[3], p2[3];
+            for (int i = 0; i < 3; i++) p1[i] = ReadF(g_player_object + kPosition + i * 4), p2[i] = ReadF(g_second_object + kPosition + i * 4);
+            auto near = [&](const float* v, const float* p) {
+                float dx = v[0] - p[0], dy = v[1] - p[1] - 1.0f, dz = v[2] - p[2];
+                return dx * dx + dy * dy + dz * dz;
+            };
+            int c1 = 0, c2 = 0, first = -1, kind = 0;
+            for (int r = 0; r + 2 < 192; r++) {
+                float a[3] = {s.vsc[r][0], s.vsc[r][1], s.vsc[r][2]}, b[3] = {s.vsc[r][3], s.vsc[r + 1][3], s.vsc[r + 2][3]};
+                for (int k = 0; k < 2; k++) {
+                    const float* v = k ? b : a;
+                    float d1 = near(v, p1), d2 = near(v, p2);
+                    if (d1 > 1.6f && d2 > 1.6f) continue;
+                    (d1 < d2 ? c1 : c2)++;
+                    if (first < 0) first = r, kind = k;
+                }
+            }
+            n += std::snprintf(line + n, sizeof line - n, " | consts near P1 %d near P2 %d first %d kind %d", c1, c2, first, kind);
+        }
+        LOGI("%s", line);
+    }
+    if (!g_drawing_second) return 0;
+    Outfit(s);
+    // S2_P2_TEXTURES=1: the textures Player 2's model is drawn with, each once, by the name the texture dumps give them
+    static const bool list = std::getenv("S2_P2_TEXTURES") != nullptr;
+    if (list) {
+        static std::map<uint32_t, int> seen;
+        for (int stage = 0; stage < 4; stage++) {
+            gpu::TextureDesc d;
+            if (!s.textures[stage] || !gpu::Describe(s.textures[stage], d) || seen[d.data]++) continue;
+            uint64_t key = gpu::texturedumper::Key(d, gpu::Format(d.format), static_cast<const uint8_t*>(kernel::HostPtr(d.data)), nullptr);
+            LOGI("coop: Player 2's model: stage %d texture %ux%u_%016llx (format %X)", stage, d.width, d.height, (unsigned long long)key, d.format);
+        }
+    }
+    return 1;
+}
+static const int g_draw_variant_set = (gpu::g_draw_variant = DrawVariant, 0);
+}  // namespace game_coop
+
+// An object is drawn (0x1D1970, the object on the stack): its meshes go out from inside this call, so the draws made
+// meanwhile are that object's. Player 2's are marked for the runtime (texture pack variant 1: his own outfit).
+X86_EXTERN_FUNC(__imp__sub_001D1970);
+X86_FUNC(sub_001D1970) {
+    bool before = game_coop::g_drawing_second;
+    game_coop::g_drawing_second = game_coop::g_second_object && kernel::R32(ctx.esp + 4) == game_coop::g_second_object;
+    __imp__sub_001D1970(ctx, base);
+    game_coop::g_drawing_second = before;
+}

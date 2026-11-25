@@ -41,6 +41,10 @@ uint64_t VariantKey(uint64_t key, uint32_t variant);
 // the name of a texture's bytes, a P8 texture's with its 256 colours; 0 when neither the pack nor dumping applies
 uint64_t Key(const TextureDesc& d, const FormatInfo& fi, const uint8_t* guest, const uint32_t* palette);
 
+// [local change, The Suffering: Ties That Bind] the same name whatever the texture settings are (a title that makes
+// pack images itself needs it before the pack holds any)
+uint64_t KeyOf(const TextureDesc& d, const FormatInfo& fi, const uint8_t* guest, const uint32_t* palette);
+
 // once per key while dumping: PNG level 0, or DDS with every level in the format the renderer uploads
 void Dump(uint64_t key, const TextureDesc& d, const uint8_t* guest, const uint32_t* palette);
 

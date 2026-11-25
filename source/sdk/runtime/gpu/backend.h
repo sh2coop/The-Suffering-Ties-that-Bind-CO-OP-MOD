@@ -138,6 +138,12 @@ inline std::atomic<bool> g_partner_whole{false};
 // title has it (red); rows 48 to 95: the same with red and blue swapped (Player 2's). In it the filled strip is
 // rows 3 to 15 and the empty bar rows 32 to 47, both columns 0 to 97. Nothing of it is in the program: it comes from
 // the player's own disc image at run time. Until it has been seen the bars are plain rectangles.
+// [local change, The Suffering: Ties That Bind] A title's say on a draw's texture pack variant (State::variant): asked
+// for every draw the game makes, with the game's registers at the draw call (its stack tells who is drawing).
+} // namespace gpu
+struct X86Context;
+namespace gpu {
+inline uint32_t (*g_draw_variant)(X86Context& ctx, const State& s) = nullptr;
 constexpr uint32_t kHudArtW = 100, kHudArtH = 48;
 struct HudArt {
     std::mutex lock;
