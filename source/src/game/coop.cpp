@@ -561,6 +561,12 @@ bool InScene() {
     // moment he is on the truck's gun in chapter 10; run truck1: the truck drove him 250 m away and Player 2 stood
     // where the level began). A mount that stays where it is leaves Player 2 free: it only counts once he is more
     // than 15 m behind, and then until Player 1 is off the mount. He comes back beside Player 1 as after a scene.
+    // ... or Player 1 sits (the chess table the game opens at: he is "mounted", bit 0x200000, but not on a weapon,
+    // which shows as bit 1 of his flags at +0xB0; seated 0x1A000004, on a gun 0x18000207). A seat is a story
+    // moment: with two copies connected, Player 2 stood free in the yard while Player 1 sat through the opening
+    // (run intro_join). Now he watches it and comes in beside Player 1 afterwards.
+    if (g_player && (kernel::R32(g_player + 0xBC) & 0x200000) && !(kernel::R32(g_player + 0xB0) & 2))
+        return g_scene_why = "Player 1 is seated (a story moment)", true;
     static bool riding = false;
     bool mounted = g_player && (kernel::R32(g_player + 0xBC) & 0x200000);
     if (!mounted || !g_second_object) riding = false;
@@ -1104,8 +1110,20 @@ void Frame(X86Context& ctx) {
                     // came out at forward -9; its first row is its right all the same, run arrow4)
                     rz = -rz;
                     static const bool trace2 = std::getenv("S2_ARROW_TRACE") != nullptr;
+                    if (trace2 && g_frames % 120 == 0) {
+                        char line[400];
+                        int n = std::snprintf(line, sizeof line, "arrow: view %d camera floats", v);
+                        for (uint32_t at = 0x260; at < 0x2C4; at += 4) n += std::snprintf(line + n, sizeof line - n, " %X:%.4g", at, ReadF(cams[v] + at));
+                        LOGI("%s", line);
+                    }
                     if (trace2 && g_frames % 120 == 0) LOGI("arrow: view %d to partner %.2f %.2f %.2f: right %.2f up %.2f forward %.2f", v, d[0], d[1], d[2], rx, ry, rz);
-                    float half_w = 0.3125f / distance, half_h = half_w / shape;
+                    // The view camera keeps its own scales at +0x26C and +0x270: how many half-views a point one
+                    // metre to the side (or up) at one metre ahead is from the middle (-2.366 and -2.103 for a half of
+                    // a 16:9 split screen). Their inverses are the half picture's width and height at one metre.
+                    // (First worked out from the camera's distance and the picture's shape, which was right for the
+                    // split screen and wrong for the whole-frame view of a joined player: run arrow_join2.)
+                    float kx = std::fabs(ReadF(cams[v] + 0x26C)), ky = std::fabs(ReadF(cams[v] + 0x270));
+                    float half_w = kx > 1e-3f ? 1.0f / kx : 0.3125f / distance, half_h = ky > 1e-3f ? 1.0f / ky : half_w / shape;
                     if (rz > 0.3f) {
                         float sx = 0.5f + rx / rz / (2 * half_w), sy = 0.5f - ry / rz / (2 * half_h);
                         if (sx > 0.0f && sx < 1.0f && sy > 0.0f && sy < 1.0f) x = sx, y = sy;

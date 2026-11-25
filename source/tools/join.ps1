@@ -12,6 +12,7 @@ param(
     [double]$Shot = 0,
     [string]$Name = "join",
     [string]$Vars = ""      # extra environment variables for this copy: "NAME=value;NAME2=value"
+
 )
 $proj = Split-Path -Parent $PSScriptRoot
 $rel = Join-Path $proj "out\build\release"

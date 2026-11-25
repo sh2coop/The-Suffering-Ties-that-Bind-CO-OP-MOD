@@ -1,0 +1,6 @@
+# main menu: A at 26, 31, 36, 41, 46 s to see what New Game asks
+26 A 0.2
+31 A 0.2
+36 A 0.2
+41 A 0.2
+46 A 0.2

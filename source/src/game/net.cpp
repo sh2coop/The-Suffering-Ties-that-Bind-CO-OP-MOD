@@ -1015,6 +1015,36 @@ const uint8_t* Present(uint32_t& w, uint32_t& h) {
             }
         }
     }
+    // S2_JOIN_DUMPS=<seconds,seconds,...> (with S2_JOIN_DUMP): the picture shown at those seconds after the first
+    // one, as <file>_<seconds>.bmp (tests: what the joined player sees through a scene, a pause, a level change)
+    {
+        static const char* list = std::getenv("S2_JOIN_DUMPS");
+        static const char* path = std::getenv("S2_JOIN_DUMP");
+        static const auto first = Clock::now();
+        static std::vector<int> times = [] {
+            std::vector<int> out;
+            for (const char* c = list; c && *c;) {
+                out.push_back(std::atoi(c));
+                c = std::strchr(c, ',');
+                if (c) c++;
+            }
+            return out;
+        }();
+        static size_t next = 0;
+        if (path && next < times.size() && Clock::now() - first >= std::chrono::seconds(times[next])) {
+            std::string name = std::string(path);
+            if (name.size() > 4) name = name.substr(0, name.size() - 4);
+            name += "_" + std::to_string(times[next]) + ".bmp";
+            if (FILE* f = std::fopen(name.c_str(), "wb")) {
+                uint32_t head[13] = {640u * 480u * 4u + 54u, 0, 54, 40, 640, uint32_t(-480), 1u | (32u << 16), 0, 640u * 480u * 4u, 2835, 2835, 0, 0};
+                std::fwrite("BM", 1, 2, f);
+                std::fwrite(head, 4, 13, f);
+                std::fwrite(g_client.present.data(), 1, g_client.present.size(), f);
+                std::fclose(f);
+            }
+            next++;
+        }
+    }
     w = 640;
     h = 480;
     return g_client.present.data();
