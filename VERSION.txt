@@ -1,1 +1,1 @@
-14 2026-11-25 Partner health bars; Player 1 has 30 percent more health than Player 2
+15 2026-11-25 Orange arrow above the partner; partner health bar below the insanity meter

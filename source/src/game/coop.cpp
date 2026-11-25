@@ -40,6 +40,7 @@ bool InCode(uint32_t va);  // cpu/dispatch.cpp
 }
 namespace game_view {
 void SetSplit(bool on);  // view.cpp
+float Aspect();          // width / height of the picture the frame is shown in
 }
 namespace game_net {  // net.cpp
 bool Host(bool on);
@@ -1076,7 +1077,49 @@ void Frame(X86Context& ctx) {
         float most1 = g_player ? ReadF(g_player + 0x1A) : 0;
         gpu::g_first_health = most1 > 0 ? std::clamp(ReadF(g_player + 0x16) / most1, 0.0f, 1.0f) : -1.0f;
         gpu::g_partner_whole = g_stream_view && !g_paused_now;
+        // The arrow above the partner's head (decided 2026-11-24: tiny, the game's orange, through walls, no name
+        // tags). Where the partner's head is in each player's view: the view camera's object gives the eye
+        // (matrix at +0x14: right, up, forward, place), its distance at +0x280 the angle (half the picture's width
+        // is 0.3125 at that distance, view.cpp), the view's shape the angle up and down. Behind the viewer, or
+        // out of the picture: no arrow. S2_ARROW_TEST=<metres up> moves it (1.95 above his feet unless named).
+        {
+            static const float up = std::getenv("S2_ARROW_TEST") ? float(std::atof(std::getenv("S2_ARROW_TEST"))) : 1.95f;
+            uint32_t view = kernel::R32(kViewPointer), cameras = view ? kernel::R32(view + kViewCameras) : 0;
+            uint32_t cams[2] = {cameras, ViewCamera2()};
+            uint32_t partner[2] = {g_second_object, g_player_object};
+            float shape = game_view::Aspect() * (g_stream_view ? 1.0f : 0.5f);
+            for (int v = 0; v < 2; v++) {
+                float x = -1, y = -1;
+                uint32_t eye = cams[v] && mem::IsCommitted(cams[v] + 0x284) ? kernel::R32(cams[v] + 0xA0) : 0;
+                float distance = eye ? ReadF(cams[v] + 0x280) : 0;
+                bool shown = !g_down_until;  // (Player 2 is out of sight while he is down, and sees nothing himself)
+                if (eye && mem::IsCommitted(eye + 0x60) && distance > 1e-4f && partner[v] && shown) {
+                    float m[16], d[3];
+                    std::memcpy(m, kernel::HostPtr(eye + kMatrix), 64);
+                    for (int i = 0; i < 3; i++) d[i] = ReadF(partner[v] + kPosition + i * 4) - m[12 + i];
+                    d[1] += up;
+                    float rx = d[0] * m[0] + d[1] * m[1] + d[2] * m[2], ry = d[0] * m[4] + d[1] * m[5] + d[2] * m[6];
+                    float rz = d[0] * m[8] + d[1] * m[9] + d[2] * m[10];
+                    // (a camera's object looks along its third row backwards: run arrow3, the partner straight ahead
+                    // came out at forward -9; its first row is its right all the same, run arrow4)
+                    rz = -rz;
+                    static const bool trace2 = std::getenv("S2_ARROW_TRACE") != nullptr;
+                    if (trace2 && g_frames % 120 == 0) LOGI("arrow: view %d to partner %.2f %.2f %.2f: right %.2f up %.2f forward %.2f", v, d[0], d[1], d[2], rx, ry, rz);
+                    float half_w = 0.3125f / distance, half_h = half_w / shape;
+                    if (rz > 0.3f) {
+                        float sx = 0.5f + rx / rz / (2 * half_w), sy = 0.5f - ry / rz / (2 * half_h);
+                        if (sx > 0.0f && sx < 1.0f && sy > 0.0f && sy < 1.0f) x = sx, y = sy;
+                    }
+                }
+                static const bool trace = std::getenv("S2_ARROW_TRACE") != nullptr;
+                if (trace && g_frames % 120 == 0)
+                    LOGI("arrow: view %d camera %08X eye %08X distance %.4f shape %.3f -> %.3f %.3f", v, cams[v], eye, distance, shape, x, y);
+                gpu::g_partner_arrow[v].x = x;
+                gpu::g_partner_arrow[v].y = y;
+            }
+        }
     } else {
+        gpu::g_partner_arrow[0].x = gpu::g_partner_arrow[1].x = -1.0f;
         gpu::g_second_health = -1.0f;
         gpu::g_first_health = -1.0f;
         gpu::g_partner_whole = false;

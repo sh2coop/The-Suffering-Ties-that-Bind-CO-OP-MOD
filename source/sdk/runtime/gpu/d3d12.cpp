@@ -3364,14 +3364,34 @@ void D3D12Backend::BlitFrame(Target& t, D3D12_CPU_DESCRIPTOR_HANDLE rh) {
         if (halves) {
             float down = g_flat2d.half_sy;
             bar(320.0f, 0.5f, down, 40.0f, 53.0f, h2, true);   // Player 2's own, in his half
-            bar(320.0f, 0.5f, down, 57.0f, 62.0f, h1, false);  // ... and his partner's under it
-            bar(0.0f, 0.5f, down, 57.0f, 62.0f, h2, true);     // Player 1's partner, under the title's bar
+            // (the title's insanity meter sits right under its health bar, to about row 68: the partner's bar is
+            // below that, so that it never covers the meter)
+            bar(320.0f, 0.5f, down, 74.0f, 79.0f, h1, false);  // ... and his partner's under it
+            bar(0.0f, 0.5f, down, 74.0f, 79.0f, h2, true);     // Player 1's partner, under the title's bar and meter
         } else if (whole) {
             // the 2D layer keeps its 4:3 shape in the middle of a wide picture (g_flat2d)
             float sx = g_flat2d.on ? g_flat2d.sx : 1.0f, sy = g_flat2d.on ? g_flat2d.sy : 1.0f;
             float from = 320.0f - 320.0f * sx;
             (void)sy;
-            bar(from, sx, 1.0f, 57.0f, 62.0f, h2, true);
+            bar(from, sx, 1.0f, 74.0f, 79.0f, h2, true);
+        }
+        // the arrows above the partners' heads: a small triangle pointing down, orange with a dark edge
+        for (int view = 0; view < 2; view++) {
+            float ax = g_partner_arrow[view].x.load(), ay = g_partner_arrow[view].y.load();
+            if (ax < 0 || !(halves || (whole && view == 0))) continue;
+            float left = halves ? vp.TopLeftX + vw * 0.5f * float(view) : vp.TopLeftX, width = halves ? vw * 0.5f : vw;
+            float cx = left + std::clamp(ax, 0.03f, 0.97f) * width, tip = vp.TopLeftY + std::clamp(ay, 0.06f, 0.97f) * vh;
+            float unit = std::max(1.0f, std::round(vh / 360.0f));  // one row of the triangle
+            constexpr int kRows = 6;
+            for (int pass = 0; pass < 2; pass++) {      // the dark edge, then the orange
+                float grow = pass ? 0.0f : unit;
+                for (int row = 0; row < kRows; row++) {  // the tip is the lowest row
+                    float half_width = unit * float(row + 1) + grow;
+                    float y1 = tip - unit * float(row) + (row == 0 ? grow : 0.0f), y0 = tip - unit * float(row + 1) - (row == kRows - 1 ? grow : 0.0f);
+                    if (pass) rect(cx - half_width, y0, cx + half_width, y1, 0.93f, 0.52f, 0.10f);
+                    else rect(cx - half_width, y0, cx + half_width, y1, 0.05f, 0.03f, 0.01f);
+                }
+            }
         }
     }
 }

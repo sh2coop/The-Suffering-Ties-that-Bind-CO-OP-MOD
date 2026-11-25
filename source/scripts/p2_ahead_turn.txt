@@ -1,0 +1,4 @@
+# Player 2 walks forward, right, and turns round
+16 LS 1.5
+17.6 LSR 1.0
+19 RSR 1.3

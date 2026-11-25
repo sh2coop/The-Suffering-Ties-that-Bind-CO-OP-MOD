@@ -131,5 +131,12 @@ inline std::atomic<float> g_second_health{-1.0f};
 // from another PC: his thin bar goes under the title's own bar of the whole frame.
 inline std::atomic<float> g_first_health{-1.0f};
 inline std::atomic<bool> g_partner_whole{false};
+// ... and a small arrow above the partner's head, in the title's orange, drawn over the finished frame so that it
+// shows through walls (no name tags). For each view (0: Player 1's, the left half or the whole frame; 1: Player
+// 2's, the right half) the point it hangs over, as a share of that view across and down; x below 0: none.
+struct PartnerArrow {
+    std::atomic<float> x{-1.0f}, y{-1.0f};
+};
+inline PartnerArrow g_partner_arrow[2];
 
 }  // namespace gpu

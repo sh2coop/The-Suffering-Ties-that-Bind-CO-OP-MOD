@@ -760,7 +760,7 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
         auto px = [&](float x) { return int((320.0f + (x - 320.0f) * sx) * kx); };
         auto py = [&](float y) { return int((240.0f + (y - 240.0f) * sy) * ky); };
         if (health >= 0) bar(px(37), py(40), px(150), py(53));
-        bar_of(px(37), py(57), px(150), py(62), partner, false);
+        bar_of(px(37), py(74), px(150), py(79), partner, false);
         int cx = int(ow) / 2, cy = int(oh) / 2;
         int arm = std::max(3, int(5.0f * ky)), gap = std::max(1, int(2.0f * ky)), thick = std::max(1, int(1.0f * ky + 0.5f));
         for (int pass = 0; pass < 2; pass++) {  // the dark edge, then the light cross
