@@ -1,1 +1,1 @@
-6 2026-11-25 update test from the main page
+7 2026-11-25 Hosting logs whether your router allows a direct connection; escort fix

@@ -415,6 +415,28 @@ void CloseToInternet() {
 }
 
 // ---- host -------------------------------------------------------------------------------------------------------
+// The game closed while hosting (the window's X, Alt+F4): the router's forward must not stay behind. StopHost takes
+// it away when hosting is switched off in the menu; this does the same when the program ends.
+struct UnmapAtExit {
+    ~UnmapAtExit() {
+        bool mapped;
+        {
+            std::lock_guard l(g_net.lock);
+            mapped = g_net.mapped;
+            g_net.mapped = false;
+        }
+        if (!mapped) return;
+#ifdef _WIN32
+        bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+#endif
+        UnmapPort(kGamePort);
+        LOGR("coop: internet: router forward of UDP 27025 removed (the game is closing)");
+#ifdef _WIN32
+        if (com) CoUninitialize();
+#endif
+    }
+} g_unmap_at_exit;
+
 struct HostState {
     Sock sock = kBad;
     std::atomic<bool> run{false};
@@ -440,12 +462,88 @@ bool ClientConnected() {
     return g_host.have_client && Clock::now() - g_host.last_input < std::chrono::milliseconds(kClientTimeout);
 }
 
+// ---- how this PC's game port looks from outside (STUN) -------------------------------------------------------------
+// For playing over the internet without forwarding a port, both routers have to let the two PCs' packets through
+// ("hole punching"): each PC sends to the other's public address and port at the same time. That needs the public
+// address AND port of the game's own socket, which only a server outside can tell: a STUN server answers a 20-byte
+// question (RFC 5389 binding request) with the address it saw the question come from. Two different servers are
+// asked from the game's socket: when both see the same port, the router gives this socket one port for everyone
+// and hole punching can work; when the ports differ, it gives a new port for every destination ("symmetric") and
+// only a forwarded port (or UPnP, or a virtual LAN) gets a visitor in. Asked again every 20 s, which also keeps
+// the router's entry alive. This is the groundwork (2026-11-25); the join code that uses it is not built yet.
+struct Stun {
+    std::mutex lock;
+    sockaddr_in server[2] = {};
+    bool resolved[2] = {false, false};
+    uint32_t ip[2] = {0, 0};    // network order
+    uint16_t port[2] = {0, 0};  // host order
+    std::string said;           // the last line logged (a change is logged again)
+} g_stun;
+constexpr struct {
+    const char* host;
+    const char* port;
+} kStunServers[2] = {{"stun.l.google.com", "19302"}, {"stun.cloudflare.com", "3478"}};
+
+void StunAsk(Sock s) {
+    for (int i = 0; i < 2; i++) {
+        sockaddr_in to{};
+        {
+            std::lock_guard l(g_stun.lock);
+            if (!g_stun.resolved[i]) {
+                addrinfo hints{}, *found = nullptr;
+                hints.ai_family = AF_INET;
+                hints.ai_socktype = SOCK_DGRAM;
+                if (getaddrinfo(kStunServers[i].host, kStunServers[i].port, &hints, &found) == 0 && found) {
+                    std::memcpy(&g_stun.server[i], found->ai_addr, sizeof(sockaddr_in));
+                    g_stun.resolved[i] = true;
+                }
+                if (found) freeaddrinfo(found);
+            }
+            if (!g_stun.resolved[i]) continue;
+            to = g_stun.server[i];
+        }
+        uint8_t ask[20] = {0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42, 'S', '2', uint8_t(i)};
+        for (int k = 11; k < 20; k++) ask[k] = uint8_t(std::rand());
+        sendto(s, reinterpret_cast<const char*>(ask), sizeof ask, 0, reinterpret_cast<sockaddr*>(&to), sizeof to);
+    }
+}
+
+// a STUN server's answer on the game's socket? (binding success, our own marks in the transaction id)
+bool StunAnswer(const uint8_t* b, int n) {
+    if (n < 20 || b[0] != 0x01 || b[1] != 0x01 || b[4] != 0x21 || b[5] != 0x12 || b[6] != 0xA4 || b[7] != 0x42 || b[8] != 'S' || b[9] != '2' || b[10] > 1)
+        return false;
+    int which = b[10];
+    for (int at = 20; at + 4 <= n;) {
+        int type = b[at] << 8 | b[at + 1], size = b[at + 2] << 8 | b[at + 3];
+        if (type == 0x0020 && size >= 8 && at + 12 <= n && b[at + 5] == 0x01) {  // XOR-MAPPED-ADDRESS, IPv4
+            uint16_t port = uint16_t((b[at + 6] << 8 | b[at + 7]) ^ 0x2112);
+            uint8_t ip[4] = {uint8_t(b[at + 8] ^ 0x21), uint8_t(b[at + 9] ^ 0x12), uint8_t(b[at + 10] ^ 0xA4), uint8_t(b[at + 11] ^ 0x42)};
+            std::lock_guard l(g_stun.lock);
+            std::memcpy(&g_stun.ip[which], ip, 4);
+            g_stun.port[which] = port;
+            if (g_stun.port[0] && g_stun.port[1]) {
+                bool same = g_stun.port[0] == g_stun.port[1] && g_stun.ip[0] == g_stun.ip[1];
+                // (the address itself is not written to the log: logs are sent around)
+                std::string line = same ? "the game's port is seen from outside as port " + std::to_string(g_stun.port[0]) +
+                                              " by both servers: one port for everyone (hole punching can work)"
+                                        : "the game's port is seen from outside as port " + std::to_string(g_stun.port[0]) + " by one server and " +
+                                              std::to_string(g_stun.port[1]) + " by the other: a new port for every destination (only a forwarded port lets a visitor in)";
+                if (line != g_stun.said) LOGR("coop: internet: %s", line.c_str()), g_stun.said = line;
+            }
+            return true;
+        }
+        at += 4 + ((size + 3) & ~3);
+    }
+    return true;
+}
+
 void HostListen() {
-    uint8_t buf[64];
+    uint8_t buf[512];
     while (g_host.run) {
         sockaddr_in from{};
         socklen_t len = sizeof from;
         int n = int(recvfrom(g_host.sock, reinterpret_cast<char*>(buf), sizeof buf, 0, reinterpret_cast<sockaddr*>(&from), &len));
+        if (StunAnswer(buf, n)) continue;
         bool now = ClientConnected();
         {
             std::lock_guard l(g_host.lock);
@@ -561,7 +659,8 @@ void HostBeacon() {
     uint16_t port = kGamePort;
     std::memcpy(pkt + 5, &port, 2);
     std::memcpy(pkt + 7, name.c_str(), std::min<size_t>(name.size(), 31));
-    while (g_host.run) {
+    for (int tick = 0; g_host.run; tick++) {
+        if (tick % 20 == 0) StunAsk(g_host.sock);  // (see Stun, above)
         for (uint32_t b : Broadcasts()) {
             sockaddr_in to{};
             to.sin_family = AF_INET;

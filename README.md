@@ -38,6 +38,10 @@ In the game: Options, then "Display and Co-op".
 - **Online**: one player picks "Host online", the other "Join online" and types the host's address. The host's PC runs
   the game and sends Player 2 his picture and sound. Over the internet the host has to forward UDP port 27025.
 
+When you host online, the game asks your router to open its port (UPnP), asks a public web service for your
+internet address so it can show it to you, and asks two public STUN servers (Google's and Cloudflare's) how your
+connection looks from outside. Nothing else is sent anywhere.
+
 Player 1 opens doors, uses things, picks up story items, triggers scenes and saves. Player 2 fights alongside, comes
 back beside Player 1 after scenes and level changes, and has a button (BACK) that brings him to Player 1.
 
