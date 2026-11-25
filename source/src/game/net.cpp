@@ -760,7 +760,7 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
         auto px = [&](float x) { return int((320.0f + (x - 320.0f) * sx) * kx); };
         auto py = [&](float y) { return int((240.0f + (y - 240.0f) * sy) * ky); };
         if (health >= 0) bar(px(37), py(40), px(150), py(53));
-        bar_of(px(37), py(74), px(150), py(79), partner, false);
+        bar_of(px(37), py(88), px(150), py(93), partner, false);
         {   // the arrow above his partner's head (gpu::g_partner_arrow[1]: where, as a share of his view), as the
             // runtime draws it on the host's own screen
             float ax = gpu::g_partner_arrow[1].x.load(), ay = gpu::g_partner_arrow[1].y.load();

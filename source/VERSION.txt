@@ -1,1 +1,1 @@
-18 2026-11-25 Player 2 cannot change Player 1's settings from the pause menu
+19 2026-11-25 The partner health bar is clear of the insanity meter

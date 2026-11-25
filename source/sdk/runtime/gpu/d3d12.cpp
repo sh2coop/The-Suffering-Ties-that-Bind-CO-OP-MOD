@@ -3365,16 +3365,16 @@ void D3D12Backend::BlitFrame(Target& t, D3D12_CPU_DESCRIPTOR_HANDLE rh) {
         if (halves) {
             float down = g_flat2d.half_sy;
             bar(320.0f, 0.5f, down, 40.0f, 53.0f, h2, true);   // Player 2's own, in his half
-            // (the title's insanity meter sits right under its health bar, to about row 68: the partner's bar is
+            // (the title's insanity meter sits right under its health bar, to about row 80 (its scratchy line is taller than the bar): the partner's bar is
             // below that, so that it never covers the meter)
-            bar(320.0f, 0.5f, down, 74.0f, 79.0f, h1, false);  // ... and his partner's under it
-            bar(0.0f, 0.5f, down, 74.0f, 79.0f, h2, true);     // Player 1's partner, under the title's bar and meter
+            bar(320.0f, 0.5f, down, 88.0f, 93.0f, h1, false);  // ... and his partner's under it
+            bar(0.0f, 0.5f, down, 88.0f, 93.0f, h2, true);     // Player 1's partner, under the title's bar and meter
         } else if (whole) {
             // the 2D layer keeps its 4:3 shape in the middle of a wide picture (g_flat2d)
             float sx = g_flat2d.on ? g_flat2d.sx : 1.0f, sy = g_flat2d.on ? g_flat2d.sy : 1.0f;
             float from = 320.0f - 320.0f * sx;
             (void)sy;
-            bar(from, sx, 1.0f, 74.0f, 79.0f, h2, true);
+            bar(from, sx, 1.0f, 88.0f, 93.0f, h2, true);
         }
         // (the arrows above the partners' heads are drawn smooth in the ImGui layer: the title's GameInfo::ui)
     }
