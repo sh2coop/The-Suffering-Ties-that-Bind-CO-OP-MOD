@@ -197,6 +197,7 @@ bool g_one_view = false;        // a scene: the picture is one view, Player 1's 
 // view is drawn over it. The host plays on a whole screen and the joiner gets a whole picture.
 bool g_stream_view = false;
 extern uint64_t g_down_until;
+extern bool g_paused_now;
 extern std::map<uint32_t, int> g_hurt_us;
 void Downs(X86Context& ctx);
 bool g_screen_pass = false;     // the engine is drawing Player 2's view camera
@@ -408,7 +409,11 @@ bool g_host_failed = false;  // hosting could not start (the port is taken): not
 // net.cpp asks and tells
 void RemotePlayer(bool connected) { LOGI("coop: the remote player %s", connected ? "is in" : "is gone"); }
 bool SplitActive() { return g_second_object && ViewCamera2() && !g_one_view && !g_stream_view; }
-bool StreamView() { return g_second_object && ViewCamera2() && !g_one_view && g_stream_view; }
+// While the game is paused the joined player is sent the finished frame, the host's whole screen with the pause
+// menu on it, and not his own view: until 2026-11-25 he was sent his view all the time and never saw a pause
+// menu (run pause_join), so he could neither see who had paused nor use the menu when the pause was his.
+bool g_paused_now = false;
+bool StreamView() { return g_second_object && ViewCamera2() && !g_one_view && g_stream_view && !g_paused_now; }
 constexpr uint32_t kPlayerMethods = 0x3381D0;
 constexpr uint32_t kObjectEnd = 0x1849B0;  // (this = engine object)
 
@@ -879,6 +884,7 @@ void TestCensus();
 void TestMeter(X86Context& ctx);
 void TestCall(X86Context& ctx);
 void TestBody();
+void TestSound(X86Context& ctx);
 void TestGoto(X86Context& ctx);
 
 // The game's own extra view camera (a security monitor's, or the one an effect looks through) has to be the second
@@ -971,6 +977,7 @@ void Frame(X86Context& ctx) {
     TestMeter(ctx);
     TestCall(ctx);
     TestBody();
+    TestSound(ctx);
     TestGoto(ctx);
     TestClasses(ctx);
     HitsSecond();
@@ -1020,6 +1027,10 @@ void Frame(X86Context& ctx) {
     {   // the pause menu came up or went: timer flag bit 0 is "the game's time is stopped"
         uint32_t timer = kernel::R32(0x384B78);
         bool paused = timer && (kernel::R32(timer + 0xA0) & 1) && g_second_object;
+        if (paused != g_paused_now) {
+            g_paused_now = paused;
+            if (g_stream_view) gpu::g_stream_snapshot = !paused && !g_one_view && ViewCamera2();
+        }
         int before = g_pauser.load();
         if (paused && !before) {
             bool second = std::chrono::steady_clock::now() - g_start2_at < std::chrono::milliseconds(700);
@@ -1282,7 +1293,7 @@ X86_EXTERN_FUNC(__imp__sub_001FB290);
 X86_FUNC(sub_001FB290) {
     if (game_coop::g_screen_pass && !kernel::R32(ctx.ecx + 0xE0)) {
         game_coop::g_screen_pass = false;
-        if (game_coop::g_stream_view && !game_coop::g_one_view) gpu::SnapshotForStream();  // (Player 1's view comes over it)
+        if (game_coop::g_stream_view && !game_coop::g_one_view && !game_coop::g_paused_now) gpu::SnapshotForStream();  // (Player 1's view comes over it)
         kernel::Return(ctx, 0, 0);
         return;
     }
@@ -1623,6 +1634,14 @@ bool RefuseTouch(uint32_t touched, uint32_t toucher) {
 
 X86_EXTERN_FUNC(__imp__sub_001941D0);
 X86_FUNC(sub_001941D0) {
+    {   // tests: S2_TOUCH_TRACE=1 logs where a touch between the two players comes from (three times)
+        static const bool trace = std::getenv("S2_TOUCH_TRACE") != nullptr;
+        static int said = 0;
+        uint32_t a = kernel::R32(ctx.esp + 8), b = kernel::R32(ctx.esp + 12);
+        bool both = game_coop::g_second_object && ((a == game_coop::g_player_object && b == game_coop::g_second_object) ||
+                                                  (b == game_coop::g_player_object && a == game_coop::g_second_object));
+        if (trace && both && said < 3) said++, LOGR("touch trace: the two players touch, called from %s", game_coop::CallersOf(ctx).c_str());
+    }
     if (game_coop::RefuseTouch(kernel::R32(ctx.esp + 8), kernel::R32(ctx.esp + 12))) {
         kernel::Return(ctx, 1, 3);
         return;
@@ -2231,6 +2250,32 @@ void TestBody() {
             for (uint32_t k = 0; k < 0x20; k += 4) n += std::snprintf(line + n, sizeof line - n, " %08X", kernel::R32(body + at + k));
             LOGR("%s", line);
         }
+    }
+}
+// The game's own "play this sound" (0x191070, this = the sound manager [0x384BBC]; the sound's resource, a place
+// (0x3932AC: none, heard everywhere), a kind, 0), as the Player's code calls it for the full insanity meter.
+void PlaySound(X86Context& ctx, uint32_t sound) {
+    uint32_t manager = kernel::R32(0x384BBC), ecx = ctx.ecx;
+    if (!manager || !sound) return;
+    ctx.ecx = manager;
+    kernel::CallGuest(ctx, 0x191070, {sound, 0x3932AC, 2, 0});
+    ctx.ecx = ecx;
+}
+// S2_TEST_SOUND=<frame>,<sound in hex>[,<frame>,<sound>...]: plays those sounds at those frames (finding a sound)
+void TestSound(X86Context& ctx) {
+    static const char* v = std::getenv("S2_TEST_SOUND");
+    if (!v) return;
+    for (const char* c = v; c && *c;) {
+        uint64_t frame = uint64_t(std::atoll(c));
+        const char* comma = std::strchr(c, ',');
+        if (!comma) break;
+        uint32_t sound = uint32_t(std::strtoul(comma + 1, nullptr, 16));
+        if (frame == g_frames) {
+            LOGR("test: sound %08X", sound);
+            PlaySound(ctx, sound);
+        }
+        c = std::strchr(comma + 1, ',');
+        if (c) c++;
     }
 }
 void TestCall(X86Context& ctx) {

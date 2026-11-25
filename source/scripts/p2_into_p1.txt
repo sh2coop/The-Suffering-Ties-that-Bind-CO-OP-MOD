@@ -1,0 +1,2 @@
+# Player 2 walks left into Player 1
+16 LSL 3
