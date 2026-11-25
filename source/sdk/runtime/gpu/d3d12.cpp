@@ -3327,27 +3327,51 @@ void D3D12Backend::BlitFrame(Target& t, D3D12_CPU_DESCRIPTOR_HANDLE rh) {
         }
         float dark[4] = {0, 0, 0, 1};
         if (bar.right > bar.left && bar.bottom > bar.top) cl_->ClearRenderTargetView(rh, dark, 1, &bar);
-        // [local change, The Suffering: Ties That Bind] the second player's health: the place and size of the
-        // title's own bar (layout 37 to 150 across, 40 to 53 down in a 640 x 480 frame put into the right half,
-        // see Flat2D::half), a dark frame, the part that is left in the title's red
-        float health = g_second_health.load();
-        if (health >= 0 && g_split_vertical.load()) {
-            constexpr float kLeft = 37.0f, kRight = 150.0f, kTop = 40.0f, kBottom = 53.0f;
-            float down = g_flat2d.half_sy, rows = 480.0f - 2 * kOverscan;
-            float x0 = vp.TopLeftX + (320.0f + kLeft * 0.5f) / 640.0f * vw, x1 = vp.TopLeftX + (320.0f + kRight * 0.5f) / 640.0f * vw;
-            float y0 = vp.TopLeftY + (kTop * down - kOverscan) / rows * vh, y1 = vp.TopLeftY + (kBottom * down - kOverscan) / rows * vh;
-            float edge = std::max(1.0f, std::round(vh / 540.0f));
-            auto rect = [&](float l, float t, float r, float b, float red, float green, float blue) {
-                D3D12_RECT q{LONG(std::lround(l)), LONG(std::lround(t)), LONG(std::lround(r)), LONG(std::lround(b))};
-                q.left = std::max<LONG>(q.left, 0), q.top = std::max<LONG>(q.top, 0);
-                q.right = std::min<LONG>(q.right, LONG(bb_w_)), q.bottom = std::min<LONG>(q.bottom, LONG(bb_h_));
-                float colour[4] = {red, green, blue, 1};
-                if (q.right > q.left && q.bottom > q.top) cl_->ClearRenderTargetView(rh, colour, 1, &q);
-            };
+    }
+    // [local change, The Suffering: Ties That Bind] Co-op health bars over the finished frame. A player's own bar is
+    // at the place and size of the title's (layout 37 to 150 across, 40 to 53 down in a 640 x 480 frame; in a split
+    // screen that frame is put into each half, see Flat2D::half). Player 1's own is the title's. Player 2's own, in
+    // his half, is drawn here, in blue. Under each player's own bar a thin one (57 to 62 down) is his partner's: blue
+    // for Player 2, the title's red for Player 1.
+    {
+        float h1 = g_first_health.load(), h2 = g_second_health.load();
+        bool halves = split > 0 && g_split_vertical.load(), whole = g_partner_whole.load() && !halves;
+        float edge = std::max(1.0f, std::round(vh / 540.0f));
+        auto rect = [&](float l, float t, float r, float b, float red, float green, float blue) {
+            D3D12_RECT q{LONG(std::lround(l)), LONG(std::lround(t)), LONG(std::lround(r)), LONG(std::lround(b))};
+            q.left = std::max<LONG>(q.left, 0), q.top = std::max<LONG>(q.top, 0);
+            q.right = std::min<LONG>(q.right, LONG(bb_w_)), q.bottom = std::min<LONG>(q.bottom, LONG(bb_h_));
+            float colour[4] = {red, green, blue, 1};
+            if (q.right > q.left && q.bottom > q.top) cl_->ClearRenderTargetView(rh, colour, 1, &q);
+        };
+        // a bar from layout x 37 to 150 and rows top to bottom; the layout's 640 columns start at `from` (of the
+        // frame's 640) and are `part` of a frame wide; `down` scales the rows
+        auto bar = [&](float from, float part, float down, float top, float bottom, float health, bool blue) {
+            if (health < 0) return;
+            float rows = 480.0f - 2 * kOverscan;
+            float x0 = vp.TopLeftX + (from + 37.0f * part) / 640.0f * vw, x1 = vp.TopLeftX + (from + 150.0f * part) / 640.0f * vw;
+            float y0 = vp.TopLeftY + (top * down - kOverscan) / rows * vh, y1 = vp.TopLeftY + (bottom * down - kOverscan) / rows * vh;
             float filled = x0 + (x1 - x0) * std::clamp(health, 0.0f, 1.0f);
             rect(x0 - edge, y0 - edge, x1 + edge, y1 + edge, 0.02f, 0.01f, 0.01f);
-            rect(x0, y0, x1, y1, 0.16f, 0.03f, 0.03f);
-            if (filled > x0) rect(x0, y0, filled, y1, 0.80f, 0.22f, 0.24f);
+            if (blue) {
+                rect(x0, y0, x1, y1, 0.03f, 0.06f, 0.16f);
+                if (filled > x0) rect(x0, y0, filled, y1, 0.24f, 0.45f, 0.86f);
+            } else {
+                rect(x0, y0, x1, y1, 0.16f, 0.03f, 0.03f);
+                if (filled > x0) rect(x0, y0, filled, y1, 0.80f, 0.22f, 0.24f);
+            }
+        };
+        if (halves) {
+            float down = g_flat2d.half_sy;
+            bar(320.0f, 0.5f, down, 40.0f, 53.0f, h2, true);   // Player 2's own, in his half
+            bar(320.0f, 0.5f, down, 57.0f, 62.0f, h1, false);  // ... and his partner's under it
+            bar(0.0f, 0.5f, down, 57.0f, 62.0f, h2, true);     // Player 1's partner, under the title's bar
+        } else if (whole) {
+            // the 2D layer keeps its 4:3 shape in the middle of a wide picture (g_flat2d)
+            float sx = g_flat2d.on ? g_flat2d.sx : 1.0f, sy = g_flat2d.on ? g_flat2d.sy : 1.0f;
+            float from = 320.0f - 320.0f * sx;
+            (void)sy;
+            bar(from, sx, 1.0f, 57.0f, 62.0f, h2, true);
         }
     }
 }

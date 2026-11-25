@@ -125,5 +125,11 @@ inline std::atomic<int> g_split_divider{0};
 // as a bar at the top left of the right view, where the left view has the title's own health bar (below 0: no
 // bar). The title sets it each frame it draws the two views; it is shown while the divider is.
 inline std::atomic<float> g_second_health{-1.0f};
+// ... and the partner's health for each player (decided 2026-11-24: each player sees his partner's health, marked as
+// the partner's; Player 2's bar is blue): a thin bar under the player's own. g_first_health is Player 1's, for the
+// thin bar in Player 2's view. g_partner_whole: one view fills the frame and it is Player 1's while Player 2 plays
+// from another PC: his thin bar goes under the title's own bar of the whole frame.
+inline std::atomic<float> g_first_health{-1.0f};
+inline std::atomic<bool> g_partner_whole{false};
 
 }  // namespace gpu

@@ -885,6 +885,7 @@ void TestMeter(X86Context& ctx);
 void TestCall(X86Context& ctx);
 void TestBody();
 void TestSound(X86Context& ctx);
+void TestSounds(X86Context& ctx);
 void TestGoto(X86Context& ctx);
 
 // The game's own extra view camera (a security monitor's, or the one an effect looks through) has to be the second
@@ -978,6 +979,7 @@ void Frame(X86Context& ctx) {
     TestCall(ctx);
     TestBody();
     TestSound(ctx);
+    TestSounds(ctx);
     TestGoto(ctx);
     TestClasses(ctx);
     HitsSecond();
@@ -1054,10 +1056,30 @@ void Frame(X86Context& ctx) {
         // ... and Player 2's health bar, drawn by the runtime where his half's HUD would have it (the game's HUD
         // keeps one set of values, Player 1's); online it is drawn into the picture sent (net.cpp). A Player's
         // health is the float at +0x16, of the most at +0x1A.
+        // Player 1 has 30% more health than Player 2 (decided 2026-11-25, with "Player 1's death always ends it"):
+        // Player 2's most is Player 1's divided by 1.3, so that nothing of Player 1's (his saves, his HUD, his
+        // pickups) changes and playing alone stays as it was. Kept so every frame: the game sets a Player's most
+        // itself at times.
+        if (g_second && g_player) {
+            float most1 = ReadF(g_player + 0x1A), most2 = ReadF(g_second + 0x1A), want = most1 / 1.3f;
+            if (most1 > 0 && std::fabs(most2 - want) > 0.5f) {
+                float health = ReadF(g_second + 0x16);
+                if (most2 > 0 && !g_down_until) health = std::min(want, health * want / most2);  // the same share of it
+                std::memcpy(kernel::HostPtr(g_second + 0x1A), &want, 4);
+                if (!g_down_until) std::memcpy(kernel::HostPtr(g_second + 0x16), &health, 4);
+                LOGI("coop: Player 2's most health is %.0f (Player 1's %.0f / 1.3)", want, most1);
+            }
+        }
         float most = g_second ? ReadF(g_second + 0x1A) : 0;
         gpu::g_second_health = most > 0 ? (g_down_until ? 0.0f : std::clamp(ReadF(g_second + 0x16) / most, 0.0f, 1.0f)) : -1.0f;
+        // ... and each player's partner's, thin, under his own (Player 2's blue): Player 1's health for Player 2's view
+        float most1 = g_player ? ReadF(g_player + 0x1A) : 0;
+        gpu::g_first_health = most1 > 0 ? std::clamp(ReadF(g_player + 0x16) / most1, 0.0f, 1.0f) : -1.0f;
+        gpu::g_partner_whole = g_stream_view && !g_paused_now;
     } else {
         gpu::g_second_health = -1.0f;
+        gpu::g_first_health = -1.0f;
+        gpu::g_partner_whole = false;
     }
     if (g_frames % 60 == 0 && g_second_object && g_player_object) {
         auto yaw = [](uint32_t object) { return std::atan2(ReadF(object + kMatrix + 0x20), ReadF(object + kMatrix + 0x28)) * 57.29578f; };
@@ -2276,6 +2298,41 @@ void TestSound(X86Context& ctx) {
         }
         c = std::strchr(comma + 1, ',');
         if (c) c++;
+    }
+}
+// S2_TEST_SOUNDS=<frame>[,<first property>]: from that frame on, every sound named in Player 1's own properties is
+// played, one every second and a half, each with a log line (its property and resource): a recording of the run
+// (run.ps1 -Audio) is then searched for a sound that is known only as a file. A property's value counts as a sound
+// when the sound manager knows it (0x1A26F0, this = manager; the resource).
+void TestSounds(X86Context& ctx) {
+    static const char* v = std::getenv("S2_TEST_SOUNDS");
+    if (!v || !g_player || !g_player_object) return;
+    static std::vector<std::pair<uint32_t, uint32_t>> list;  // property, resource
+    static size_t next = 0;
+    static std::chrono::steady_clock::time_point at;
+    if (g_frames == uint64_t(std::atoll(v))) {
+        uint32_t first = std::strchr(v, ',') ? uint32_t(std::atoi(std::strchr(v, ',') + 1)) : 0;
+        uint32_t props = kernel::R32(g_player_object + 0xEC), manager = kernel::R32(0x384BBC), ecx = ctx.ecx;
+        std::map<uint32_t, bool> seen;
+        for (uint32_t k = first; props && manager && k < 0x1C0; k++) {
+            ctx.ecx = props;
+            uint32_t where = kernel::CallGuest(ctx, kernel::R32(kernel::R32(props) + 8), {k, 0xFFFFFFFF});
+            if (!where || !mem::IsCommitted(where)) continue;
+            uint32_t value = kernel::R32(where);
+            if (value < 0x10000 || value == 0xFFFFFFFF || seen[value]) continue;
+            seen[value] = true;
+            ctx.ecx = manager;
+            if (kernel::CallGuest(ctx, 0x1A26F0, {value})) list.push_back({k, value});
+        }
+        ctx.ecx = ecx;
+        LOGR("test: %zu of Player 1's properties name a sound", list.size());
+        at = std::chrono::steady_clock::now();
+    }
+    if (next < list.size() && std::chrono::steady_clock::now() >= at) {
+        LOGR("test: sound %zu, property 0x%X, resource %08X", next, list[next].first, list[next].second);
+        PlaySound(ctx, list[next].second);
+        next++;
+        at = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
     }
 }
 void TestCall(X86Context& ctx) {

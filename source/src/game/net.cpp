@@ -736,12 +736,16 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
                 d[0] = red, d[1] = green, d[2] = blue;
             }
     };
-    auto bar = [&](int left, int top, int right, int bottom) {
-        int filled = left + int(float(right - left) * std::clamp(health, 0.0f, 1.0f));
+    // (Player 2's own bar is blue; under it, thin, his partner's in the title's red: see gpu::g_first_health)
+    auto bar_of = [&](int left, int top, int right, int bottom, float value, bool blue) {
+        if (value < 0) return;
+        int filled = left + int(float(right - left) * std::clamp(value, 0.0f, 1.0f));
         rect(left - 1, top - 1, right + 1, bottom + 1, 5, 3, 3);
-        rect(left, top, right, bottom, 41, 8, 8);
-        rect(left, top, filled, bottom, 204, 56, 61);
+        if (blue) rect(left, top, right, bottom, 8, 15, 41), rect(left, top, filled, bottom, 61, 115, 219);
+        else rect(left, top, right, bottom, 41, 8, 8), rect(left, top, filled, bottom, 204, 56, 61);
     };
+    auto bar = [&](int left, int top, int right, int bottom) { bar_of(left, top, right, bottom, health, true); };
+    float partner = gpu::g_first_health.load();
     if (half && health >= 0) {
         float fx = float(w) / 640.0f / float(step), fy = float(h) / 480.0f / float(step) * gpu::g_flat2d.half_sy;
         bar(int((320.0f + 37.0f * 0.5f) * fx) - int(x0 / step), int(40.0f * fy), int((320.0f + 150.0f * 0.5f) * fx) - int(x0 / step),
@@ -756,6 +760,7 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
         auto px = [&](float x) { return int((320.0f + (x - 320.0f) * sx) * kx); };
         auto py = [&](float y) { return int((240.0f + (y - 240.0f) * sy) * ky); };
         if (health >= 0) bar(px(37), py(40), px(150), py(53));
+        bar_of(px(37), py(57), px(150), py(62), partner, false);
         int cx = int(ow) / 2, cy = int(oh) / 2;
         int arm = std::max(3, int(5.0f * ky)), gap = std::max(1, int(2.0f * ky)), thick = std::max(1, int(1.0f * ky + 0.5f));
         for (int pass = 0; pass < 2; pass++) {  // the dark edge, then the light cross

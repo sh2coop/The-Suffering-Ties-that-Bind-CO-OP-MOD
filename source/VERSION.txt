@@ -1,1 +1,1 @@
-13 2026-11-25 Online: the joined player sees the pause menu
+14 2026-11-25 Partner health bars; Player 1 has 30 percent more health than Player 2
