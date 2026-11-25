@@ -1,5 +1,10 @@
 # The Suffering: Ties That Bind - PC port with co-op
 
+## [⬇ DOWNLOAD THE GAME (newest version)](https://github.com/sh2coop/The-Suffering-Ties-that-Bind-CO-OP-MOD/releases/latest/download/The-Suffering-2-PC.zip)
+
+That link is always the newest playable build. The green **Code** button on this page gives the source code only,
+not the game.
+
 An unofficial native PC port of the original Xbox version of *The Suffering: Ties That Bind*, with split-screen and
 online co-op for two players. It is made with the [Xbox XBE Recomp](https://github.com/TGP482/XboxXBE-Recomp) tool:
 the game's own code is translated for the PC, on your PC, from your own copy of the game.
@@ -11,7 +16,7 @@ This is a test build. Things will be rough in places.
 
 ## Playing
 
-1. Download `The-Suffering-2-PC.zip` from the [latest release](../../releases/latest) and unpack it anywhere.
+1. Download the game with the link at the top of this page and unpack it anywhere.
 2. Put your Xbox disc image (the `.iso` file) into the folder `drop xbox iso here`.
 3. Double-click `Build Recomp`. It builds the game for your PC, which takes a few minutes and happens once.
    When it says it is ready, press Enter.
