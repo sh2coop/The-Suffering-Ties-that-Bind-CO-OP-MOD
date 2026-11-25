@@ -1,1 +1,1 @@
-2 2026-11-25 update test: read-me line
+3 2026-11-25 Update program fixed: it could miss a new version
