@@ -43,6 +43,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
@@ -98,7 +99,7 @@ constexpr uint32_t kHidden = 2, kIdle = 4, kHighlighted = 5;
 // The rows. The page shows one section at a time (the first row chooses it: Display, or Co-op), so that it is
 // never crowded: a section has at most five rows under its heading, 20 apart. Player 2's own page (he opened it
 // from his pause menu) has his two rows and nothing else.
-enum Row { kSection, kResolution, kWindow, kShape, kRate, kVsync, kCoop, kOnline, kLook, kSpeed, kVolume, kRows };
+enum Row { kSection, kResolution, kWindow, kShape, kRate, kVsync, kHd, kCoop, kOnline, kLook, kSpeed, kVolume, kRows };
 int g_section = 0;  // 0 Display, 1 Co-op
 enum Coop { kOff, kSplit, kHost, kJoin, kCoops };
 
@@ -561,6 +562,19 @@ uint32_t& JoinVolume() { return game_net::HostHasPlayer() ? game_coop::g_remote_
 // Player 2 opened this page from his own pause menu: it is his settings page, and only his rows are on it
 bool SecondsPage() { return game_coop::Pauser() == 2; }
 
+// The HD textures Build Recomp makes (tools\launcher\hdtex.h): 0 none, 1 some (the making was stopped), 2 all.
+// Looked at when the page opens, not every frame.
+int g_hd_state = 0;
+int HdState() {
+    std::error_code ec;
+    std::filesystem::path dir = app::ExeDir() / "textures" / "hd";
+    if (std::filesystem::exists(dir / "made.txt", ec)) return 2;
+    std::filesystem::directory_iterator it(dir, ec);
+    for (; !ec && it != std::filesystem::directory_iterator(); it.increment(ec))
+        if (it->path().extension() == ".dds") return 1;
+    return 0;
+}
+
 std::string Value(int row) {
     const app::Settings& s = app::Get();
     char out[96];
@@ -575,6 +589,9 @@ std::string Value(int row) {
         case kShape: return kShapeNames[IndexOf(kShapes, game_view::g_shape_setting)];
         case kRate: return kRateNames[IndexOf(kRates, s.fps_cap)];
         case kVsync: return s.vsync ? "On" : "Off";
+        case kHd:
+            if (!g_hd_state) return "Not made yet";
+            return s.hd_textures ? (g_hd_state == 2 ? "On" : "On (partly made)") : "Off";
         case kCoop: return kCoopNames[CoopChoice()];
         case kSection: return g_section ? "Co-op" : "Display";
         case kLook: return LookInvert() ? "Up and down swapped" : "As the game has it";
@@ -589,7 +606,7 @@ std::string Value(int row) {
     return "";
 }
 
-constexpr const char* kLabels[kRows] = {"Settings", "Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "Co-op", "Online", "Player 2 look", "Player 2 look speed", "Player 2 volume"};
+constexpr const char* kLabels[kRows] = {"Settings", "Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "HD textures", "Co-op", "Online", "Player 2 look", "Player 2 look speed", "Player 2 volume"};
 
 // What is on the page now. Player 2's own page: his two rows. Otherwise the section's rows under the row that
 // chooses the section. Player 2's look rows are his alone: on Player 1's page they only show for a player who is
@@ -600,7 +617,7 @@ bool Visible(int row) {
     if (SecondsPage()) return row == kLook || row == kSpeed || (row == kVolume && game_net::HostHasPlayer());
     switch (row) {
         case kSection: return true;
-        case kResolution: case kWindow: case kShape: case kRate: case kVsync: return g_section == 0;
+        case kResolution: case kWindow: case kShape: case kRate: case kVsync: case kHd: return g_section == 0;
         case kCoop: return g_section == 1;
         case kOnline: return g_section == 1 && (CoopChoice() == kHost || CoopChoice() == kJoin);
         case kLook: case kSpeed: case kVolume: return g_section == 1 && CoopChoice() == kJoin;
@@ -665,6 +682,13 @@ std::string Help() {
     if (row == kSection)
         return g_section ? "Co-op: play with a friend on this PC or online. Left or right goes to the Display settings."
                          : "Display: resolution, window, picture shape and frame rate. Left or right goes to the Co-op settings.";
+    if (row == kHd) {
+        if (!g_hd_state)
+            return "Sharper textures, upscaled from your own game. To make them, close the game and double-click Build Recomp.";
+        if (g_hd_state == 1)
+            return "Some HD textures are made. Double-click Build Recomp with the game closed to make the rest.";
+        return "Textures upscaled 4x from your own game by Build Recomp. Off shows the game's own textures.";
+    }
     if (row == kLook)
         return "Player 2's own up and down. It only changes Player 2. Try both: one of them will feel right.";
     if (row == kSpeed) return "How fast Player 2 turns, as a share of the game's own look speed. It only changes Player 2.";
@@ -739,6 +763,10 @@ void Step(int row, int dir) {
         case kVsync:
             s.vsync = !s.vsync;
             app::ApplyDisplay();
+            break;
+        case kHd:  // the renderer sees the setting change and lists its texture pack again (texturedumper.cpp)
+            if (!g_hd_state) return;
+            s.hd_textures = !s.hd_textures;
             break;
         // Off; two players on this PC (the second Torque on controller 2, the two views side by side); or online,
         // as the host or as the one who joins. Split screen takes effect at once (coop.cpp: Player 2 comes in when
@@ -887,7 +915,7 @@ void Build(X86Context& ctx, uint32_t screen) {
     float caption_top = slider_y + kSliderDrawnTop - kCaptionGap - kGlyphHeight - kGlyphTop;
     float top = slider_y + kSliderDrawnBottom + kRowsGap - kGlyphTop;
     float step = kStep;
-    constexpr int kMostLines = 6;  // the section row and the five rows of the longer section
+    constexpr int kMostLines = 7;  // the section row and the six rows of the longer section (Display)
     float last_bottom = top + step * (kMostLines - 1) + kGlyphTop + kGlyphHeight;
     if (last_bottom > ReadF(prompt + kY)) {
         LOGW("menu: no room for the display rows (%.0f to %.0f)", top, ReadF(prompt + kY));
@@ -922,6 +950,7 @@ void Build(X86Context& ctx, uint32_t screen) {
     g_section = 0;
     g_page.screen = screen;
     g_page.slider = slider;
+    g_hd_state = HdState();
     g_page.words = words;
     // the title is one line: its box is made wide enough for the longer name (the same middle)
     constexpr float kTitleWider = 80.0f;

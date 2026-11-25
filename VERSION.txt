@@ -1,1 +1,1 @@
-31 2026-11-25 Player 2's tank top is black all over
+32 2026-11-25 HD textures: Build Recomp can upscale your game's textures 4x, On/Off in Display settings

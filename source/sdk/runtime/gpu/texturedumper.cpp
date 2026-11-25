@@ -56,6 +56,7 @@ struct Latched {
     bool replacing = false;
     bool dumping = false;
     uint32_t format = 0;
+    bool hd = false;  // [local change, The Suffering: Ties That Bind] textures\hd is part of the pack
     bool operator==(const Latched&) const = default;
 };
 
@@ -185,15 +186,22 @@ uint32_t VariantOf(const fs::path& rel) {
 
 void ListPack(const fs::path& dir) {
     g.files.clear();
-    std::error_code ec;
-    fs::recursive_directory_iterator it(dir, ec);
-    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        const fs::path& p = it->path();
-        bool image = _wcsicmp(p.extension().c_str(), L".dds") == 0 || _wcsicmp(p.extension().c_str(), L".png") == 0;
-        uint64_t key = image ? KeyInName(p.stem().wstring()) : 0;
-        if (key) g.files.emplace(VariantKey(key, VariantOf(p.lexically_relative(dir))), p);
+    // [local change, The Suffering: Ties That Bind] textures\hd (the HD textures Build Recomp makes on the player's PC)
+    // is listed after the pack, while the hd_textures setting is on: an image in the pack wins over an HD one
+    std::vector<fs::path> roots{dir};
+    if (g.set.hd) roots.push_back(dir.parent_path() / "hd");
+    size_t from_hd = 0;
+    for (size_t r = 0; r < roots.size(); r++) {
+        std::error_code ec;
+        fs::recursive_directory_iterator it(roots[r], ec);
+        for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            const fs::path& p = it->path();
+            bool image = _wcsicmp(p.extension().c_str(), L".dds") == 0 || _wcsicmp(p.extension().c_str(), L".png") == 0;
+            uint64_t key = image ? KeyInName(p.stem().wstring()) : 0;
+            if (key && g.files.emplace(VariantKey(key, r ? 0 : VariantOf(p.lexically_relative(roots[r]))), p).second && r) from_hd++;
+        }
     }
-    LOGR("texture pack: %zu images in %s", g.files.size(), Utf8(dir).c_str());
+    LOGR("texture pack: %zu images in %s (%zu of them HD)", g.files.size(), Utf8(dir).c_str(), from_hd);
 }
 
 // DDS files
@@ -501,9 +509,11 @@ Image Decode(const TextureDesc& d, const uint8_t* guest, const uint32_t* palette
 // the settings into g.set; false when none changed
 bool LatchSettings() {
     const app::Settings& s = app::Get();
-    Latched now{s.custom_textures, s.dump_textures, s.texture_dump_format};
+    Latched now{s.custom_textures, s.dump_textures, s.texture_dump_format, s.hd_textures};
     if (now == g.set) return false;
+    bool relist = now.hd != g.set.hd;
     g.set = now;
+    if (relist) g.changed = Clock::time_point{};  // HD on or off: the pack is listed again at once (UpdatePackFiles)
     fs::path root = app::ExeDir() / "textures";
     g.pack_dir = root / "replacement";
     if (now.dumping) {

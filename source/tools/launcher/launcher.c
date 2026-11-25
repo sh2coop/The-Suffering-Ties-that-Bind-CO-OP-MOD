@@ -19,6 +19,8 @@
 static wchar_t g_root[MAX_PATH * 2];
 static HWND g_window;
 static wchar_t g_line[400];
+static volatile LONG g_hd_stop;   // HD textures (hdtex.h): the window was closed, stop after the step
+static int g_hd_running;
 
 static void Path(wchar_t* out, size_t count, const wchar_t* rest) { _snwprintf(out, count, L"%ls\\%ls", g_root, rest); out[count - 1] = 0; }
 static int Exists(const wchar_t* path) { return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES; }
@@ -107,7 +109,14 @@ static LRESULT CALLBACK WindowProc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
         EndPaint(w, &ps);
         return 0;
     }
-    if (m == WM_CLOSE) return 0;  // a copy in progress is not left half done by a click
+    if (m == WM_CLOSE) {  // a copy in progress is not left half done by a click; HD textures stop after the step
+        if (g_hd_running && !g_hd_stop) {
+            g_hd_stop = 1;
+            wcscpy(g_line, L"Stopping after this step\n\nWhat is made is kept; the next \"Build Recomp\" continues.");
+            InvalidateRect(w, NULL, TRUE);
+        }
+        return 0;
+    }
     return DefWindowProcW(w, m, wp, lp);
 }
 static void ShowLine(const wchar_t* text) {
@@ -120,7 +129,7 @@ static void ShowLine(const wchar_t* text) {
         c.hIcon = LoadIconW(c.hInstance, MAKEINTRESOURCEW(1));
         RegisterClassW(&c);
         int w = 720, h = 220;
-        g_window = CreateWindowExW(0, c.lpszClassName, L"The Suffering 2", WS_OVERLAPPED | WS_CAPTION | WS_VISIBLE,
+        g_window = CreateWindowExW(0, c.lpszClassName, L"The Suffering 2", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
                                    (GetSystemMetrics(SM_CXSCREEN) - w) / 2, (GetSystemMetrics(SM_CYSCREEN) - h) / 2, w, h, NULL, NULL, c.hInstance, NULL);
     }
     wcsncpy(g_line, text, 399);
@@ -153,6 +162,20 @@ static int RunQuiet(wchar_t* command) {
 }
 
 #include "update.h"
+#include "hdtex.h"
+
+static const wchar_t kHdQuestion[] = L"Make HD textures too?\n\nEvery texture of your game image is upscaled 4x with Real-ESRGAN (an AI upscaler, fetched once from its GitHub page). It takes about 2 GB on this drive and runs on the graphics card: about 15 minutes on a fast one, an hour or more on an older one. You can stop it any time and continue later with \"Build Recomp\".\n\nIn the game they are switched on and off in Options, Display and Co-op, HD textures.";
+
+// -> 1 the set is whole
+static int OfferHd(void) {
+    if (HdDone()) return 1;
+    if (Tell(kHdQuestion, MB_ICONQUESTION | MB_YESNO) != IDYES) return 0;
+    int whole = MakeHdTextures();
+    if (g_window) { DestroyWindow(g_window); g_window = NULL; }
+    if (whole) Tell(L"The HD textures are made. They are On; Options, Display and Co-op, HD textures turns them off and on.", MB_ICONINFORMATION);
+    else if (g_hd_stop) Tell(L"Stopped. What was made is kept: double-click \"Build Recomp\" again to make the rest.", MB_ICONINFORMATION);
+    return whole;
+}
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR args, int show) {
     (void)inst; (void)prev; (void)show;
@@ -205,6 +228,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR args, int show) {
         Tell(L"The game has not been built yet.\n\n1. Put your Xbox disc image (the .iso file) into the folder \"drop xbox iso here\".\n2. Double-click \"Build Recomp\".\n\nThen start \"The Suffering 2\" again.", MB_ICONINFORMATION);
         return 0;
     }
+    if (build && placed && Exists(dll) && !HdDone()) {  // built before HD textures came (or stopped half way): only those
+        if (Tell(L"The game is already built.\n\nMake its HD textures now?", MB_ICONQUESTION | MB_YESNO) == IDYES) {
+            int whole = MakeHdTextures();
+            if (g_window) { DestroyWindow(g_window); g_window = NULL; }
+            if (whole) Tell(L"The HD textures are made. They are On; Options, Display and Co-op, HD textures turns them off and on.\n\nStart \"The Suffering 2\" to play.", MB_ICONINFORMATION);
+            else if (g_hd_stop) Tell(L"Stopped. What was made is kept: double-click \"Build Recomp\" again to make the rest.", MB_ICONINFORMATION);
+            return 0;
+        }
+    }
     if (build && placed && Exists(dll) &&
         Tell(L"The game is already built.\n\nStart \"The Suffering 2\" to play. Build it again anyway?", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) != IDYES)
         return 0;
@@ -243,7 +275,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR args, int show) {
             }
         }
     }
-    if (g_window) DestroyWindow(g_window);
+    if (build) OfferHd();  // before the game's code: the game starts right after that
+    if (g_window) { DestroyWindow(g_window); g_window = NULL; }
 
     // the port: its first start builds the game's code from the image (a progress window), then it is the game
     wchar_t command[MAX_PATH * 4];

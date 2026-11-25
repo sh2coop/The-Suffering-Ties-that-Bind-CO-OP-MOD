@@ -52,6 +52,7 @@ void Load() {
     s.aniso = t["anisotropic_filtering"].value_or(s.aniso);
     s.custom_textures = t["custom_textures"].value_or(s.custom_textures);
     s.dump_textures = t["dump_textures"].value_or(s.dump_textures);
+    s.hd_textures = t["hd_textures"].value_or(s.hd_textures);
     s.texture_dump_format = std::min(t["texture_dump_format"].value_or(s.texture_dump_format), 1u);
     s.join_ip = t["join_ip"].value_or(s.join_ip);
     for (const Option& o : kGame.options) {
@@ -74,6 +75,7 @@ toml::table Table() {
                   {"anisotropic_filtering", int64_t(s.aniso)},
                   {"custom_textures", s.custom_textures},
                   {"dump_textures", s.dump_textures},
+                  {"hd_textures", s.hd_textures},
                   {"texture_dump_format", int64_t(s.texture_dump_format)},
                   {"join_ip", s.join_ip}};
     for (const Option& o : kGame.options) {

@@ -22,7 +22,8 @@ param(
     [string]$Vars = "",     # extra environment variables for the game: "NAME=value;NAME2=value"
     [int]$Width = 1280,
     [int]$Height = 720,
-    [switch]$DumpTextures   # each texture the game uses, once, into textures/dumps beside the exe
+    [switch]$DumpTextures,  # each texture the game uses, once, into textures/dumps beside the exe
+    [switch]$HdOff          # hd_textures = false (the HD textures Build Recomp makes are not drawn)
 )
 $proj = Split-Path -Parent $PSScriptRoot
 $rel = Join-Path $proj "out\build\release"
@@ -54,7 +55,7 @@ $settings = Join-Path $rel "settings.toml"
 $kept = Join-Path $rel "settings.player.toml"
 if ((Test-Path $settings) -and -not (Test-Path $kept)) { Copy-Item $settings $kept -Force }
 $size = if ($Mode -eq "windowed") { @("width = $Width", "height = $Height") } else { @() }
-Set-Content $settings (@("display_mode = '$Mode'") + $size + @("vsync = $vs", "fps_cap = $FpsCap") + $(if ($DumpTextures) { @("dump_textures = true") } else { @() }))
+Set-Content $settings (@("display_mode = '$Mode'") + $size + @("vsync = $vs", "fps_cap = $FpsCap") + $(if ($DumpTextures) { @("dump_textures = true") } else { @() }) + $(if ($HdOff) { @("hd_textures = false") } else { @() }))
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public class S2Dpi { [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); }'
 [S2Dpi]::SetProcessDPIAware() | Out-Null
