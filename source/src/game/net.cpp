@@ -1178,7 +1178,9 @@ bool Join(int index) {
     }
     StopHost();
     StopClient();
-    g_client.sock = Bind(0, false);
+    // (tests: S2_COOP_PORT=<n> gives the joiner's socket a port known beforehand, so that a host started with
+    // S2_COOP_PEER can be told where he will come from)
+    g_client.sock = Bind(std::getenv("S2_COOP_PORT") ? uint16_t(std::atoi(std::getenv("S2_COOP_PORT"))) : uint16_t(0), false);
     if (g_client.sock == kBad) return false;
     g_client.host = {};
     g_client.host.sin_family = AF_INET;
@@ -1341,7 +1343,9 @@ void ClientPad(const input::Pad& p) {
         StopClient();
         return;
     }
-    if (now - last > std::chrono::milliseconds(kHostTimeout)) {
+    // (only once a picture has come: before the first one the wait is kConnectTimeout. Until 2026-11-25 this fired
+    // after 15 s without any picture, so a joiner gave up before the host could enter his code: run hairpin_join)
+    if (have && now - last > std::chrono::milliseconds(kHostTimeout)) {
         LOGR("coop: no picture from %s for %d s, leaving", g_client.name.c_str(), kHostTimeout / 1000);
         Note("The connection to the host was lost.");
         StopClient();
