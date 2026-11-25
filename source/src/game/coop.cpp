@@ -1138,7 +1138,7 @@ void Frame(X86Context& ctx) {
         // is 0.3125 at that distance, view.cpp), the view's shape the angle up and down. Behind the viewer, or
         // out of the picture: no arrow. S2_ARROW_TEST=<metres up> moves it (1.95 above his feet unless named).
         {
-            static const float up = std::getenv("S2_ARROW_TEST") ? float(std::atof(std::getenv("S2_ARROW_TEST"))) : 1.95f;
+            static const float up = std::getenv("S2_ARROW_TEST") ? float(std::atof(std::getenv("S2_ARROW_TEST"))) : 1.74f;
             uint32_t view = kernel::R32(kViewPointer), cameras = view ? kernel::R32(view + kViewCameras) : 0;
             uint32_t cams[2] = {cameras, ViewCamera2()};
             uint32_t partner[2] = {g_second_object, g_player_object};
@@ -1180,6 +1180,10 @@ void Frame(X86Context& ctx) {
                     float half_w = kx > 1e-3f ? 1.0f / kx : 0.3125f / distance, half_h = ky > 1e-3f ? 1.0f / ky : half_w / shape;
                     if (rz > 0.3f) {
                         float sx = 0.5f + rx / rz / (2 * half_w), sy = 0.5f - ry / rz / (2 * half_h);
+                        // (The point is the top of his head, 1.74 m above his object's place: measured in the joined
+                        // player's picture, where the old 1.95 put the arrow a hand's width too high at three metres.
+                        // The gap between head and arrow is a share of the picture, the same near and far.)
+                        sy -= 0.012f;
                         if (sx > 0.0f && sx < 1.0f && sy > 0.0f && sy < 1.0f) x = sx, y = sy;
                     }
                 }
