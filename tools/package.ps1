@@ -107,6 +107,7 @@ KEYBOARD
 UPDATES
 
   Double-click "Update". It fetches the newest version when there is one.
+  The version you have is in VERSION.txt.
 
 SOMETHING WENT WRONG?
 
