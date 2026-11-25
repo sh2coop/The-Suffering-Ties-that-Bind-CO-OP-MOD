@@ -1,1 +1,1 @@
-22 2026-11-25 Player 2 has his own look settings
+23 2026-11-25 Each player's own settings; the settings page in two sections

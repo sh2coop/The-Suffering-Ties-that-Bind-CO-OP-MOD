@@ -39,6 +39,7 @@ namespace game_coop {
 void Controller2(input::Pad& p);  // coop.cpp
 bool SecondStart();               // Player 2 is pressing START: the pause is both players'
 void SecondLook(input::Pad& p);   // Player 2's own look settings, on his right stick
+void RemoteLook(input::Pad& p);   // ... a joined player's, applied on the host
 bool PausedBySecond();            // the pause menu is up and Player 2 opened it: it is his to use
 input::Pad SecondRaw();
 }
@@ -219,7 +220,8 @@ void Hook(int port, input::Pad& p) {
             for (const Press& s : script2)
                 if (t >= s.at && t < s.at + s.len) Apply(s.buttons, p);
         }
-        if (!game_net::RemotePad(p)) game_coop::SecondLook(p);  // (a remote player's are applied on his own PC)
+        if (game_net::RemotePad(p)) game_coop::RemoteLook(p);
+        else game_coop::SecondLook(p);
         game_coop::Controller2(p);  // co-op takes Player 2's teleport hold, START and BACK for itself
         return;
     }
@@ -241,7 +243,7 @@ void Hook(int port, input::Pad& p) {
         bool connected = p.connected;
         p = game_coop::SecondRaw();
         p.connected = connected;
-        if (game_menu::PauseItemP1Only()) p.analog[0] = 0;  // Save, Load and Quit are Player 1's: A does nothing there
+        if (game_menu::PauseItemP1Only()) p.analog[0] = 0;  // an item that is Player 1's is in focus: A does nothing there
     } else if (game_coop::SecondStart()) {
         p.buttons |= 16;  // Player 2's START pauses for both
     }

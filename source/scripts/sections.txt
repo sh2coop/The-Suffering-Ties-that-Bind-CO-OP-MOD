@@ -1,0 +1,14 @@
+# pause, Options, Display and Co-op; the Display section; down to the section row, right: the Co-op section; down to Co-op, left (Join online)
+20 START
+21.5 DOWN
+22.3 DOWN
+23.1 DOWN
+23.9 DOWN
+25 A
+28 DOWN
+29.5 DOWN
+31 A
+34 DOWN
+36 RIGHT
+38 DOWN
+39.5 LEFT

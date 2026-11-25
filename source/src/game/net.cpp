@@ -83,7 +83,9 @@ namespace game_coop {
 void RemotePlayer(bool connected);  // the host's remote player came or went
 bool SplitActive();                 // player two is in and the screen is split
 bool StreamView();                  // player two is in and the frames handed over are his view, whole
-void SecondLook(input::Pad& p);     // Player 2's own look settings, on his right stick
+extern uint32_t g_p2_invert, g_p2_speed;  // this PC's Player 2 look settings
+void RemoteLookFrom(uint32_t invert, uint32_t speed);  // a joined player's, as his PC sends them
+void RemoteLookForget();
 }
 
 namespace game_net {
@@ -586,6 +588,7 @@ void HostListen() {
         std::memcpy(&p.ly, buf + 21, 2);
         std::memcpy(&p.rx, buf + 23, 2);
         std::memcpy(&p.ry, buf + 25, 2);
+        if (n >= 29) game_coop::RemoteLookFrom(buf[27], buf[28]);  // (an older copy sends 27 bytes: as the game has it)
         std::lock_guard l(g_host.lock);
         bool same = g_host.have_client && from.sin_addr.s_addr == g_host.client.sin_addr.s_addr &&
                     from.sin_port == g_host.client.sin_port;
@@ -604,6 +607,8 @@ void HostListen() {
         if (!g_host.connected) {
             g_host.connected = true;
             LOGR("coop: remote player joined from %s:%u", IpText(from.sin_addr.s_addr).c_str(), unsigned(ntohs(from.sin_port)));
+            game_coop::RemoteLookForget();
+            if (n >= 29) game_coop::RemoteLookFrom(buf[27], buf[28]);
             game_coop::RemotePlayer(true);
         }
     }
@@ -949,6 +954,16 @@ void ClientRecv() {
         if (n > 0 && ++packets == 1) LOGI("coop: first packet from the host (%d bytes, type %d)", n, n > 4 ? buf[4] : -1);
         if (StunAnswer(buf.data(), n)) continue;                                        // (how the joiner looks from outside)
         if (n >= 5 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 6) continue;  // (the host's hole-punching hello)
+        if (n >= 7 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 7) {          // my look settings, changed in the host's menu
+            uint32_t invert = buf[5] ? 1 : 0, speed = std::clamp<uint32_t>(buf[6], 40, 100);
+            if (invert != game_coop::g_p2_invert || speed != game_coop::g_p2_speed) {
+                game_coop::g_p2_invert = invert;
+                game_coop::g_p2_speed = speed;
+                app::Save();
+                LOGR("coop: my look settings were changed in the host's menu and are saved here (%s, %u%%)", invert ? "swapped" : "as the game has it", speed);
+            }
+            continue;
+        }
         if (n >= 11 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 4) {
             SoundIn(buf.data(), n);
             continue;
@@ -1341,6 +1356,15 @@ bool JoinAddress(const std::string& typed) {
     return Join(index);
 }
 
+// The joined player changed his look settings in the host's pause menu: they are his, so they go back to his PC
+// (packet type 7: up and down swapped, speed in per cent), which keeps them in its own settings file.
+void SendLook(uint32_t invert, uint32_t speed) {
+    if (!g_host.run) return;
+    uint8_t pkt[7] = {'S', '2', 'C', '1', 7, uint8_t(invert ? 1 : 0), uint8_t(std::clamp<uint32_t>(speed, 40, 100))};
+    for (int i = 0; i < 3; i++) HostSend(pkt, sizeof pkt);  // (UDP: three times, one will arrive)
+    LOGR("coop: the joined player's look settings go back to his PC (%s, %u%%)", invert ? "swapped" : "as the game has it", speed);
+}
+
 // The host expects a visitor from this outside address ("203.0.113.7:51234"): for half a minute his router is
 // shown packets going there, so that the visitor's packets are let in. Tests: S2_COOP_PEER=<address:port>.
 bool HostExpect(const std::string& address) {
@@ -1425,7 +1449,7 @@ void ClientPad(const input::Pad& p) {
         StopClient();
         return;
     }
-    uint8_t pkt[27];
+    uint8_t pkt[29];
     std::memcpy(pkt, "S2C1", 4);
     pkt[4] = 1;
     uint32_t seq = ++g_client.seq;
@@ -1438,12 +1462,14 @@ void ClientPad(const input::Pad& p) {
     std::memcpy(pkt + 5, &seq, 4);
     std::memcpy(pkt + 9, &p.buttons, 2);
     std::memcpy(pkt + 11, analog, 8);
-    input::Pad mine = p;
-    game_coop::SecondLook(mine);  // this player's own look settings (he is Player 2 in the host's game)
+    // this player's own look settings go with his controller (bytes 27 and 28: up and down swapped, speed in per
+    // cent) and the host applies them: he is Player 2 in the host's game, and can change them in its pause menu
     std::memcpy(pkt + 19, &p.lx, 2);
     std::memcpy(pkt + 21, &p.ly, 2);
-    std::memcpy(pkt + 23, &mine.rx, 2);
-    std::memcpy(pkt + 25, &mine.ry, 2);
+    std::memcpy(pkt + 23, &p.rx, 2);
+    std::memcpy(pkt + 25, &p.ry, 2);
+    pkt[27] = uint8_t(game_coop::g_p2_invert ? 1 : 0);
+    pkt[28] = uint8_t(std::clamp<uint32_t>(game_coop::g_p2_speed, 40, 100));
     sendto(g_client.sock, reinterpret_cast<const char*>(pkt), sizeof pkt, 0, reinterpret_cast<sockaddr*>(&g_client.host),
            sizeof g_client.host);
 }

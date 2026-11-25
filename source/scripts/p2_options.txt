@@ -1,0 +1,10 @@
+# Player 2 pauses, Options, his settings page, look swapped, speed one step down
+16 START 0.2
+18 DOWN
+19.5 A 0.2
+22 DOWN
+23 DOWN
+24.5 A 0.2
+28 RIGHT
+29.5 DOWN
+31 LEFT

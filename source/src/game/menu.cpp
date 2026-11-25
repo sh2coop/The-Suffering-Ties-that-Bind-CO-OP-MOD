@@ -61,6 +61,9 @@ extern uint32_t g_mode_setting;   // 0 off, 1 split screen (kept in the settings
 extern bool g_host_setting;       // host online: a choice for this run
 extern bool g_host_failed;        // hosting could not start (the port is taken)
 extern uint32_t g_p2_invert, g_p2_speed;  // Player 2's own look: the other way up, and his speed in per cent
+extern uint32_t g_remote_invert, g_remote_speed;  // ... a joined player's, for this session (coop.cpp)
+extern bool g_remote_edited;
+int Pauser();  // 0 not paused, 1 or 2: whose pause menu is up
 std::string CallersOf(X86Context& ctx);  // (traces)
 }
 namespace game_net {  // net.cpp
@@ -72,6 +75,7 @@ bool JoinAddress(const std::string& typed);
 void Leave();
 std::string PublicAddress();
 std::string LocalAddress();
+void SendLook(uint32_t invert, uint32_t speed);  // the host: the joined player changed his look settings in the pause menu
 std::string OutsideAddress();  // this PC's code: its game port as seen from outside, "a.b.c.d:port" ("" not known yet)
 int OutsideKind();             // 0 not known, 1 a code works with this router, 2 it does not (a port per destination)
 bool HostExpect(const std::string& address);  // the host: a visitor will come from this code
@@ -90,7 +94,11 @@ constexpr uint32_t kSetState = 0x38;
 constexpr uint32_t kUp = 0x40A, kDown = 0x40B, kLeft = 0x40C, kRight = 0x40D, kAccept = 0x41A, kBack = 0x421;
 constexpr uint32_t kHidden = 2, kIdle = 4, kHighlighted = 5;
 
-enum Row { kResolution, kWindow, kShape, kRate, kVsync, kCoop, kOnline, kLook, kSpeed, kRows };
+// The rows. The page shows one section at a time (the first row chooses it: Display, or Co-op), so that it is
+// never crowded: a section has at most five rows under its heading, 20 apart. Player 2's own page (he opened it
+// from his pause menu) has his two rows and nothing else.
+enum Row { kSection, kResolution, kWindow, kShape, kRate, kVsync, kCoop, kOnline, kLook, kSpeed, kRows };
+int g_section = 0;  // 0 Display, 1 Co-op
 enum Coop { kOff, kSplit, kHost, kJoin, kCoops };
 
 struct Page {
@@ -101,6 +109,10 @@ struct Page {
     std::vector<uint16_t> words_own;  // or its characters when it has no id
     uint32_t rows[kRows] = {};
     std::string shown[kRows];  // what each row says now
+    float slot_top = 0, slot_step = 0, margin = 0;  // where the visible rows go, one after another
+    float row_y[kRows] = {};
+    uint32_t title = 0;
+    bool seconds = false;      // laid out as Player 2's own page
     std::string help;          // what the instructions say now (empty: the game's own text)
     int focus = 0;  // 0 the slider, 1.. the rows
 };
@@ -540,6 +552,13 @@ void Keys(bool entry) {
 
 // ---- what the rows say -----------------------------------------------------------------------------------------
 
+// Player 2's look settings the page shows and changes: a joined player's (kept by the host for the session) while
+// one is in, else this PC's own (split screen's Player 2, or this player when he joins someone)
+uint32_t& LookInvert() { return game_net::HostHasPlayer() ? game_coop::g_remote_invert : game_coop::g_p2_invert; }
+uint32_t& LookSpeed() { return game_net::HostHasPlayer() ? game_coop::g_remote_speed : game_coop::g_p2_speed; }
+// Player 2 opened this page from his own pause menu: it is his settings page, and only his rows are on it
+bool SecondsPage() { return game_coop::Pauser() == 2; }
+
 std::string Value(int row) {
     const app::Settings& s = app::Get();
     char out[96];
@@ -555,20 +574,31 @@ std::string Value(int row) {
         case kRate: return kRateNames[IndexOf(kRates, s.fps_cap)];
         case kVsync: return s.vsync ? "On" : "Off";
         case kCoop: return kCoopNames[CoopChoice()];
-        case kLook: return game_coop::g_p2_invert ? "Up and down swapped" : "As the game has it";
+        case kSection: return g_section ? "Co-op" : "Display";
+        case kLook: return LookInvert() ? "Up and down swapped" : "As the game has it";
         case kSpeed:
-            std::snprintf(out, sizeof out, "%u%%", std::clamp<uint32_t>(game_coop::g_p2_speed, 40, 100));
+            std::snprintf(out, sizeof out, "%u%%", std::clamp<uint32_t>(LookSpeed(), 40, 100));
             return out;
     }
     return "";
 }
 
-constexpr const char* kLabels[kRows] = {"Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "Co-op", "Online", "Player 2 look", "Player 2 look speed"};
+constexpr const char* kLabels[kRows] = {"Settings", "Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "Co-op", "Online", "Player 2 look", "Player 2 look speed"};
 
-// Player 2's own look rows: where his controller is on this PC (split screen), or this player is Player 2 (joining)
+// What is on the page now. Player 2's own page: his two rows. Otherwise the section's rows under the row that
+// chooses the section. Player 2's look rows are his alone: on Player 1's page they only show for a player who is
+// about to join someone (he is Player 2 there, and these are his own PC's settings).
+void MoveFocusTo(int focus);
 bool Visible(int row) {
-    if (row == kLook || row == kSpeed) return CoopChoice() == kSplit || CoopChoice() == kJoin;
-    return row != kOnline || CoopChoice() == kHost || CoopChoice() == kJoin;
+    if (SecondsPage()) return row == kLook || row == kSpeed;
+    switch (row) {
+        case kSection: return true;
+        case kResolution: case kWindow: case kShape: case kRate: case kVsync: return g_section == 0;
+        case kCoop: return g_section == 1;
+        case kOnline: return g_section == 1 && (CoopChoice() == kHost || CoopChoice() == kJoin);
+        case kLook: case kSpeed: return g_section == 1 && CoopChoice() == kJoin;
+    }
+    return false;
 }
 bool Focusable(int row) { return row != kOnline || CoopChoice() == kJoin || CoopChoice() == kHost; }
 
@@ -609,8 +639,9 @@ std::string RowText(int row, bool focused) {
     if (row == kOnline) return OnlineText(focused);
     std::string v = Value(row);
     std::string label = kLabels[row];
-    if (CoopChoice() == kJoin && row == kLook) label = "My look";  // (the one who joins is Player 2)
-    if (CoopChoice() == kJoin && row == kSpeed) label = "My look speed";
+    if (!SecondsPage() && row == kLook) label = "My look";  // (the one who joins is Player 2: his own PC's settings)
+    if (!SecondsPage() && row == kSpeed) label = "My look speed";
+    if (row == kSection) return focused ? "<  " + v + " settings  >" : v + " settings";
     return label + (focused ? ":  < " : ":  ") + v + (focused ? " >" : "");
 }
 
@@ -618,6 +649,11 @@ std::string RowText(int row, bool focused) {
 // The box holds five lines of about thirty characters.
 std::string Help() {
     int row = g_page.focus - 1;
+    if (SecondsPage() && row != kLook && row != kSpeed)
+        return "Player 2's own settings. Go down to change how you look around. Nothing here changes Player 1.";
+    if (row == kSection)
+        return g_section ? "Co-op: play with a friend on this PC or online. Left or right goes to the Display settings."
+                         : "Display: resolution, window, picture shape and frame rate. Left or right goes to the Co-op settings.";
     if (row == kLook)
         return "Player 2's own up and down. It only changes Player 2. Try both: one of them will feel right.";
     if (row == kSpeed) return "How fast Player 2 turns, as a share of the game's own look speed. It only changes Player 2.";
@@ -697,10 +733,15 @@ void Step(int row, int dir) {
         // as the host or as the one who joins. Split screen takes effect at once (coop.cpp: Player 2 comes in when
         // a level is in play, and is taken out when it is switched off).
         case kCoop: SetCoop(wrap(CoopChoice(), kCoops)); break;
-        case kLook: game_coop::g_p2_invert = game_coop::g_p2_invert ? 0 : 1; break;
+        case kSection: g_section = g_section ? 0 : 1; break;
+        case kLook:
+            LookInvert() = LookInvert() ? 0 : 1;
+            if (game_net::HostHasPlayer()) game_coop::g_remote_edited = true, game_net::SendLook(LookInvert(), LookSpeed());
+            break;
         case kSpeed: {
-            int percent = int(std::clamp<uint32_t>(game_coop::g_p2_speed, 40, 100)) + dir * 10;
-            game_coop::g_p2_speed = uint32_t(percent > 100 ? 40 : percent < 40 ? 100 : percent);
+            int percent = int(std::clamp<uint32_t>(LookSpeed(), 40, 100)) + dir * 10;
+            LookSpeed() = uint32_t(percent > 100 ? 40 : percent < 40 ? 100 : percent);
+            if (game_net::HostHasPlayer()) game_coop::g_remote_edited = true, game_net::SendLook(LookInvert(), LookSpeed());
             break;
         }
     }
@@ -712,15 +753,28 @@ void Step(int row, int dir) {
 
 // The widgets follow the state: focus, what each row says, and what the instructions say. Called on every input
 // and once a frame (the online rows change by themselves); nothing is touched that already says the right thing.
+void MoveFocusTo(int focus) { g_page.focus = focus; }
 void Refresh(X86Context& ctx) {
     if (!g_page.screen) return;
     auto state = [&](uint32_t widget, uint32_t want) {
         if (widget && kernel::R32(widget + kState) != want) Method(ctx, widget, kSetState, {want});
     };
-    state(g_page.caption, g_page.focus == 0 ? kHighlighted : kIdle);
+    bool seconds = SecondsPage();
+    if (seconds != g_page.seconds) {  // (the page is built once and can be either: who opened it decides)
+        g_page.seconds = seconds;
+        if (g_page.title) SetText(ctx, g_page.title, seconds ? "PLAYER 2 SETTINGS" : "DISPLAY AND CO-OP");
+        if (seconds && g_page.focus == 0) MoveFocusTo(kLook + 1);
+        if (g_page.slider) Method(ctx, g_page.slider, kSetState, {seconds ? kHidden : kIdle});  // (no brightness on his page)
+    }
+    state(g_page.caption, seconds ? kHidden : g_page.focus == 0 ? kHighlighted : kIdle);
+    int slot = 0;
     for (int r = 0; r < kRows; r++) {
         if (!g_page.rows[r]) continue;
         bool focused = g_page.focus == r + 1, visible = Visible(r);
+        if (visible) {  // the next free line (Player 2's page starts higher: there is no slider on it)
+            float y = (seconds ? g_page.slot_top - 36.0f : g_page.slot_top) + g_page.slot_step * float(slot++) - g_page.margin;
+            if (std::fabs(y - g_page.row_y[r]) > 0.01f) WriteF(g_page.rows[r] + kY, y), g_page.row_y[r] = y;
+        }
         state(g_page.rows[r], !visible ? kHidden : focused ? kHighlighted : kIdle);
         std::string text = visible ? RowText(r, focused) : std::string();
         if (text != g_page.shown[r]) {
@@ -746,8 +800,10 @@ void Refresh(X86Context& ctx) {
 
 void MoveFocus(int dir) {
     int f = g_page.focus;
-    do f = (f + dir + kRows + 1) % (kRows + 1);
-    while (f != 0 && !(Visible(f - 1) && Focusable(f - 1)));
+    for (int tries = 0; tries <= kRows + 1; tries++) {
+        f = (f + dir + kRows + 1) % (kRows + 1);
+        if (f == 0 ? !SecondsPage() : (Visible(f - 1) && Focusable(f - 1))) break;  // (0 is the brightness: not on Player 2's page)
+    }
     g_page.focus = f;
 }
 
@@ -803,7 +859,7 @@ void Build(X86Context& ctx, uint32_t screen) {
     constexpr float kWordsUp = 80.0f;         // the instructions move up by this much
     constexpr float kSliderUp = 69.0f;        // and the slider by this much
     constexpr float kSliderDrawnTop = 6.2f, kSliderDrawnBottom = 27.4f;  // where its picture lies in its box
-    constexpr float kCaptionGap = 7.0f, kRowsGap = 14.0f, kStep = 16.0f;  // (nine rows since Player 2's look; seven were 20 apart)
+    constexpr float kCaptionGap = 7.0f, kRowsGap = 18.0f, kStep = 20.0f;  // (at most six lines show at a time: a section)
     if (margin_top < 0 || margin_top > 100 || margin_bottom < 0 || margin_bottom > 100) {
         LOGW("menu: unexpected text margins %.1f %.1f, no display rows", margin_top, margin_bottom);
         return;
@@ -814,7 +870,8 @@ void Build(X86Context& ctx, uint32_t screen) {
     float caption_top = slider_y + kSliderDrawnTop - kCaptionGap - kGlyphHeight - kGlyphTop;
     float top = slider_y + kSliderDrawnBottom + kRowsGap - kGlyphTop;
     float step = kStep;
-    float last_bottom = top + step * (kRows - 1) + kGlyphTop + kGlyphHeight;
+    constexpr int kMostLines = 6;  // the section row and the five rows of the longer section
+    float last_bottom = top + step * (kMostLines - 1) + kGlyphTop + kGlyphHeight;
     if (last_bottom > ReadF(prompt + kY)) {
         LOGW("menu: no room for the display rows (%.0f to %.0f)", top, ReadF(prompt + kY));
         return;
@@ -838,9 +895,14 @@ void Build(X86Context& ctx, uint32_t screen) {
     g_page.caption = line(caption_top);
     if (g_page.caption) SetText(ctx, g_page.caption, "Brightness");
     for (int r = 0; r < kRows; r++) {
-        g_page.rows[r] = line(top + step * float(r));
+        g_page.rows[r] = line(top);  // (Refresh gives each visible row its line)
+        g_page.row_y[r] = top - margin_top;
         if (!g_page.rows[r]) return;
     }
+    g_page.slot_top = top, g_page.slot_step = step, g_page.margin = margin_top;
+    g_page.title = title;
+    g_page.seconds = false;
+    g_section = 0;
     g_page.screen = screen;
     g_page.slider = slider;
     g_page.words = words;
@@ -878,7 +940,34 @@ bool PauseItemP1Only() { return g_p1_item.load(); }
 // one of the screen's own text widgets (the newest screen of the menu manager [0x391D64]; screens at +0x50, count
 // +0x58; a screen's widgets the same way; a text widget's words at +0x68, their count with the end at +0x6C), so
 // the game draws it, in its font, on its strip of paper, once for both players. pauser 0: not paused.
+// tests: S2_MENU_TRACE=1 logs the words of the newest screen's widgets whenever another screen comes to the top
+void TraceTop() {
+    static const bool trace = std::getenv("S2_MENU_TRACE") != nullptr;
+    static uint32_t before = 0;
+    if (!trace) return;
+    uint32_t manager = kernel::R32(0x391D64);
+    uint32_t screens = manager ? kernel::R32(manager + kChildren) : 0, count = manager ? kernel::R32(manager + kCount) : 0;
+    uint32_t top = screens && count && count <= 64 ? kernel::R32(screens + (count - 1) * 4) : 0;
+    if (top == before || !top || !mem::IsCommitted(top + kCount + 4)) return;
+    before = top;
+    uint32_t widgets = kernel::R32(top + kChildren), n = kernel::R32(top + kCount);
+    LOGI("menu: screen %08X is on top (%u screens, %u widgets, methods %08X)", top, count, n, kernel::R32(top));
+    for (uint32_t i = 0; widgets && i < n && i < 64; i++) {
+        uint32_t w = kernel::R32(widgets + i * 4);
+        if (!w || !mem::IsCommitted(w + kTextId + 4)) continue;
+        uint32_t at = kernel::R32(w + kString), size = kernel::R32(w + kStringSize);
+        if (!at || size < 2 || size > 64 || !mem::IsCommitted(at) || !mem::IsCommitted(at + size * 2)) continue;
+        std::string text;
+        for (uint32_t k = 0; k + 1 < size; k++) {
+            uint16_t c = kernel::R16(at + k * 2);
+            text += c >= 32 && c < 127 ? char(c) : '?';
+        }
+        LOGI("menu:   widget %u (state %u): \"%s\"", i, kernel::R32(w + kState), text.c_str());
+    }
+}
+
 void PauseTitle(X86Context& ctx, int pauser) {
+    TraceTop();
     static uint32_t titled = 0;  // the widget that was changed
     static int shown = 0;
     if (!pauser) {
@@ -893,6 +982,28 @@ void PauseTitle(X86Context& ctx, int pauser) {
     if (pauser == 2 && shown == pauser) {
         static const uint32_t grey = std::getenv("S2_MENU_GREY") ? uint32_t(std::atoi(std::getenv("S2_MENU_GREY"))) : 3;
         bool on_one = false;
+        // The Options list (the screen with the method table 0x3417D8, its entries the odd widgets from 5 on, as in
+        // the pause screen): for Player 2 only "Display and Co-op" can be chosen, which is his settings page then.
+        // The others are the host's game's settings (sound, controls, subtitles): greyed, and A does nothing on one
+        // that still has the focus.
+        {
+            uint32_t manager = kernel::R32(0x391D64);
+            uint32_t list = manager ? kernel::R32(manager + kChildren) : 0, n = manager ? kernel::R32(manager + kCount) : 0;
+            uint32_t top = list && n && n <= 64 ? kernel::R32(list + (n - 1) * 4) : 0;
+            if (top && mem::IsCommitted(top + kCount + 4) && kernel::R32(top) == 0x3417D8) {
+                uint32_t widgets = kernel::R32(top + kChildren), wn = kernel::R32(top + kCount);
+                for (uint32_t i = 5; widgets && i < wn && i < 64; i += 2) {
+                    uint32_t widget = kernel::R32(widgets + i * 4);
+                    if (!widget || !mem::IsCommitted(widget + kTextId + 4)) continue;
+                    uint32_t at = kernel::R32(widget + kString), size = kernel::R32(widget + kStringSize);
+                    bool mine = at && size == 18 && mem::IsCommitted(at + 36) && kernel::R16(at) == 'D' && kernel::R16(at + 2 * 12) == 'C';  // "Display and Co-op"
+                    if (mine) continue;
+                    uint32_t state = kernel::R32(widget + kState);
+                    on_one |= state == kHighlighted;
+                    if (state == kIdle) Method(ctx, widget, kSetState, {grey});
+                }
+            }
+        }
         for (uint32_t widget : g_p1_only) {
             if (!mem::IsCommitted(widget + kState + 4)) continue;
             uint32_t state = kernel::R32(widget + kState);
@@ -928,7 +1039,7 @@ void PauseTitle(X86Context& ctx, int pauser) {
             std::string text = words(widget);
             if (trace && !text.empty()) LOGI("menu: screen %u widget %u says \"%s\"", n, i, text.c_str());
             if (text == "PAUSE" || text == "Pause" || text == "PAUSED") titled = widget;
-            if (text == "Save Game" || text == "Load Game" || text == "Quit Game" || text == "Revert To Last Checkpoint" || text == "Options") g_p1_only.push_back(widget);
+            if (text == "Save Game" || text == "Load Game" || text == "Quit Game" || text == "Revert To Last Checkpoint") g_p1_only.push_back(widget);
         }
     }
     if (!titled) return;
@@ -975,6 +1086,10 @@ X86_FUNC(sub_0014BDA0) {
     static const bool trace = std::getenv("S2_MENU_TRACE") != nullptr;  // tests: every event the page is given
     if (trace) LOGI("menu: event %X (focus %d%s%s)", event, g_page.focus, g_typing ? ", address entry" : "", g_after_entry ? ", entry ended" : "");
     if (g_after_entry) {  // the rest of the press that ended the address entry
+        kernel::Return(ctx, 1, 1);
+        return;
+    }
+    if (SecondsPage() && g_page.focus == 0 && (event == kLeft || event == kRight)) {  // (the brightness is Player 1's)
         kernel::Return(ctx, 1, 1);
         return;
     }

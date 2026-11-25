@@ -406,12 +406,25 @@ uint32_t g_mode_setting = 0;  // 0 off, 1 split screen on this PC
 // up and down swapped or not, and how fast he turns, as a share of the game's own speed.
 uint32_t g_p2_invert = 0;   // 0 as the game has it, 1 the other way up
 uint32_t g_p2_speed = 100;  // per cent, 40 to 100
-void SecondLook(input::Pad& p) {
-    float k = float(std::clamp<uint32_t>(g_p2_speed, 40, 100)) / 100.0f;
-    float rx = float(p.rx) * k, ry = float(p.ry) * k * (g_p2_invert ? -1.0f : 1.0f);
+// A joined player's two settings come with his controller (net.cpp) and are applied here, on the host, so that he
+// can change them from his pause menu while he plays (the menu he sees is the host's): g_remote_* are his for this
+// session; once he has changed one in the menu (g_remote_edited) what his PC sends no longer replaces them.
+uint32_t g_remote_invert = 0, g_remote_speed = 100;
+bool g_remote_edited = false;
+void LookWith(input::Pad& p, uint32_t invert, uint32_t speed) {
+    float k = float(std::clamp<uint32_t>(speed, 40, 100)) / 100.0f;
+    float rx = float(p.rx) * k, ry = float(p.ry) * k * (invert ? -1.0f : 1.0f);
     p.rx = int16_t(std::clamp(rx, -32767.0f, 32767.0f));
     p.ry = int16_t(std::clamp(ry, -32767.0f, 32767.0f));
 }
+void SecondLook(input::Pad& p) { LookWith(p, g_p2_invert, g_p2_speed); }          // controller 2 on this PC
+void RemoteLook(input::Pad& p) { LookWith(p, g_remote_invert, g_remote_speed); }  // a joined player's, on the host
+void RemoteLookFrom(uint32_t invert, uint32_t speed) {  // what his PC's settings file says (with every pad packet)
+    if (g_remote_edited) return;
+    g_remote_invert = invert ? 1 : 0;
+    g_remote_speed = std::clamp<uint32_t>(speed, 40, 100);
+}
+void RemoteLookForget() { g_remote_edited = false, g_remote_invert = 0, g_remote_speed = 100; }
 // Host online (a joiner is sent Player 2's view): the menu's choice for this run. It is not kept in the settings
 // file: a game that opens a port on the router and looks its address up each time it starts, because of a choice
 // made weeks ago, is not what a player expects.
