@@ -411,7 +411,14 @@ uint32_t g_p2_speed = 100;  // per cent, 40 to 100
 // can change them from his pause menu while he plays (the menu he sees is the host's): g_remote_* are his for this
 // session; once he has changed one in the menu (g_remote_edited) what his PC sends no longer replaces them.
 uint32_t g_remote_invert = 0, g_remote_speed = 100;
+// A joined player's own volume (per cent, 0 to 100): how loud the host's sound is on HIS PC. g_p2_volume is this
+// PC's setting (used when this PC joins someone); g_remote_volume is the joined player's, as the host's menu shows
+// it. Split screen has one sound for both players, so there it is not shown.
+uint32_t g_p2_volume = 100, g_remote_volume = 100;
 bool g_remote_edited = false;
+void RemoteVolumeFrom(uint32_t volume) {
+    if (!g_remote_edited) g_remote_volume = std::min<uint32_t>(volume, 100);
+}
 void LookWith(input::Pad& p, uint32_t invert, uint32_t speed) {
     float k = float(std::clamp<uint32_t>(speed, 40, 100)) / 100.0f;
     float rx = float(p.rx) * k, ry = float(p.ry) * k * (invert ? -1.0f : 1.0f);
@@ -425,7 +432,7 @@ void RemoteLookFrom(uint32_t invert, uint32_t speed) {  // what his PC's setting
     g_remote_invert = invert ? 1 : 0;
     g_remote_speed = std::clamp<uint32_t>(speed, 40, 100);
 }
-void RemoteLookForget() { g_remote_edited = false, g_remote_invert = 0, g_remote_speed = 100; }
+void RemoteLookForget() { g_remote_edited = false, g_remote_invert = 0, g_remote_speed = 100, g_remote_volume = 100; }
 // Host online (a joiner is sent Player 2's view): the menu's choice for this run. It is not kept in the settings
 // file: a game that opens a port on the router and looks its address up each time it starts, because of a choice
 // made weeks ago, is not what a player expects.

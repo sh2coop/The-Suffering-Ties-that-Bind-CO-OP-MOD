@@ -63,6 +63,7 @@ extern bool g_host_failed;        // hosting could not start (the port is taken)
 extern uint32_t g_p2_invert, g_p2_speed;  // Player 2's own look: the other way up, and his speed in per cent
 extern uint32_t g_remote_invert, g_remote_speed;  // ... a joined player's, for this session (coop.cpp)
 extern bool g_remote_edited;
+extern uint32_t g_p2_volume, g_remote_volume;  // a joined player's volume for the host's sound: this PC's, and the one who is in
 int Pauser();  // 0 not paused, 1 or 2: whose pause menu is up
 std::string CallersOf(X86Context& ctx);  // (traces)
 }
@@ -75,7 +76,7 @@ bool JoinAddress(const std::string& typed);
 void Leave();
 std::string PublicAddress();
 std::string LocalAddress();
-void SendLook(uint32_t invert, uint32_t speed);  // the host: the joined player changed his look settings in the pause menu
+void SendLook(uint32_t invert, uint32_t speed, uint32_t volume);  // the host: the joined player changed his look settings in the pause menu
 std::string OutsideAddress();  // this PC's code: its game port as seen from outside, "a.b.c.d:port" ("" not known yet)
 int OutsideKind();             // 0 not known, 1 a code works with this router, 2 it does not (a port per destination)
 bool HostExpect(const std::string& address);  // the host: a visitor will come from this code
@@ -97,7 +98,7 @@ constexpr uint32_t kHidden = 2, kIdle = 4, kHighlighted = 5;
 // The rows. The page shows one section at a time (the first row chooses it: Display, or Co-op), so that it is
 // never crowded: a section has at most five rows under its heading, 20 apart. Player 2's own page (he opened it
 // from his pause menu) has his two rows and nothing else.
-enum Row { kSection, kResolution, kWindow, kShape, kRate, kVsync, kCoop, kOnline, kLook, kSpeed, kRows };
+enum Row { kSection, kResolution, kWindow, kShape, kRate, kVsync, kCoop, kOnline, kLook, kSpeed, kVolume, kRows };
 int g_section = 0;  // 0 Display, 1 Co-op
 enum Coop { kOff, kSplit, kHost, kJoin, kCoops };
 
@@ -556,6 +557,7 @@ void Keys(bool entry) {
 // one is in, else this PC's own (split screen's Player 2, or this player when he joins someone)
 uint32_t& LookInvert() { return game_net::HostHasPlayer() ? game_coop::g_remote_invert : game_coop::g_p2_invert; }
 uint32_t& LookSpeed() { return game_net::HostHasPlayer() ? game_coop::g_remote_speed : game_coop::g_p2_speed; }
+uint32_t& JoinVolume() { return game_net::HostHasPlayer() ? game_coop::g_remote_volume : game_coop::g_p2_volume; }
 // Player 2 opened this page from his own pause menu: it is his settings page, and only his rows are on it
 bool SecondsPage() { return game_coop::Pauser() == 2; }
 
@@ -576,6 +578,10 @@ std::string Value(int row) {
         case kCoop: return kCoopNames[CoopChoice()];
         case kSection: return g_section ? "Co-op" : "Display";
         case kLook: return LookInvert() ? "Up and down swapped" : "As the game has it";
+        case kVolume:
+            if (!JoinVolume()) return "Off";
+            std::snprintf(out, sizeof out, "%u%%", std::min<uint32_t>(JoinVolume(), 100));
+            return out;
         case kSpeed:
             std::snprintf(out, sizeof out, "%u%%", std::clamp<uint32_t>(LookSpeed(), 40, 100));
             return out;
@@ -583,20 +589,21 @@ std::string Value(int row) {
     return "";
 }
 
-constexpr const char* kLabels[kRows] = {"Settings", "Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "Co-op", "Online", "Player 2 look", "Player 2 look speed"};
+constexpr const char* kLabels[kRows] = {"Settings", "Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "Co-op", "Online", "Player 2 look", "Player 2 look speed", "Player 2 volume"};
 
 // What is on the page now. Player 2's own page: his two rows. Otherwise the section's rows under the row that
 // chooses the section. Player 2's look rows are his alone: on Player 1's page they only show for a player who is
 // about to join someone (he is Player 2 there, and these are his own PC's settings).
 void MoveFocusTo(int focus);
 bool Visible(int row) {
-    if (SecondsPage()) return row == kLook || row == kSpeed;
+    // (his volume is for a player on another PC: in split screen both players have one sound)
+    if (SecondsPage()) return row == kLook || row == kSpeed || (row == kVolume && game_net::HostHasPlayer());
     switch (row) {
         case kSection: return true;
         case kResolution: case kWindow: case kShape: case kRate: case kVsync: return g_section == 0;
         case kCoop: return g_section == 1;
         case kOnline: return g_section == 1 && (CoopChoice() == kHost || CoopChoice() == kJoin);
-        case kLook: case kSpeed: return g_section == 1 && CoopChoice() == kJoin;
+        case kLook: case kSpeed: case kVolume: return g_section == 1 && CoopChoice() == kJoin;
     }
     return false;
 }
@@ -641,6 +648,7 @@ std::string RowText(int row, bool focused) {
     std::string label = kLabels[row];
     if (!SecondsPage() && row == kLook) label = "My look";  // (the one who joins is Player 2: his own PC's settings)
     if (!SecondsPage() && row == kSpeed) label = "My look speed";
+    if (!SecondsPage() && row == kVolume) label = "My volume";
     if (row == kSection) return focused ? "<  " + v + " settings  >" : v + " settings";
     return label + (focused ? ":  < " : ":  ") + v + (focused ? " >" : "");
 }
@@ -649,6 +657,9 @@ std::string RowText(int row, bool focused) {
 // The box holds five lines of about thirty characters.
 std::string Help() {
     int row = g_page.focus - 1;
+    if (row == kVolume)
+        return SecondsPage() ? "How loud the game is on Player 2's own PC. It only changes Player 2."
+                             : "How loud the host's game is on this PC while you are in it. Your own setting.";
     if (SecondsPage() && row != kLook && row != kSpeed)
         return "Player 2's own settings. Go down to change how you look around. Nothing here changes Player 1.";
     if (row == kSection)
@@ -736,12 +747,18 @@ void Step(int row, int dir) {
         case kSection: g_section = g_section ? 0 : 1; break;
         case kLook:
             LookInvert() = LookInvert() ? 0 : 1;
-            if (game_net::HostHasPlayer()) game_coop::g_remote_edited = true, game_net::SendLook(LookInvert(), LookSpeed());
+            if (game_net::HostHasPlayer()) game_coop::g_remote_edited = true, game_net::SendLook(LookInvert(), LookSpeed(), JoinVolume());
             break;
+        case kVolume: {
+            int percent = int(std::min<uint32_t>(JoinVolume(), 100)) + dir * 10;
+            JoinVolume() = uint32_t(std::clamp(percent, 0, 100));
+            if (game_net::HostHasPlayer()) game_coop::g_remote_edited = true, game_net::SendLook(LookInvert(), LookSpeed(), JoinVolume());
+            break;
+        }
         case kSpeed: {
             int percent = int(std::clamp<uint32_t>(LookSpeed(), 40, 100)) + dir * 10;
             LookSpeed() = uint32_t(percent > 100 ? 40 : percent < 40 ? 100 : percent);
-            if (game_net::HostHasPlayer()) game_coop::g_remote_edited = true, game_net::SendLook(LookInvert(), LookSpeed());
+            if (game_net::HostHasPlayer()) game_coop::g_remote_edited = true, game_net::SendLook(LookInvert(), LookSpeed(), JoinVolume());
             break;
         }
     }

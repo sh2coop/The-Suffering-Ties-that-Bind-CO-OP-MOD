@@ -86,6 +86,8 @@ bool StreamView();                  // player two is in and the frames handed ov
 extern uint32_t g_p2_invert, g_p2_speed;  // this PC's Player 2 look settings
 void RemoteLookFrom(uint32_t invert, uint32_t speed);  // a joined player's, as his PC sends them
 void RemoteLookForget();
+extern uint32_t g_p2_volume;  // this PC's volume for a host's sound, per cent
+void RemoteVolumeFrom(uint32_t volume);  // a joined player's, as his PC sends it
 }
 
 namespace game_net {
@@ -589,6 +591,7 @@ void HostListen() {
         std::memcpy(&p.rx, buf + 23, 2);
         std::memcpy(&p.ry, buf + 25, 2);
         if (n >= 29) game_coop::RemoteLookFrom(buf[27], buf[28]);  // (an older copy sends 27 bytes: as the game has it)
+        if (n >= 30) game_coop::RemoteVolumeFrom(buf[29]);
         std::lock_guard l(g_host.lock);
         bool same = g_host.have_client && from.sin_addr.s_addr == g_host.client.sin_addr.s_addr &&
                     from.sin_port == g_host.client.sin_port;
@@ -609,6 +612,7 @@ void HostListen() {
             LOGR("coop: remote player joined from %s:%u", IpText(from.sin_addr.s_addr).c_str(), unsigned(ntohs(from.sin_port)));
             game_coop::RemoteLookForget();
             if (n >= 29) game_coop::RemoteLookFrom(buf[27], buf[28]);
+            if (n >= 30) game_coop::RemoteVolumeFrom(buf[29]);
             game_coop::RemotePlayer(true);
         }
     }
@@ -993,11 +997,13 @@ void ClientRecv() {
         if (n >= 5 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 6) continue;  // (the host's hole-punching hello)
         if (n >= 7 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 7) {          // my look settings, changed in the host's menu
             uint32_t invert = buf[5] ? 1 : 0, speed = std::clamp<uint32_t>(buf[6], 40, 100);
-            if (invert != game_coop::g_p2_invert || speed != game_coop::g_p2_speed) {
+            uint32_t volume = n >= 8 ? std::min<uint32_t>(buf[7], 100) : game_coop::g_p2_volume;
+            if (invert != game_coop::g_p2_invert || speed != game_coop::g_p2_speed || volume != game_coop::g_p2_volume) {
                 game_coop::g_p2_invert = invert;
                 game_coop::g_p2_speed = speed;
+                game_coop::g_p2_volume = volume;
                 app::Save();
-                LOGR("coop: my look settings were changed in the host's menu and are saved here (%s, %u%%)", invert ? "swapped" : "as the game has it", speed);
+                LOGR("coop: my settings were changed in the host's menu and are saved here (look %s, %u%%; volume %u%%)", invert ? "swapped" : "as the game has it", speed, volume);
             }
             continue;
         }
@@ -1183,7 +1189,14 @@ void SoundIn(const uint8_t* b, int n) {
     if (g_sound.seq && int32_t(seq - g_sound.seq) <= 0) return;  // late or repeated
     g_sound.seq = seq;
     const auto* s = reinterpret_cast<const int16_t*>(b + 11);
-    g_sound.ring.insert(g_sound.ring.end(), s, s + frames * 2);
+    uint32_t volume = std::min<uint32_t>(game_coop::g_p2_volume, 100);  // this player's own volume for the host's sound
+    if (volume == 100) {
+        g_sound.ring.insert(g_sound.ring.end(), s, s + frames * 2);
+    } else {
+        // (per cent to loudness: the square, so that 50% sounds about half as loud)
+        int32_t gain = int32_t(volume * volume * 65536 / 10000);
+        for (int i = 0; i < int(frames) * 2; i++) g_sound.ring.push_back(int16_t((int32_t(s[i]) * gain) >> 16));
+    }
     if (g_sound.ring.size() > kAudioMost) g_sound.ring.erase(g_sound.ring.begin(), g_sound.ring.end() - kAudioStart);
 }
 
@@ -1395,11 +1408,11 @@ bool JoinAddress(const std::string& typed) {
 
 // The joined player changed his look settings in the host's pause menu: they are his, so they go back to his PC
 // (packet type 7: up and down swapped, speed in per cent), which keeps them in its own settings file.
-void SendLook(uint32_t invert, uint32_t speed) {
+void SendLook(uint32_t invert, uint32_t speed, uint32_t volume) {
     if (!g_host.run) return;
-    uint8_t pkt[7] = {'S', '2', 'C', '1', 7, uint8_t(invert ? 1 : 0), uint8_t(std::clamp<uint32_t>(speed, 40, 100))};
+    uint8_t pkt[8] = {'S', '2', 'C', '1', 7, uint8_t(invert ? 1 : 0), uint8_t(std::clamp<uint32_t>(speed, 40, 100)), uint8_t(std::min<uint32_t>(volume, 100))};
     for (int i = 0; i < 3; i++) HostSend(pkt, sizeof pkt);  // (UDP: three times, one will arrive)
-    LOGR("coop: the joined player's look settings go back to his PC (%s, %u%%)", invert ? "swapped" : "as the game has it", speed);
+    LOGR("coop: the joined player's settings go back to his PC (look %s, %u%%; volume %u%%)", invert ? "swapped" : "as the game has it", speed, volume);
 }
 
 // The host expects a visitor from this outside address ("203.0.113.7:51234"): for half a minute his router is
@@ -1486,7 +1499,7 @@ void ClientPad(const input::Pad& p) {
         StopClient();
         return;
     }
-    uint8_t pkt[29];
+    uint8_t pkt[30];  // (byte 29: this player's volume for the host's sound, for the host's menu to show)
     std::memcpy(pkt, "S2C1", 4);
     pkt[4] = 1;
     uint32_t seq = ++g_client.seq;
@@ -1507,6 +1520,7 @@ void ClientPad(const input::Pad& p) {
     std::memcpy(pkt + 25, &p.ry, 2);
     pkt[27] = uint8_t(game_coop::g_p2_invert ? 1 : 0);
     pkt[28] = uint8_t(std::clamp<uint32_t>(game_coop::g_p2_speed, 40, 100));
+    pkt[29] = uint8_t(std::min<uint32_t>(game_coop::g_p2_volume, 100));
     sendto(g_client.sock, reinterpret_cast<const char*>(pkt), sizeof pkt, 0, reinterpret_cast<sockaddr*>(&g_client.host),
            sizeof g_client.host);
 }
