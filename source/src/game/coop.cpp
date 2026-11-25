@@ -654,6 +654,37 @@ constexpr uint32_t kPlayerStop = 0x2ED90, kPlayerTeleport = 0x2F060;
 // and can be stood on. Until 2026-11-25 it was one metre along Player 1's right whatever was there: after the dock
 // scene of the first online session that was outside the docks, and elsewhere inside walls. With no such point
 // (a scene has just set Player 1 down somewhere new) it is Player 1's own place.
+// The game hears from one object: the sound device ([0x398CB0]) keeps its handle at +0x42 (0x1FEF80 reads its place;
+// with no such object the listening point is 0, 0, 0). A Camera's set-up makes itself that object, so with Player 2
+// in, the game heard from HIS camera, and once he was out again (co-op switched off in a level, a save, a level
+// exit) the handle was of an object that had ended: the game then heard from the origin and refused every sound
+// made for a place in the level as too far away. The owner's session of 2026-11-25 lost most sounds that way; run
+// onoff: 69 plays refused against 1. The listening object is kept to be the game's own Camera (Player 1's), every
+// frame. Both players hear the same sound, the host's.
+void Ears() {
+    uint32_t device = kernel::R32(0x398CB0), camera = kernel::R32(kGameCamera);
+    static const bool trace = std::getenv("S2_EARS_TRACE") != nullptr;
+    if (trace && g_frames % 120 == 0 && device && mem::IsCommitted(device + 0x44)) {
+        uint32_t table = kernel::R32(kObjectManager + 0x0C), handle = kernel::R16(device + 0x42);
+        uint32_t object = table && handle ? kernel::R32(table + handle * 6) : 0;
+        LOGI("coop: ears trace: device %08X handle %04X object %08X at %.1f %.1f %.1f; game camera %08X (handle %04X), Player 1 object %08X (handle %04X)", device, handle,
+             object, object && object > 0x400000 ? ReadF(object + kPosition) : 0.0f, object && object > 0x400000 ? ReadF(object + kPosition + 4) : 0.0f,
+             object && object > 0x400000 ? ReadF(object + kPosition + 8) : 0.0f, camera, camera ? kernel::R16(camera + 4) : 0, g_player_object,
+             g_player_object ? kernel::R16(g_player_object + 4) : 0);
+    }
+    if (!device || !mem::IsCommitted(device + 0x44) || !camera || !mem::IsCommitted(camera + 0x60)) return;
+    if (camera == g_camera2_object) return;  // (Player 2's code is running with his Camera as the game's: not now)
+    // (the handle is the object's place in the object manager's table, six bytes an entry, the object first)
+    uint32_t table = kernel::R32(kObjectManager + 0x0C), have = kernel::R16(device + 0x42);
+    if (!table || (have && mem::IsCommitted(table + have * 6 + 4) && kernel::R32(table + have * 6) == camera)) return;
+    for (uint32_t i = 1; i < 4096 && mem::IsCommitted(table + i * 6 + 4); i++) {
+        if (kernel::R32(table + i * 6) != camera) continue;
+        kernel::W16(device + 0x42, uint16_t(i));
+        static int said = 0;
+        if (said++ < 20) LOGI("coop: the game listens from its own Camera again (object handle %04X, was %04X)", i, have);
+        return;
+    }
+}
 struct TrailPoint {
     float at[3];
 };
@@ -1120,6 +1151,24 @@ void Frame(X86Context& ctx) {
     TestCall(ctx);
     TestBody();
     TrailStep();
+    Ears();
+    {   // S2_TEST_MORAL=<frame>,<player 1 or 2>,<change>: the game's own morality change (0x46B60: this = Player, a
+        // float) for that player at that frame, to see the moment it sets off
+        static const char* v = std::getenv("S2_TEST_MORAL");
+        if (v && g_player && g_frames == uint64_t(std::atoll(v))) {
+            const char* c = std::strchr(v, ',');
+            int who = c ? std::atoi(c + 1) : 1;
+            const char* d = c ? std::strchr(c + 1, ',') : nullptr;
+            float change = d ? float(std::atof(d + 1)) : -10.0f;
+            uint32_t player = who == 2 && g_second ? g_second : g_player, bits, ecx = ctx.ecx;
+            std::memcpy(&bits, &change, 4);
+            LOGR("test: morality change %.1f for Player %d (it is %.2f)", change, who, ReadF(g_player + 0x482));
+            ctx.ecx = player;
+            kernel::CallGuest(ctx, 0x46B60, {bits});
+            ctx.ecx = ecx;
+            LOGR("test: morality is now %.2f", ReadF(g_player + 0x482));
+        }
+    }
     TestSound(ctx);
     TestSounds(ctx);
     {   // S2_TEST_OBJCLR=<frame>,<offset hex>,<mask hex>[,1 to set]: clears (or sets) bits of Player 2's object from that
