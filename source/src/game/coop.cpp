@@ -1074,6 +1074,34 @@ void Frame(X86Context& ctx) {
     TestBody();
     TestSound(ctx);
     TestSounds(ctx);
+    {   // S2_TEST_OBJCLR=<frame>,<offset hex>,<mask hex>[,1 to set]: clears (or sets) bits of Player 2's object from that
+        // frame on, and logs both players' object words once (looking for what makes two characters solid)
+        static const char* v = std::getenv("S2_TEST_OBJCLR");
+        if (v && g_second_object && g_player_object && g_frames >= uint64_t(std::atoll(v))) {
+            uint32_t off = 0, mask = 0, set = 0;
+            if (const char* c = std::strchr(v, ',')) {
+                off = uint32_t(std::strtoul(c + 1, nullptr, 16));
+                if (const char* d = std::strchr(c + 1, ',')) {
+                    mask = uint32_t(std::strtoul(d + 1, nullptr, 16));
+                    if (const char* e = std::strchr(d + 1, ',')) set = uint32_t(std::atoi(e + 1));
+                }
+            }
+            static bool said = false;
+            if (!said) {
+                said = true;
+                for (uint32_t o : {g_player_object, g_second_object}) {
+                    char line[400];
+                    int n = std::snprintf(line, sizeof line, "test: object %08X words", o);
+                    for (uint32_t at = 0; at < 0x14; at += 4) n += std::snprintf(line + n, sizeof line - n, " %08X", kernel::R32(o + at));
+                    n += std::snprintf(line + n, sizeof line - n, " | +E0:");
+                    for (uint32_t at = 0xE0; at < 0x100; at += 4) n += std::snprintf(line + n, sizeof line - n, " %08X", kernel::R32(o + at));
+                    LOGR("%s", line);
+                }
+            }
+            uint32_t now = kernel::R32(g_second_object + off);
+            if (mask) kernel::W32(g_second_object + off, set ? now | mask : now & ~mask);
+        }
+    }
     TestGoto(ctx);
     TestClasses(ctx);
     HitsSecond();
@@ -2666,7 +2694,6 @@ bool g_drawing_second = false;  // the engine is drawing Player 2's object (0x1D
 // time his model is drawn with them, and kept in textures\replacement\player2 beside the program: nothing of the
 // game's art is in the program. The textures are known by the name the texture dumps give them.
 constexpr uint64_t kTrousers = 0x9bda0bdae0112ab5ull, kTankTop = 0x6011d07b0583df74ull;
-constexpr uint32_t kTankFromRow = 172;
 void Outfit(const gpu::State& s) {
     static std::map<uint32_t, uint64_t> seen;  // texture data address -> its first bytes when it was looked at
     static const bool off = std::getenv("S2_COOP_NO_OUTFIT") != nullptr;
@@ -2686,6 +2713,11 @@ void Outfit(const gpu::State& s) {
     fs::path dir = app::ExeDir() / "textures" / "replacement" / "player2";
     char name[64];
     std::snprintf(name, sizeof name, "256x256_%016llx_coop.dds", (unsigned long long)key);
+    std::error_code gone;
+    std::filesystem::remove(dir / name, gone);  // (the earlier versions' images, with parts of the top left light)
+    std::snprintf(name, sizeof name, "256x256_%016llx_coop2.dds", (unsigned long long)key);
+    std::filesystem::remove(dir / name, gone);
+    std::snprintf(name, sizeof name, "256x256_%016llx_coop3.dds", (unsigned long long)key);
     std::error_code ec;
     if (fs::exists(dir / name, ec)) return;
     // DXT1 blocks: two 565 colours and 16 two-bit picks
@@ -2719,10 +2751,16 @@ void Outfit(const gpu::State& s) {
                     // orange cloth to blue denim: its brightness is its red; what is dark (the stripe, the seams) stays dark
                     float v = r;
                     r = v * 0.20f, g = v * 0.40f, bl = std::min(255.0f, v * 0.86f);
-                } else if (y >= kTankFromRow) {
-                    // grey-white cloth to black; blood (much more red than green) is left as it is
-                    bool blood = r > g * 1.45f && r > 60.0f;
-                    if (!blood) r *= 0.17f, g *= 0.17f, bl *= 0.19f;
+                } else {
+                    // The light cloth to black, wherever it is in the texture (the top fills rows 94 to 255 and
+                    // has a patch higher up; the first version only did rows 172 on and left his chest and
+                    // shoulders white). Cloth: not dark, and grey or beige. The boots and straps are dark already;
+                    // blood (much more red than green) is left as it is.
+                    float low = std::min({r, g, bl}), high = std::max({r, g, bl});
+                    bool cloth = low > 55.0f && high - low < 80.0f, blood = r > g * 1.45f && r > 60.0f;
+// (from row 96 down everything is the top: its shaded and dirty parts are darker than "cloth" and
+                    // stayed as khaki blotches in the second version)
+                    if ((cloth || y >= 96) && !blood) r *= 0.17f, g *= 0.17f, bl *= 0.19f;
                 }
                 uint8_t* out = &file[128 + (size_t(y) * 256 + x) * 4];
                 out[0] = uint8_t(bl), out[1] = uint8_t(g), out[2] = uint8_t(r), out[3] = 255;
