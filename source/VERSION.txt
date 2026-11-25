@@ -1,1 +1,1 @@
-35 2026-11-25 Sounds no longer go missing after co-op is switched off or Player 2 leaves
+36 2026-11-25 Smoother picture for the joined player

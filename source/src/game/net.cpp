@@ -104,7 +104,11 @@ void Close(Sock s) { close(s); }
 #endif
 using Clock = std::chrono::steady_clock;
 constexpr uint16_t kGamePort = 27025, kBeaconPort = 27026;
-constexpr int kFrameInterval = 33;     // ms between frames to the client (30 fps)
+// ms between frames to the client. 28, not 33: the host draws a frame every 16.7 ms, and "at least 33 ms since the
+// last one sent" let every second frame through only when the timer agreed, else the third: pictures 33 or 50 ms
+// apart, 25 a second, which the joined player of the first online session saw as stutter (his copy counted waits
+// of up to 74 ms on one PC). With 28 it is every second frame, evenly, 30 a second (every fourth at 120).
+constexpr int kFrameInterval = 28;
 constexpr int kJpegQuality = 70;
 constexpr size_t kChunk = 1200;
 constexpr size_t kFrameHead = 23;         // a frame packet's bytes before the JPEG chunk
@@ -667,6 +671,7 @@ void HostEncode() {
         uint16_t parts = uint16_t((jpeg.size() + kChunk - 1) / kChunk);
         std::vector<uint8_t> pkt(kFrameHead + kChunk);
         float shape = g_host.frame_aspect.load();
+        std::vector<uint8_t> repair(kChunk, 0);
         for (uint16_t i = 0; i < parts; i++) {
             size_t at = size_t(i) * kChunk, n = std::min(kChunk, jpeg.size() - at);
             uint16_t w16 = uint16_t(w), h16 = uint16_t(h), n16 = uint16_t(n);
@@ -681,6 +686,27 @@ void HostEncode() {
             std::memcpy(pkt.data() + 19, &shape, 4);  // the shape the picture is shown in (width / height)
             std::memcpy(pkt.data() + kFrameHead, jpeg.data() + at, n);
             HostSend(pkt.data(), kFrameHead + n);
+            for (size_t k = 0; k < n; k++) repair[k] ^= jpeg[at + k];
+            // (a picture is some twenty packets: sent in one burst they overran a home router's queue now and then,
+            // and one lost packet was a lost picture. A short breath every six.)
+            if (i % 6 == 5) std::this_thread::sleep_for(std::chrono::microseconds(700));
+        }
+        // The repair packet: part number = the number of parts (a copy of the game from before 2026-11-25 drops such
+        // a packet), the width field holds the last part's length, the height field 0xFFFF. With it the joiner
+        // rebuilds any one part of the picture that did not arrive.
+        if (parts > 1) {
+            uint16_t last = uint16_t(jpeg.size() - size_t(parts - 1) * kChunk), mark = 0xFFFF, n16 = uint16_t(kChunk);
+            std::memcpy(pkt.data(), "S2C1", 4);
+            pkt[4] = 2;
+            std::memcpy(pkt.data() + 5, &frame, 4);
+            std::memcpy(pkt.data() + 9, &last, 2);
+            std::memcpy(pkt.data() + 11, &mark, 2);
+            std::memcpy(pkt.data() + 13, &parts, 2);
+            std::memcpy(pkt.data() + 15, &parts, 2);
+            std::memcpy(pkt.data() + 17, &n16, 2);
+            std::memcpy(pkt.data() + 19, &shape, 4);
+            std::memcpy(pkt.data() + kFrameHead, repair.data(), kChunk);
+            HostSend(pkt.data(), kFrameHead + kChunk);
         }
     }
 }
@@ -997,7 +1023,11 @@ void SoundIn(const uint8_t* b, int n);
 
 void ClientRecv() {
     std::map<uint32_t, std::vector<std::vector<uint8_t>>> parts;
-    std::map<uint32_t, uint16_t> have;
+    std::map<uint32_t, uint16_t> have, last_len, size_w, size_h;
+    std::map<uint32_t, std::vector<uint8_t>> repairs;  // a picture's repair packet
+    Clock::time_point stats_at = Clock::now(), last_shown = Clock::now();
+    uint32_t stat_shown = 0, stat_lost = 0, stat_repaired = 0;
+    int stat_gap = 0;
     uint32_t shown = 0;
     std::vector<uint8_t> buf(2048), frame;
     while (g_client.run) {
@@ -1032,6 +1062,9 @@ void ClientRecv() {
             continue;
         }
         if (n < int(kFrameHead) || std::memcmp(buf.data(), "S2C1", 4) != 0 || buf[4] != 2) continue;
+        // (tests: S2_NET_DROP=<per cent> loses that share of the picture packets on the way in)
+        static const int drop = std::getenv("S2_NET_DROP") ? std::atoi(std::getenv("S2_NET_DROP")) : 0;
+        if (drop && std::rand() % 100 < drop) continue;
         uint32_t id;
         float shape;
         std::memcpy(&shape, &buf[19], 4);
@@ -1042,18 +1075,63 @@ void ClientRecv() {
         std::memcpy(&count, &buf[13], 2);
         std::memcpy(&part, &buf[15], 2);
         std::memcpy(&bytes, &buf[17], 2);
-        if ((id <= shown && shown - id < 1000) || part >= count || int(kFrameHead) + bytes > n) continue;
+        if ((id <= shown && shown - id < 1000) || part > count || int(kFrameHead) + bytes > n) continue;
+        // how the stream is doing, into the log every five seconds (the first online session, 2026-11-25, stuttered
+        // for the joined player and his log could not say why)
+        {
+            auto now = Clock::now();
+            if (now - stats_at > std::chrono::seconds(5)) {
+                if (stat_shown || stat_lost)
+                    LOGI("coop: stream: %u pictures shown in 5 s, %u lost, %u repaired, longest wait between two %d ms", stat_shown, stat_lost, stat_repaired, stat_gap);
+                stats_at = now, stat_shown = stat_lost = stat_repaired = 0, stat_gap = 0;
+            }
+        }
         auto& p = parts[id];
         if (p.empty()) p.resize(count);
-        if (!p[part].empty()) continue;
-        p[part].assign(&buf[kFrameHead], &buf[kFrameHead] + bytes);
-        if (++have[id] < count) continue;
+        if (part == count) {  // the repair packet (see HostEncode)
+            if (h != 0xFFFF || bytes != kChunk) continue;
+            auto& r = repairs[id];
+            r.assign(&buf[kFrameHead], &buf[kFrameHead] + bytes);
+            last_len[id] = w;
+        } else {
+            if (!p[part].empty()) continue;
+            p[part].assign(&buf[kFrameHead], &buf[kFrameHead] + bytes);
+            ++have[id];
+            if (w != 0 && h != 0xFFFF) size_w[id] = w, size_h[id] = h;
+        }
+        if (have[id] + 1 == count && repairs.count(id)) {  // one part is missing and the repair packet is here
+            std::vector<uint8_t> fix = repairs[id];
+            uint16_t missing = 0;
+            for (uint16_t k = 0; k < count; k++) {
+                if (p[k].empty()) {
+                    missing = k;
+                    continue;
+                }
+                for (size_t b = 0; b < p[k].size() && b < fix.size(); b++) fix[b] ^= p[k][b];
+            }
+            fix.resize(missing + 1 == count ? std::min<size_t>(last_len[id], kChunk) : kChunk);
+            p[missing] = std::move(fix);
+            ++have[id];
+            ++stat_repaired;
+        }
+        if (have[id] < count) continue;
+        if (id > shown + 1 && shown) stat_lost += std::min<uint32_t>(id - shown - 1, 1000);
+        {
+            auto now = Clock::now();
+            int gap = int(std::chrono::duration_cast<std::chrono::milliseconds>(now - last_shown).count());
+            if (stat_shown && gap > stat_gap) stat_gap = gap;
+            last_shown = now;
+            ++stat_shown;
+        }
         frame.clear();
         for (auto& c : p) frame.insert(frame.end(), c.begin(), c.end());
         int iw, ih, comp;
         uint8_t* px = stbi_load_from_memory(frame.data(), int(frame.size()), &iw, &ih, &comp, 4);
         for (auto it = parts.begin(); it != parts.end();) it = it->first <= id ? parts.erase(it) : std::next(it);
         for (auto it = have.begin(); it != have.end();) it = it->first <= id ? have.erase(it) : std::next(it);
+        for (auto it = repairs.begin(); it != repairs.end();) it = it->first <= id ? repairs.erase(it) : std::next(it);
+        for (auto it = last_len.begin(); it != last_len.end();) it = it->first <= id ? last_len.erase(it) : std::next(it);
+        size_w.clear(), size_h.clear();
         shown = id;
         if (!px) continue;
         std::vector<uint8_t> boxed;
