@@ -96,8 +96,13 @@ CO-OP
 
   In the game: Options, then "Display and Co-op".
   - Split screen: two controllers on one PC. Controller 1 is Player 1.
-  - Online: one player picks "Host online". The other picks "Join online" and types the
-    host's address. Over the internet the host must forward UDP port 27025 to his PC.
+  - Online, no port forwarding needed:
+      1. The host picks "Host online". His screen shows "Your code". He sends it to his friend.
+      2. The friend picks "Join online", presses A on "Host's code" and enters it (Ctrl+V pastes).
+         His screen then shows his own code. He sends that back.
+      3. The host presses A on "Your code" and enters the friend's code. The friend comes in.
+    If a screen says the router gives every connection a new port, forward UDP port 27025 on
+    the host's router instead and enter the plain address.
 
 KEYBOARD
 

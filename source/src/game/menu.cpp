@@ -71,6 +71,10 @@ bool JoinAddress(const std::string& typed);
 void Leave();
 std::string PublicAddress();
 std::string LocalAddress();
+std::string OutsideAddress();  // this PC's code: its game port as seen from outside, "a.b.c.d:port" ("" not known yet)
+int OutsideKind();             // 0 not known, 1 a code works with this router, 2 it does not (a port per destination)
+bool HostExpect(const std::string& address);  // the host: a visitor will come from this code
+bool HostExpecting();
 int InternetState();  // hosting: 0 not yet, 1 looking the address up, 2 port open, 3 port to forward, 4 shared address, 5 none
 }
 namespace game_menu {
@@ -253,57 +257,92 @@ bool Quad(const char* s, int out[4], bool whole) {
     for (int i = 0; i < 4; i++) out[i] = int(f[i]);
     return true;
 }
-std::string QuadText(const int f[4]) {
-    char out[24];
-    std::snprintf(out, sizeof out, "%d.%d.%d.%d", f[0], f[1], f[2], f[3]);
+// A code: "a.b.c.d:port", the address a PC's game port has from outside (net.cpp, Stun). The port may be left out
+// (0): that is a plain address on the game's own port, as before codes. All of the text when whole.
+bool Code(const char* s, int out[5], bool whole) {
+    int f[4];
+    if (!Quad(s, f, false)) return false;
+    int used = 0;
+    unsigned a, b, c, d, port = 0;
+    std::sscanf(s, "%3u.%3u.%3u.%3u%n", &a, &b, &c, &d, &used);
+    int end = used;
+    if (s[used] == ':' && std::isdigit(static_cast<unsigned char>(s[used + 1]))) {
+        int more = 0;
+        if (std::sscanf(s + used + 1, "%5u%n", &port, &more) != 1 || port > 65535) return false;
+        end = used + 1 + more;
+    }
+    if (whole ? s[end] != 0 : (std::isdigit(static_cast<unsigned char>(s[end])) != 0)) return false;
+    std::copy(f, f + 4, out);
+    out[4] = int(port);
+    return true;
+}
+std::string CodeText(const int f[5]) {
+    char out[32];
+    if (f[4]) std::snprintf(out, sizeof out, "%d.%d.%d.%d:%d", f[0], f[1], f[2], f[3], f[4]);
+    else std::snprintf(out, sizeof out, "%d.%d.%d.%d", f[0], f[1], f[2], f[3]);
     return out;
 }
 
-// Entering the address: four numbers of three digits, as on a console's network screen. A controller turns one
-// digit at a time; a keyboard types the numbers (a full stop goes on to the next one).
+// Entering a code: four numbers of three digits and a port of five, as on a console's network screen. A controller
+// turns one digit at a time; a keyboard types the numbers (a full stop or a colon goes on to the next one).
+// The joiner enters the host's code; the host enters the joiner's (for_friend).
+constexpr int kFields = 5, kDigits = 17;
+constexpr int kWidth[kFields] = {3, 3, 3, 3, 5}, kMost[kFields] = {255, 255, 255, 255, 65535}, kFirst[kFields] = {0, 3, 6, 9, 12};
 struct Entry {
-    int field[4] = {};
-    int caret = 0;  // the digit in hand, 0 to 11
+    int field[kFields] = {};
+    int caret = 0;  // the digit in hand, 0 to 16
     int typed = 0;  // digits typed into this number from a keyboard so far
     bool full = false;  // the last digit typed filled its number and went on to the next (a full stop typed now
                         // is the one between the two, not a step further)
+    bool for_friend = false;  // the host is entering the joiner's code
     std::string before;
 };
 Entry g_entry;
+std::string g_friend;  // the host: the joiner's code as entered last (this run only)
 std::atomic<bool> g_typing{false};  // (the controller code asks: Backspace is not the BACK button meanwhile)
 // One press of a button is several events (A is 0x412, 0x418, 0x41A, 0x420 and 0x44B). When the entry ends on one
 // of them, the others of that press are not the page's: for this many frames more the page's events are dropped
 // and B does not close the page.
 int g_after_entry = 0;
 
-void EntryStart() {
+int FieldAt(int caret) {
+    for (int n = kFields - 1; n > 0; n--)
+        if (caret >= kFirst[n]) return n;
+    return 0;
+}
+int LastOf(int n) { return kFirst[n] + kWidth[n] - 1; }
+
+void EntryStart(bool for_friend) {
     g_entry = {};
-    g_entry.before = Address();
-    Quad(g_address.c_str(), g_entry.field, true);  // (noughts, when it is a name or nothing yet)
+    g_entry.for_friend = for_friend;
+    g_entry.before = for_friend ? g_friend : Address();
+    Code(g_entry.before.c_str(), g_entry.field, true);  // (noughts, when it is a name or nothing yet)
     g_typing = true;
     game_net::ClearNote();  // (what the last try came to is about the address before)
-    LOGI("menu: the host's address is being entered");
+    LOGI("menu: %s code is being entered", for_friend ? "the friend's" : "the host's");
 }
 void EntryEnd(bool keep) {
-    g_address = keep ? QuadText(g_entry.field) : g_entry.before;
+    (g_entry.for_friend ? g_friend : g_address) = keep ? CodeText(g_entry.field) : g_entry.before;
     g_typing = false;
     g_after_entry = 2;
-    LOGI("menu: the host's address was %s", keep ? "entered" : "left as it was");
+    LOGI("menu: the %s code was %s", g_entry.for_friend ? "friend's" : "host's", keep ? "entered" : "left as it was");
 }
 void EntryMove(int dir) {
-    g_entry.caret = std::clamp(g_entry.caret + dir, 0, 11);
+    g_entry.caret = std::clamp(g_entry.caret + dir, 0, kDigits - 1);
     g_entry.typed = 0;
     g_entry.full = false;
 }
-// the digit in hand, one up or down; values that would take its number past 255 are passed over
+// the digit in hand, one up or down; values that would take its number past its most are passed over
 void EntryTurn(int dir) {
-    static const int kPlace[3] = {100, 10, 1};
-    int& field = g_entry.field[g_entry.caret / 3];
-    int place = kPlace[g_entry.caret % 3], digit = field / place % 10;
+    int n = FieldAt(g_entry.caret);
+    int& field = g_entry.field[n];
+    int place = 1;
+    for (int i = g_entry.caret; i < LastOf(n); i++) place *= 10;
+    int digit = field / place % 10;
     for (int step = 1; step <= 10; step++) {
         int next = ((digit + dir * step) % 10 + 10) % 10;
         int value = field + (next - digit) * place;
-        if (value <= 255) {
+        if (value <= kMost[n]) {
             field = value;
             break;
         }
@@ -312,46 +351,61 @@ void EntryTurn(int dir) {
     g_entry.full = false;
 }
 void EntryDigit(int digit) {
-    int n = g_entry.caret / 3;
+    int n = FieldAt(g_entry.caret);
     int& field = g_entry.field[n];
-    field = g_entry.typed ? std::min(field * 10 + digit, 255) : digit;
+    field = g_entry.typed ? std::min(field * 10 + digit, kMost[n]) : digit;
     g_entry.typed++;
-    g_entry.caret = n * 3 + 2;
+    g_entry.caret = LastOf(n);
     g_entry.full = false;
-    if (g_entry.typed < 3 && field * 10 <= 255) return;  // room for another digit
+    if (g_entry.typed < kWidth[n] && field * 10 <= kMost[n]) return;  // room for another digit
     g_entry.typed = 0;
-    if (n < 3) g_entry.caret = (n + 1) * 3, g_entry.full = true;
+    if (n < kFields - 1) g_entry.caret = kFirst[n + 1], g_entry.full = true;
 }
 void EntryNext() {
-    int n = g_entry.caret / 3;
-    if (n < 3 && !g_entry.full) g_entry.caret = (n + 1) * 3;
+    int n = FieldAt(g_entry.caret);
+    if (n < kFields - 1 && !g_entry.full) g_entry.caret = kFirst[n + 1];
     g_entry.typed = 0;
     g_entry.full = false;
 }
 void EntryDelete() {
     g_entry.full = false;
-    int n = g_entry.caret / 3;
+    int n = FieldAt(g_entry.caret);
     if (g_entry.field[n]) {
         g_entry.field[n] /= 10;
-        g_entry.caret = n * 3 + 2;
+        g_entry.caret = LastOf(n);
         if (g_entry.typed) g_entry.typed--;
     } else if (n > 0) {
-        g_entry.caret = (n - 1) * 3 + 2;
+        g_entry.caret = LastOf(n - 1);
         g_entry.typed = 0;
     }
 }
-// "192.168.001.0[2]0": the digit in hand in brackets
+// "192.168.001.0[2]0:27025": the digit in hand in brackets
 std::string EntryText() {
-    char cells[20];
-    std::snprintf(cells, sizeof cells, "%03d.%03d.%03d.%03d", g_entry.field[0], g_entry.field[1], g_entry.field[2], g_entry.field[3]);
+    char cells[32];
+    std::snprintf(cells, sizeof cells, "%03d.%03d.%03d.%03d:%05d", g_entry.field[0], g_entry.field[1], g_entry.field[2], g_entry.field[3],
+                  g_entry.field[4]);
     std::string out;
-    for (int i = 0; i < 15; i++) {
-        bool hand = cells[i] != '.' && i - i / 4 == g_entry.caret;
+    int digit = 0;
+    for (const char* c = cells; *c; c++) {
+        bool is_digit = *c != '.' && *c != ':';
+        bool hand = is_digit && digit == g_entry.caret;
         if (hand) out += '[';
-        out += cells[i];
+        out += *c;
         if (hand) out += ']';
+        digit += is_digit;
     }
     return out;
+}
+
+// the host has entered the joiner's code: his router is shown packets going there
+void ExpectNow() {
+    int f[kFields];
+    if (!Code(g_friend.c_str(), f, true) || !f[4]) {
+        LOGI("menu: the friend's code has no port, nothing is sent");
+        return;
+    }
+    bool started = game_net::HostExpect(g_friend);
+    LOGI("menu: waiting for the friend %s", started ? "started" : "did not start");
 }
 
 void JoinNow() {
@@ -423,20 +477,23 @@ void Paste() {
     for (size_t i = 0; i < text.size(); i++) {
         char before = i ? text[i - 1] : ' ';
         if (std::isdigit(static_cast<unsigned char>(before)) || before == '.') continue;
-        int f[4];
-        if (!Quad(text.c_str() + i, f, false)) continue;
+        int f[kFields];
+        if (!Code(text.c_str() + i, f, false)) continue;
         if (g_typing) {
-            std::copy(f, f + 4, g_entry.field);
-            g_entry.caret = 11;
+            std::copy(f, f + kFields, g_entry.field);
+            g_entry.caret = kDigits - 1;
             g_entry.typed = 0;
+        } else if (CoopChoice() == kHost) {
+            g_friend = CodeText(f);
+            ExpectNow();
         } else {
-            g_address = QuadText(f);
+            g_address = CodeText(f);
             game_net::ClearNote();
         }
-        LOGI("menu: an address was pasted");
+        LOGI("menu: a code was pasted");
         return;
     }
-    if (g_typing) return;
+    if (g_typing || CoopChoice() == kHost) return;
     size_t a = text.find_first_not_of(" \t\r\n"), b = text.find_last_not_of(" \t\r\n");
     if (a == std::string::npos) return;
     std::string name = text.substr(a, b - a + 1);
@@ -458,24 +515,24 @@ void Keys(bool entry) {
     int digit = -1;
     for (int d = 0; d < 10; d++)
         if (int(Pressed('0' + d)) | int(Pressed(VK_NUMPAD0 + d))) digit = d;
-    bool next = (int(Pressed(VK_OEM_PERIOD)) | int(Pressed(VK_DECIMAL))) != 0;
+    bool next = (int(Pressed(VK_OEM_PERIOD)) | int(Pressed(VK_DECIMAL)) | int(Pressed(VK_OEM_1))) != 0;  // . or : (the ; key)
     bool del = Pressed(VK_BACK), clear = Pressed(VK_DELETE), leave = Pressed(VK_ESCAPE);
     if (!TestKeys().empty()) {  // (tests)
         char key = TestKeyNow();
         front = true, paste = key == 'v', digit = key >= '0' && key <= '9' ? key - '0' : -1;
-        next = key == '.', del = key == 'b', clear = key == 'd', leave = key == 'e';
+        next = key == '.' || key == ':', del = key == 'b', clear = key == 'd', leave = key == 'e';
     }
     if (paste) Paste();
     if (!front || (GetAsyncKeyState(VK_SHIFT) & 0x8000)) return;
     if (!entry) {  // a digit typed on the row starts a new address
         if (digit < 0) return;
-        EntryStart();
-        std::fill(g_entry.field, g_entry.field + 4, 0);
+        EntryStart(CoopChoice() == kHost);
+        std::fill(g_entry.field, g_entry.field + kFields, 0);
     }
     if (digit >= 0) EntryDigit(digit);
     if (next) EntryNext();
     if (del) EntryDelete();
-    if (clear) g_entry.field[g_entry.caret / 3] = 0, g_entry.typed = 0;
+    if (clear) g_entry.field[FieldAt(g_entry.caret)] = 0, g_entry.typed = 0;
     if (leave) EntryEnd(false);
 }
 #endif
@@ -504,11 +561,16 @@ std::string Value(int row) {
 constexpr const char* kLabels[kRows] = {"Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "Co-op", "Online"};
 
 bool Visible(int row) { return row != kOnline || CoopChoice() == kHost || CoopChoice() == kJoin; }
-bool Focusable(int row) { return row != kOnline || CoopChoice() == kJoin; }  // (a host's address is only shown)
+bool Focusable(int row) { return row != kOnline || CoopChoice() == kJoin || CoopChoice() == kHost; }
 
-// the row under Co-op: a host's own address, or the address of the host to join
+// The row under Co-op. Hosting: this PC's code (its game port as seen from outside), or its address when no code
+// is known; while the host enters the joiner's code, that. Joining: the host's code; once the join is on its way,
+// this PC's own code, which the host needs.
 std::string OnlineText(bool focused) {
     if (CoopChoice() == kHost) {
+        if (g_typing) return "Friend's code:  " + EntryText();
+        std::string code = game_coop::g_host_failed ? std::string() : game_net::OutsideAddress();
+        if (!code.empty()) return focused ? "Your code:  [ " + code + " ]" : "Your code:  " + code;
         std::string address;
         if (game_coop::g_host_failed) {
             address = "not hosting";
@@ -524,10 +586,14 @@ std::string OnlineText(bool focused) {
         }
         return "Your address:  " + address;
     }
-    if (g_typing) return "Host address:  " + EntryText();
+    if (g_typing) return "Host's code:  " + EntryText();
+    if (game_net::JoinState() == 1) {
+        std::string mine = game_net::OutsideAddress();
+        return "Your code:  " + (mine.empty() ? std::string("looking it up") : mine);
+    }
     std::string address = Address().empty() ? "not set" : Address();
-    if (game_net::JoinState()) return "Host address:  " + address + "  (joining)";
-    return focused ? "Host address:  [ " + address + " ]" : "Host address:  " + address;
+    if (game_net::JoinState()) return "Host's code:  " + address + "  (joined)";
+    return focused ? "Host's code:  [ " + address + " ]" : "Host's code:  " + address;
 }
 
 std::string RowText(int row, bool focused) {
@@ -547,6 +613,13 @@ std::string Help() {
         case kHost: {
             if (game_coop::g_host_failed) return "Cannot host: UDP port 27025 is in use on this PC. Is another copy of the game hosting?";
             if (game_net::HostHasPlayer()) return "Player 2 has joined your game and comes in once a level is in play.";
+            if (g_typing)
+                return "Enter the code your friend's screen shows. Up and down change the digit, A is done, B cancels. Ctrl+V pastes it.";
+            if (game_net::HostExpecting()) return "Waiting for your friend to come in. This can take half a minute.";
+            if (game_net::OutsideKind() == 2)
+                return "Your router gives every connection a new port, so a code cannot work. Forward UDP port 27025 to this PC instead.";
+            if (!game_net::OutsideAddress().empty())
+                return "1. Send your code to your friend. 2. He enters it under Join online and sends you his. 3. Press A here and enter his code.";
             switch (game_net::InternetState()) {
                 case 1: return "Hosting. Looking up your internet address...";
                 case 2: return "Hosting. Your friend chooses Join online and enters your address. Waiting for Player 2.";
@@ -560,15 +633,17 @@ std::string Help() {
         }
         case kJoin: {
             if (g_typing)
-                return "Up and down change the digit, left and right move. A joins, B cancels. A keyboard can type the address, or paste it with Ctrl+V.";
-            if (game_net::JoinState()) return "Joining " + Address() + ". To leave a game, hold BACK (keyboard: Backspace) for two seconds.";
+                return "Up and down change the digit, left and right move. A joins, B cancels. A keyboard can type the code, or paste it with Ctrl+V.";
+            if (game_net::JoinState() == 1)
+                return "Now send YOUR code to the host. He presses A under Host online and enters it. Then you are in.";
+            if (game_net::JoinState()) return "Joined. To leave the game, hold BACK (keyboard: Backspace) for two seconds.";
             std::string note = game_net::LastNote();
             if (!note.empty()) {
-                if (note.rfind("No answer", 0) == 0) note += " Check the address, and that your friend chose Host online.";
+                if (note.rfind("No answer", 0) == 0) note += " Check the code, and that the host entered yours.";
                 return note;
             }
-            if (row == kCoop) return "Join a friend's game: go down to Host address. To leave a game later, hold BACK (Backspace) for two seconds.";
-            return "Press A, enter the address your friend sees under Host online, then press A to join.";
+            if (row == kCoop) return "Join a friend's game: go down to Host's code. To leave a game later, hold BACK (Backspace) for two seconds.";
+            return "Press A, enter the code your friend sees under Host online, then press A to join.";
         }
     }
     return "Play with a friend: Split screen on this PC, or Host online and Join online over the internet.";
@@ -657,7 +732,7 @@ void Tick(X86Context& ctx) {
     if (g_after_entry > 0) g_after_entry--;
     SettleHost(false);
 #ifdef _WIN32
-    if (CoopChoice() == kJoin && g_page.focus == kOnline + 1 && !game_net::JoinState()) Keys(g_typing);
+    if (g_page.focus == kOnline + 1 && ((CoopChoice() == kJoin && !game_net::JoinState()) || CoopChoice() == kHost)) Keys(g_typing);
 #endif
     Refresh(ctx);
 }
@@ -820,7 +895,8 @@ X86_FUNC(sub_0014BDA0) {
             case kDown: EntryTurn(-1); break;
             case kAccept:
                 EntryEnd(true);
-                JoinNow();
+                if (g_entry.for_friend) ExpectNow();
+                else JoinNow();
                 break;
             case kBack: EntryEnd(false); break;  // (B is asked for in BackCloses too: the manager takes it first)
         }
@@ -837,8 +913,10 @@ X86_FUNC(sub_0014BDA0) {
     if (g_page.focus > 0 && (event == kLeft || event == kRight || event == kAccept)) {
         int row = g_page.focus - 1;
         if (row != kOnline) Step(row, event == kLeft ? -1 : 1);
-        else if (int f[4]; event == kAccept && !Address().empty() && !Quad(g_address.c_str(), f, true)) JoinNow();  // a host name
-        else EntryStart();
+        else if (CoopChoice() == kHost) EntryStart(true);  // the joiner's code
+        else if (game_net::JoinState()) {}                 // (joining or joined: nothing to enter)
+        else if (int f[kFields]; event == kAccept && !Address().empty() && !Code(g_address.c_str(), f, true)) JoinNow();  // a host name
+        else EntryStart(false);
         Refresh(ctx);
         kernel::Return(ctx, 1, 1);
         return;

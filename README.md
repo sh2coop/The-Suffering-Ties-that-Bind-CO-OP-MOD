@@ -35,8 +35,16 @@ the crash reports.
 In the game: Options, then "Display and Co-op".
 
 - **Split screen**: two controllers on one PC. Controller 1 is Player 1.
-- **Online**: one player picks "Host online", the other "Join online" and types the host's address. The host's PC runs
-  the game and sends Player 2 his picture and sound. Over the internet the host has to forward UDP port 27025.
+- **Online, no port forwarding needed:**
+  1. The host picks "Host online". His screen shows **Your code** (numbers like `203.0.113.7:27025`). He sends it
+     to his friend, for example over Discord.
+  2. The friend picks "Join online", presses A on "Host's code" and enters it (Ctrl+V pastes). His screen now
+     shows **his own code**. He sends that back.
+  3. The host presses A on "Your code" and enters the friend's code. A few seconds later the friend is in.
+
+  The host's PC runs the game and sends Player 2 his picture and sound. If a screen says the router gives every
+  connection a new port, codes cannot work for that router: forward UDP port 27025 on the host's router instead,
+  or use a virtual LAN such as Hamachi, and enter the plain address.
 
 When you host online, the game asks your router to open its port (UPnP), asks a public web service for your
 internet address so it can show it to you, and asks two public STUN servers (Google's and Cloudflare's) how your

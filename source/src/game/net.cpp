@@ -104,7 +104,8 @@ constexpr size_t kChunk = 1200;
 constexpr size_t kFrameHead = 23;         // a frame packet's bytes before the JPEG chunk
 constexpr int kClientTimeout = 3000;   // ms without pad packets: the remote player left
 constexpr int kHostTimeout = 15000;    // ms without frames (a host loading a level stalls a while): the joiner leaves
-constexpr int kConnectTimeout = 8000;  // ms without a first frame: the host is not answering
+constexpr int kConnectTimeout = 90000;  // ms without a first frame: the host is not answering (long: over the
+                                       // internet the host first has to enter this side's code)
 constexpr int kBeaconTimeout = 4000;   // ms without a beacon: the host drops off the list
 constexpr int kLeaveHold = 2000;       // ms of BACK held to leave a game
 constexpr uint32_t kAudioFrames = 240;   // stereo frames per sound packet: 10 ms at 24 kHz (half the mixer's rate)
@@ -455,6 +456,8 @@ struct HostState {
     std::atomic<float> frame_aspect{0};  // the shape that picture is shown in on the host (width / height)
     bool frame_new = false;
     Clock::time_point last_sent;
+    sockaddr_in punch{};  // a visitor's outside address, sent to until punch_until (HostBeacon)
+    Clock::time_point punch_until{};
 } g_host;
 
 bool ClientConnected() {
@@ -484,6 +487,12 @@ constexpr struct {
     const char* port;
 } kStunServers[2] = {{"stun.l.google.com", "19302"}, {"stun.cloudflare.com", "3478"}};
 
+void StunForget() {
+    std::lock_guard l(g_stun.lock);
+    g_stun.ip[0] = g_stun.ip[1] = 0;
+    g_stun.port[0] = g_stun.port[1] = 0;
+    g_stun.said.clear();
+}
 void StunAsk(Sock s) {
     for (int i = 0; i < 2; i++) {
         sockaddr_in to{};
@@ -668,7 +677,22 @@ void HostBeacon() {
             to.sin_addr.s_addr = b;
             sendto(g_host.sock, reinterpret_cast<const char*>(pkt), sizeof pkt, 0, reinterpret_cast<sockaddr*>(&to), sizeof to);
         }
-        for (int i = 0; i < 10 && g_host.run; i++) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        for (int i = 0; i < 10 && g_host.run; i++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // hole punching (see Stun): while a visitor is expected, a small packet goes to his outside address
+            // five times a second, so that this side's router lets his packets in
+            sockaddr_in peer{};
+            bool punch;
+            {
+                std::lock_guard l(g_host.lock);
+                punch = g_host.punch_until > Clock::now() && !g_host.connected;
+                peer = g_host.punch;
+            }
+            if (punch && i % 2 == 0) {
+                const uint8_t hello[5] = {'S', '2', 'C', '1', 6};
+                sendto(g_host.sock, reinterpret_cast<const char*>(hello), sizeof hello, 0, reinterpret_cast<sockaddr*>(&peer), sizeof peer);
+            }
+        }
     }
 }
 
@@ -884,6 +908,8 @@ void ClientRecv() {
                              reinterpret_cast<sockaddr*>(&from), &len));
         static std::atomic<uint32_t> packets{0};
         if (n > 0 && ++packets == 1) LOGI("coop: first packet from the host (%d bytes, type %d)", n, n > 4 ? buf[4] : -1);
+        if (StunAnswer(buf.data(), n)) continue;                                        // (how the joiner looks from outside)
+        if (n >= 5 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 6) continue;  // (the host's hole-punching hello)
         if (n >= 11 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 4) {
             SoundIn(buf.data(), n);
             continue;
@@ -1102,6 +1128,7 @@ bool Host(bool on) {
         return false;
     }
     Note("");
+    StunForget();
     g_host.run = true;
     g_host.listen = std::thread(HostListen);
     g_host.encode = std::thread(HostEncode);
@@ -1164,6 +1191,8 @@ bool Join(int index) {
     g_client.run = true;
     Note("");
     g_client.recv = std::thread(ClientRecv);
+    StunForget();
+    StunAsk(g_client.sock);  // (this side's code, and logged: can it be reached directly)
     gpu::g_present_override = Present;
     LOGR("coop: joining %s at %s", target.name.c_str(), IpText(target.ip).c_str());
     return true;
@@ -1234,6 +1263,44 @@ bool JoinAddress(const std::string& typed) {
         app::Save();
     }
     return Join(index);
+}
+
+// The host expects a visitor from this outside address ("203.0.113.7:51234"): for half a minute his router is
+// shown packets going there, so that the visitor's packets are let in. Tests: S2_COOP_PEER=<address:port>.
+bool HostExpect(const std::string& address) {
+    size_t colon = address.rfind(':');
+    in_addr ip{};
+    if (colon == std::string::npos || inet_pton(AF_INET, address.substr(0, colon).c_str(), &ip) != 1) return false;
+    int port = std::atoi(address.c_str() + colon + 1);
+    if (port <= 0 || port > 65535 || !g_host.run) return false;
+    std::lock_guard l(g_host.lock);
+    g_host.punch = {};
+    g_host.punch.sin_family = AF_INET;
+    g_host.punch.sin_addr = ip;
+    g_host.punch.sin_port = htons(uint16_t(port));
+    g_host.punch_until = Clock::now() + std::chrono::seconds(90);
+    LOGR("coop: internet: expecting a visitor, sending to his outside port %d for 90 s", port);
+    return true;
+}
+
+// this PC's game socket as the STUN servers see it, "203.0.113.7:51234": the code to give to the other player
+// ("" until the first server has answered)
+std::string OutsideAddress() {
+    if (const char* fake = std::getenv("COOP_FAKE_CODE")) return fake;  // harness: pictures of the menu
+    std::lock_guard l(g_stun.lock);
+    int which = g_stun.port[0] ? 0 : g_stun.port[1] ? 1 : -1;
+    if (which < 0) return "";
+    return IpText(g_stun.ip[which]) + ":" + std::to_string(g_stun.port[which]);
+}
+// 0 not known yet, 1 one port for everyone (a code works), 2 a new port for every destination (it does not)
+int OutsideKind() {
+    std::lock_guard l(g_stun.lock);
+    if (!g_stun.port[0] || !g_stun.port[1]) return 0;
+    return g_stun.port[0] == g_stun.port[1] && g_stun.ip[0] == g_stun.ip[1] ? 1 : 2;
+}
+bool HostExpecting() {
+    std::lock_guard l(g_host.lock);
+    return g_host.run && g_host.punch_until > Clock::now() && !g_host.connected;
 }
 
 void Leave() { StopClient(); }
@@ -1314,6 +1381,7 @@ void Init() {
     g_tap_before = audio::g_tap;
     audio::g_tap = SoundTap;
     if (std::getenv("S2_COOP_HOST")) Host(true);
+    if (const char* peer = std::getenv("S2_COOP_PEER")) HostExpect(peer);
     if (const char* address = std::getenv("S2_COOP_JOIN")) {
         std::string to = address;
         std::thread([to] {  // (the window and the renderer first)

@@ -1,1 +1,1 @@
-7 2026-11-25 Hosting logs whether your router allows a direct connection; escort fix
+8 2026-11-25 Online co-op without port forwarding: swap codes
