@@ -659,6 +659,29 @@ void BesideFirst(X86Context& ctx) {
 // falls to a quarter he goes down instead, out of sight and out of play for five seconds, and comes back beside
 // Player 1 with full health. The same when he falls out of the level (more than 40 m under Player 1).
 uint64_t g_down_until = 0;  // frame he comes back at (0: he is up)
+// The partner-down sound (decided 2026-11-24: the game's own tonal hum, twice back to back). The game plays a
+// sound by its number in its package: the Player's package is 0x3C and the hum is its sound 0xF4, so 0x003C00F4 (in
+// the package's sound file, Common/Player/Player.sdu, the wave has the same 0xF4 under another upper half,
+// 0x00A500F4, which is what the PS2 extraction named it by; asking for that number gives a voice that never
+// sounds). It is a wave that repeats, one pulse a second: it is started with the game's own play call (no place,
+// flag 4: heard whatever the distance) and stopped by the game's own stop call (0x190F40: the voice, a fade in
+// seconds) after two pulses. Both players hear it: the joined player hears the host's sound.
+constexpr uint32_t kDownSound = 0x003C00F4, kStopSound = 0x190F40;
+constexpr int kDownSoundMs = 1900;  // (the third pulse would begin at 2000)
+uint32_t PlaySound(X86Context& ctx, uint32_t sound, bool at_player, uint32_t flags = 2);
+std::chrono::steady_clock::time_point g_down_sound_stop{};
+uint32_t g_down_voice = 0;
+void DownSoundStop(X86Context& ctx, float fade) {
+    uint32_t manager = kernel::R32(0x384BBC), ecx = ctx.ecx, bits;
+    std::memcpy(&bits, &fade, 4);
+    if (manager && g_down_voice) {
+        ctx.ecx = manager;
+        kernel::CallGuest(ctx, kStopSound, {g_down_voice, bits});
+        ctx.ecx = ecx;
+    }
+    g_down_voice = 0;
+    g_down_sound_stop = {};
+}
 bool Down() { return g_down_until != 0; }
 void Downs(X86Context& ctx) {
     constexpr float kDownAt = 0.25f, kFallen = 40.0f, kDownSeconds = 5.0f;
@@ -678,12 +701,20 @@ void Downs(X86Context& ctx) {
         kernel::CallGuest(ctx, kObjectShow, {shown ? 1u : 0u});
         ctx.ecx = ecx;
     };
+    if (g_down_voice && std::chrono::steady_clock::now() >= g_down_sound_stop) DownSoundStop(ctx, 0.15f);
     if (!g_down_until) {
         bool fallen = g_player_object && ReadF(g_second_object + kPosition + 4) < ReadF(g_player_object + kPosition + 4) - kFallen;
         if (!(most > 0 && health <= most * kDownAt) && !fallen) return;
         g_down_until = g_frames + (fallen ? 1 : kDownFrames);
         LOGI("coop: Player 2 is down (%s; health %.0f of %.0f)", fallen ? "fell out of the level" : "health", health, most);
         show(false);
+        static const bool quiet = std::getenv("S2_COOP_NO_DOWN_SOUND") != nullptr;
+        if (!quiet) {
+            if (g_down_voice) DownSoundStop(ctx, 0.0f);
+            g_down_voice = PlaySound(ctx, kDownSound, false, 4);
+            g_down_sound_stop = std::chrono::steady_clock::now() + std::chrono::milliseconds(kDownSoundMs);
+            LOGI("coop: the partner-down sound (the tonal hum, two pulses; voice %08X)", g_down_voice);
+        }
     }
     std::memcpy(kernel::HostPtr(g_second + 0x16), &most, 4);  // nothing hurts him meanwhile
     if (g_frames < g_down_until || g_one_view) return;
@@ -2402,12 +2433,24 @@ void TestBody() {
 }
 // The game's own "play this sound" (0x191070, this = the sound manager [0x384BBC]; the sound's resource, a place
 // (0x3932AC: none, heard everywhere), a kind, 0), as the Player's code calls it for the full insanity meter.
-void PlaySound(X86Context& ctx, uint32_t sound) {
+// (A wave made for a place in the level (its header's nearest and farthest distances; the tonal hum 0xA500F4 has
+// 0 and 42 m) is not heard with "no place": it is played where Player 1's object is, which is where the listener is.)
+uint32_t PlaySound(X86Context& ctx, uint32_t sound, bool at_player, uint32_t flags) {
     uint32_t manager = kernel::R32(0x384BBC), ecx = ctx.ecx;
-    if (!manager || !sound) return;
+    if (!manager || !sound) return 0;
     ctx.ecx = manager;
-    kernel::CallGuest(ctx, 0x191070, {sound, 0x3932AC, 2, 0});
+    // (S2_TEST_SOUND_ARGS=<place: 0 none at all, 1 the "no place" vector, 2 Player 1>,<flags in hex>: for trying)
+    static const char* args = std::getenv("S2_TEST_SOUND_ARGS");
+    uint32_t place = at_player && g_player_object ? g_player_object + kPosition : 0x3932AC;
+    if (args) {
+        int which = std::atoi(args);
+        place = which == 0 ? 0 : which == 2 && g_player_object ? g_player_object + kPosition : 0x3932AC;
+        if (const char* comma = std::strchr(args, ',')) flags = uint32_t(std::strtoul(comma + 1, nullptr, 16));
+    }
+    uint32_t voice = kernel::CallGuest(ctx, 0x191070, {sound, place, flags, 0});
+    if (args) LOGR("test: sound %08X place %08X flags %X gave %08X", sound, place, flags, voice);
     ctx.ecx = ecx;
+    return voice;
 }
 // S2_TEST_SOUND=<frame>,<sound in hex>[,<frame>,<sound>...]: plays those sounds at those frames (finding a sound)
 void TestSound(X86Context& ctx) {
@@ -2419,8 +2462,9 @@ void TestSound(X86Context& ctx) {
         if (!comma) break;
         uint32_t sound = uint32_t(std::strtoul(comma + 1, nullptr, 16));
         if (frame == g_frames) {
-            LOGR("test: sound %08X", sound);
-            PlaySound(ctx, sound);
+            static const bool at_player = std::getenv("S2_TEST_SOUND_AT") != nullptr;
+            LOGR("test: sound %08X%s", sound, at_player ? " at Player 1" : "");
+            PlaySound(ctx, sound, at_player);
         }
         c = std::strchr(comma + 1, ',');
         if (c) c++;
@@ -2456,7 +2500,7 @@ void TestSounds(X86Context& ctx) {
     }
     if (next < list.size() && std::chrono::steady_clock::now() >= at) {
         LOGR("test: sound %zu, property 0x%X, resource %08X", next, list[next].first, list[next].second);
-        PlaySound(ctx, list[next].second);
+        PlaySound(ctx, list[next].second, false);
         next++;
         at = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
     }
@@ -2747,4 +2791,19 @@ X86_FUNC(sub_001D1970) {
     game_coop::g_drawing_second = game_coop::g_second_object && kernel::R32(ctx.esp + 4) == game_coop::g_second_object;
     __imp__sub_001D1970(ctx, base);
     game_coop::g_drawing_second = before;
+}
+
+// S2_SOUND_TRACE=1: every sound the game asks for (0x191070: the wave, the place, flags, a float), who asked and what
+// came back.
+X86_EXTERN_FUNC(__imp__sub_00191070);
+X86_FUNC(sub_00191070) {
+    static const bool trace = std::getenv("S2_SOUND_TRACE") != nullptr;
+    uint32_t from = kernel::R32(ctx.esp), sound = kernel::R32(ctx.esp + 4), place = kernel::R32(ctx.esp + 8), flags = kernel::R32(ctx.esp + 12);
+    float scale = game_coop::ReadF(ctx.esp + 16);
+    __imp__sub_00191070(ctx, base);
+    if (trace) {
+        float at[3] = {0, 0, 0};
+        if (place && mem::IsCommitted(place + 12)) std::memcpy(at, kernel::HostPtr(place), 12);
+        LOGI("sound trace: wave %08X place %08X (%.1f %.1f %.1f) flags %X scale %.2f from %08X gave %08X", sound, place, at[0], at[1], at[2], flags, scale, from, ctx.eax);
+    }
 }
