@@ -4,8 +4,8 @@ HOW TO START
 
   1. Put your Xbox disc image of the game (the .iso file) into the folder "drop xbox iso here".
   2. Double-click "Build Recomp".
-  3. It asks whether to make HD textures too (see below). Then it builds the game (a few minutes,
-     only this once) and the game starts.
+  3. Wait while it builds the game (a few minutes, only this once).
+     When it says it is ready, press Enter. The game starts.
 
 That is all. From then on, double-click "The Suffering 2" to play.
 
@@ -34,15 +34,6 @@ KEYBOARD
 
   Arrows = d-pad, Enter = START, Backspace = BACK, Space or J = A, K = B, U = X, I = Y,
   O = white, P = black, W A S D = move, Q and E = triggers, numpad 8 2 4 6 = look.
-
-HD TEXTURES
-
-  Build Recomp can upscale every texture of your own game image 4x with an AI upscaler (Real-ESRGAN,
-  fetched once from its GitHub page). It needs about 3 GB free and runs on the graphics card:
-  about 15 to 30 minutes on a fast one, longer on an older one. Close its window to stop; the next
-  Build Recomp continues where it stopped. Already built the game? Double-click Build Recomp again
-  and say Yes to the HD textures: the game itself is not built again.
-  In the game: Options, Display and Co-op, HD textures On or Off.
 
 UPDATES
 
