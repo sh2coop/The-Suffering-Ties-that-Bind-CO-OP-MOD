@@ -1,0 +1,4 @@
+# Player 2 pauses and presses down twice (only Resume, Archives and Friends can take the focus)
+16 START 0.2
+18 DOWN
+19 DOWN

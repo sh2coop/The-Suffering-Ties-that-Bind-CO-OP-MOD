@@ -1,1 +1,1 @@
-17 2026-11-25 New Game with two connected players: Player 2 watches the seated opening; the arrow is placed right online
+18 2026-11-25 Player 2 cannot change Player 1's settings from the pause menu

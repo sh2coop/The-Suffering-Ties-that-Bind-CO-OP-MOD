@@ -907,7 +907,7 @@ void PauseTitle(X86Context& ctx, int pauser) {
             std::string text = words(widget);
             if (trace && !text.empty()) LOGI("menu: screen %u widget %u says \"%s\"", n, i, text.c_str());
             if (text == "PAUSE" || text == "Pause" || text == "PAUSED") titled = widget;
-            if (text == "Save Game" || text == "Load Game" || text == "Quit Game" || text == "Revert To Last Checkpoint") g_p1_only.push_back(widget);
+            if (text == "Save Game" || text == "Load Game" || text == "Quit Game" || text == "Revert To Last Checkpoint" || text == "Options") g_p1_only.push_back(widget);
         }
     }
     if (!titled) return;
