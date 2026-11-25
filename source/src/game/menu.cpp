@@ -849,6 +849,10 @@ bool BackCloses(X86Context& ctx) {
 
 bool Typing() { return g_typing; }
 
+std::vector<uint32_t> g_p1_only;  // the pause screen's items that are Player 1's alone
+std::atomic<bool> g_p1_item{false};
+bool PauseItemP1Only() { return g_p1_item.load(); }
+
 // The pause screen's title says who paused, in co-op: "PLAYER 2 PAUSED" where the game writes "PAUSE". The title is
 // one of the screen's own text widgets (the newest screen of the menu manager [0x391D64]; screens at +0x50, count
 // +0x58; a screen's widgets the same way; a text widget's words at +0x68, their count with the end at +0x6C), so
@@ -858,7 +862,23 @@ void PauseTitle(X86Context& ctx, int pauser) {
     static int shown = 0;
     if (!pauser) {
         titled = 0, shown = 0;  // (the screen is gone with its widgets; the next pause makes new ones)
+        g_p1_only.clear();
+        g_p1_item = false;
         return;
+    }
+    // Player 2's pause: Save Game, Load Game and Quit Game are Player 1's (decided 2026-11-25). They are shown
+    // greyed (the widget's state S2_MENU_GREY, 3 unless named) and A does nothing on them (pad.cpp asks
+    // PauseItemP1Only; the item in focus is the highlighted one).
+    if (pauser == 2 && shown == pauser) {
+        static const uint32_t grey = std::getenv("S2_MENU_GREY") ? uint32_t(std::atoi(std::getenv("S2_MENU_GREY"))) : 3;
+        bool on_one = false;
+        for (uint32_t widget : g_p1_only) {
+            if (!mem::IsCommitted(widget + kState + 4)) continue;
+            uint32_t state = kernel::R32(widget + kState);
+            on_one |= state == kHighlighted;
+            if (state == kIdle) Method(ctx, widget, kSetState, {grey});
+        }
+        g_p1_item = on_one;
     }
     if (shown == pauser) return;
     uint32_t manager = kernel::R32(0x391D64);
@@ -887,6 +907,7 @@ void PauseTitle(X86Context& ctx, int pauser) {
             std::string text = words(widget);
             if (trace && !text.empty()) LOGI("menu: screen %u widget %u says \"%s\"", n, i, text.c_str());
             if (text == "PAUSE" || text == "Pause" || text == "PAUSED") titled = widget;
+            if (text == "Save Game" || text == "Load Game" || text == "Quit Game" || text == "Revert To Last Checkpoint") g_p1_only.push_back(widget);
         }
     }
     if (!titled) return;

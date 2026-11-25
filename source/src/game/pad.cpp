@@ -42,7 +42,8 @@ bool PausedBySecond();            // the pause menu is up and Player 2 opened it
 input::Pad SecondRaw();
 }
 namespace game_menu {
-bool Typing();  // menu.cpp: the host's address is being typed
+bool Typing();
+bool PauseItemP1Only();  // Player 2 has the pause menu and its focus is on Save, Load or Quit
 }
 namespace game_net {  // net.cpp
 void Init();
@@ -237,6 +238,7 @@ void Hook(int port, input::Pad& p) {
         bool connected = p.connected;
         p = game_coop::SecondRaw();
         p.connected = connected;
+        if (game_menu::PauseItemP1Only()) p.analog[0] = 0;  // Save, Load and Quit are Player 1's: A does nothing there
     } else if (game_coop::SecondStart()) {
         p.buttons |= 16;  // Player 2's START pauses for both
     }

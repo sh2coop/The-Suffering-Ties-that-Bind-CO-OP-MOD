@@ -1,0 +1,7 @@
+# Player 2 pauses, presses down four times (only Resume, Options, Archives, Friends can take the focus), then START resumes
+16 START 0.2
+18 DOWN
+19 DOWN
+20 A 0.2
+23 B 0.2
+25 START 0.2

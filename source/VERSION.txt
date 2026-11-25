@@ -1,1 +1,1 @@
-11 2026-11-25 Co-op rules: teleport hold, pause by either player, +30 percent enemies, smoother online join
+12 2026-11-25 Player 2's pause menu: Save, Load, Revert and Quit are Player 1's

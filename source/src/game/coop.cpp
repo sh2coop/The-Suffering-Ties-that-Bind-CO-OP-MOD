@@ -878,6 +878,7 @@ void TestExit(X86Context& ctx);
 void TestCensus();
 void TestMeter(X86Context& ctx);
 void TestCall(X86Context& ctx);
+void TestBody();
 void TestGoto(X86Context& ctx);
 
 // The game's own extra view camera (a security monitor's, or the one an effect looks through) has to be the second
@@ -969,6 +970,7 @@ void Frame(X86Context& ctx) {
     TestCensus();
     TestMeter(ctx);
     TestCall(ctx);
+    TestBody();
     TestGoto(ctx);
     TestClasses(ctx);
     HitsSecond();
@@ -2214,6 +2216,23 @@ void TestMeter(X86Context& ctx) {
 // S2_TEST_CALL=<frame>,<class id in hex>,<function in hex>[,<which>]: calls that function (this = the class object of
 // the <which>-th loaded object of that class; one argument, 0), for setting off things a level sets off by message:
 // an Autosave (0x108400), a Movie Player.
+// S2_TEST_BODY=<frame>: each player's mover (the object at Player +0xF0 that carries him through the level) as
+// words, for finding what makes two players bump into each other.
+void TestBody() {
+    static const char* v = std::getenv("S2_TEST_BODY");
+    if (!v || g_frames != uint64_t(std::atoll(v))) return;
+    uint32_t players[2] = {g_player, g_second};
+    for (int i = 0; i < 2; i++) {
+        uint32_t body = players[i] && mem::IsCommitted(players[i] + 0xF4) ? kernel::R32(players[i] + 0xF0) : 0;
+        if (!body || !mem::IsCommitted(body + 0x140)) continue;
+        for (uint32_t at = 0; at < 0x140; at += 0x20) {
+            char line[200];
+            int n = std::snprintf(line, sizeof line, "body: Player %d +%03X:", i + 1, at);
+            for (uint32_t k = 0; k < 0x20; k += 4) n += std::snprintf(line + n, sizeof line - n, " %08X", kernel::R32(body + at + k));
+            LOGR("%s", line);
+        }
+    }
+}
 void TestCall(X86Context& ctx) {
     static const char* v = std::getenv("S2_TEST_CALL");
     if (!v || !g_player_object || g_frames != uint64_t(std::atoll(v))) return;
