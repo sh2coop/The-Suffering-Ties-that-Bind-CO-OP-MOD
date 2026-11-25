@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <map>
 #include <string>
 #include <vector>
@@ -744,13 +745,41 @@ void Session(X86Context& ctx, bool wanted) {
     }
 }
 
-// The teleport button: BACK on controller 2 puts Player 2 beside Player 1 (never the other way). The game does not
-// see that button, nor his START, while he is in (the map and the menus are Player 1's).
-std::atomic<bool> g_back2{false};
+// The teleport: Player 2 holds A, B, X and Y together for five seconds and is put beside Player 1 (never the other
+// way). The rule as decided on 2026-11-24 (a keyboard: T for five seconds, which net.cpp turns into the four
+// buttons for a joined player); until 2026-11-25 it was a press of BACK, which is too easy to hit. While all four
+// are down the game does not see them (no jump, use and reload at once). His START pauses for both players: the
+// game takes START from controller 1 only, so pad.cpp passes it on there. His BACK the game does not see (the map
+// is Player 1's).
+std::atomic<bool> g_teleport2{false}, g_start2{false};
+bool SecondStart() { return g_start2.load(); }
+// Pause by either player (decided 2026-11-25: "if it pauses for one player, it should pause for both", and the other
+// player is told who is in the pause menu, in the game's own menu look). The game takes its menus' input from
+// controller 1. So: whose START opened the pause menu is remembered (g_pauser), and while Player 2's pause is up
+// his controller is handed to the game as controller 1 (pad.cpp), Player 1's is not. The pause screen's own title
+// then reads "PLAYER 2 PAUSED" (menu.cpp, PauseTitle): one screen for both, in the game's font.
+std::atomic<int> g_pauser{0};       // 0 not paused, 1 or 2
+input::Pad g_pad2_raw;              // controller 2 as polled, before anything is taken from it (game thread)
+std::chrono::steady_clock::time_point g_start2_at{};
+bool PausedBySecond() { return g_pauser.load() == 2; }
+input::Pad SecondRaw() { return g_pad2_raw; }
+int Pauser() { return g_pauser.load(); }
 void Controller2(input::Pad& p) {
     constexpr uint16_t kStart = 16, kBack = 32;
-    g_back2 = (p.buttons & kBack) != 0;
-    if (g_second_object) p.buttons &= ~(kBack | kStart);  // (START is the pause menu: Player 1's)
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point since;
+    static bool held = false, done = false;
+    bool all = p.analog[0] > 100 && p.analog[1] > 100 && p.analog[2] > 100 && p.analog[3] > 100;
+    if (all && !held) since = Clock::now(), done = false;
+    held = all;
+    if (all) {
+        if (!done && Clock::now() - since >= std::chrono::seconds(5)) g_teleport2 = true, done = true;
+        p.analog[0] = p.analog[1] = p.analog[2] = p.analog[3] = 0;
+    }
+    g_pad2_raw = p;
+    g_start2 = g_second_object && (p.buttons & kStart) != 0;
+    if (g_start2) g_start2_at = Clock::now();
+    if (g_second_object) p.buttons &= ~(kBack | kStart);
     // Down, or in a scene (he is hidden then and comes back beside Player 1 after it): no controls. (In the first
     // chapter's opening, 220 s of scene, a test's Player 2 had walked 13 m off unseen.)
     if (g_second_object && (g_down_until || g_one_view)) {
@@ -842,6 +871,9 @@ void TestFace(X86Context& ctx) {
 }
 
 void HitsSecond();  // (below: who hurt whom, a line a second)
+}
+namespace game_menu { void PauseTitle(X86Context& ctx, int pauser); }
+namespace game_coop {
 void TestExit(X86Context& ctx);
 void TestCensus();
 void TestMeter(X86Context& ctx);
@@ -983,13 +1015,24 @@ void Frame(X86Context& ctx) {
                  kernel::R32(cam + 0x38) & 0xFFFF, count, modes.c_str());
         }
     }
-    static bool back_before = false;
-    bool back = g_back2.load();
-    if (back && !back_before && g_second_object && !g_one_view) {
-        BesideFirst(ctx);
-        LOGI("coop: Player 2 teleports to Player 1");
+    {   // the pause menu came up or went: timer flag bit 0 is "the game's time is stopped"
+        uint32_t timer = kernel::R32(0x384B78);
+        bool paused = timer && (kernel::R32(timer + 0xA0) & 1) && g_second_object;
+        int before = g_pauser.load();
+        if (paused && !before) {
+            bool second = std::chrono::steady_clock::now() - g_start2_at < std::chrono::milliseconds(700);
+            g_pauser = second ? 2 : 1;
+            LOGI("coop: Player %d paused the game", second ? 2 : 1);
+        } else if (!paused && before) {
+            g_pauser = 0;
+            LOGI("coop: the game goes on");
+        }
+        game_menu::PauseTitle(ctx, g_pauser.load());
     }
-    back_before = back;
+    if (g_teleport2.exchange(false) && g_second_object && !g_one_view) {
+        BesideFirst(ctx);
+        LOGI("coop: Player 2 teleports to Player 1 (A+B+X+Y held five seconds)");
+    }
     if (ViewCamera2() && !g_one_view) {
         if (!g_stream_view) {  // this frame's picture: a bar where the two views meet
             gpu::g_split_vertical = true;
@@ -1744,6 +1787,19 @@ X86_FUNC(sub_00028E00) {
                  game_coop::CallersOf(ctx).c_str());
         }
     }
+    // Co-op rules (decided 2026-11-24): the two players do not hurt each other, and what is not a Player hurts
+    // them 30% more while both are in (S2_COOP_NO_HARDER=1 leaves the amounts alone, for tests).
+    static const bool plain = std::getenv("S2_COOP_NO_HARDER") != nullptr;
+    if (game_coop::g_second_object && mem::IsCommitted(ctx.esp + 8)) {
+        uint32_t by = game_coop::g_hit_by;
+        bool partner = by && (by == game_coop::g_player_object || by == game_coop::g_second_object) &&
+                       mem::IsCommitted(ctx.ecx + 8) && kernel::R32(ctx.ecx + 4) != by;
+        float amount;
+        std::memcpy(&amount, kernel::HostPtr(ctx.esp + 4), 4);
+        if (partner) amount = 0;
+        else if (!plain && amount > 0) amount *= 1.3f;
+        std::memcpy(kernel::HostPtr(ctx.esp + 4), &amount, 4);
+    }
     __imp__sub_00028E00(ctx, base);
     game_coop::g_hit_by = before;
 }
@@ -1761,6 +1817,18 @@ X86_FUNC(sub_0016AF00) {
             said++;
             LOGI("coop trace: %s (class object %08X) is hurt %.1f by %s (%08X), called from %s", game_coop::WhoIs(object).c_str(), ctx.ecx, amount,
                  by && mem::IsCommitted(by + 0x110) ? game_coop::WhoIs(by).c_str() : "nothing named", by, game_coop::CallersOf(ctx).c_str());
+        }
+    }
+    // ... and enemies have 30% more health while both players are in: what a Player takes off anything that is not
+    // a Player is divided by 1.3 (the same thing, without touching every enemy's health and its bars)
+    {
+        static const bool plain = std::getenv("S2_COOP_NO_HARDER") != nullptr;
+        uint32_t victim = mem::IsCommitted(ctx.ecx + 8) ? kernel::R32(ctx.ecx + 4) : 0;
+        bool by_player = by && (by == game_coop::g_player_object || by == game_coop::g_second_object);
+        bool is_player = victim == game_coop::g_player_object || victim == game_coop::g_second_object;
+        if (!plain && game_coop::g_second_object && by_player && victim && !is_player && amount > 0) {
+            amount /= 1.3f;
+            std::memcpy(kernel::HostPtr(ctx.esp + 4), &amount, 4);
         }
     }
     game_coop::Hit(ctx.ecx, by ? by : game_coop::g_hit_by, amount);

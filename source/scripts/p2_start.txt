@@ -1,0 +1,3 @@
+# Player 2 presses START, then A
+16 START
+19 A

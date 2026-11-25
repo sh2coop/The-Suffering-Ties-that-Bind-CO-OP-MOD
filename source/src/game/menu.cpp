@@ -634,8 +634,11 @@ std::string Help() {
         case kJoin: {
             if (g_typing)
                 return "Up and down change the digit, left and right move. A joins, B cancels. A keyboard can type the code, or paste it with Ctrl+V.";
-            if (game_net::JoinState() == 1)
-                return "Now send YOUR code to the host. He presses A under Host online and enters it. Then you are in.";
+            if (game_net::JoinState() == 1) {
+                if (game_net::OutsideKind() == 2)
+                    return "Your router gives every connection a new port, so a code cannot work. The host has to forward UDP port 27025. Hold BACK to stop.";
+                return "WAITING FOR THE HOST. Send him YOUR code below. He enters it under Host online and you are in. Hold BACK to stop.";
+            }
             if (game_net::JoinState()) return "Joined. To leave the game, hold BACK (keyboard: Backspace) for two seconds.";
             std::string note = game_net::LastNote();
             if (!note.empty()) {
@@ -845,6 +848,52 @@ bool BackCloses(X86Context& ctx) {
 }  // namespace
 
 bool Typing() { return g_typing; }
+
+// The pause screen's title says who paused, in co-op: "PLAYER 2 PAUSED" where the game writes "PAUSE". The title is
+// one of the screen's own text widgets (the newest screen of the menu manager [0x391D64]; screens at +0x50, count
+// +0x58; a screen's widgets the same way; a text widget's words at +0x68, their count with the end at +0x6C), so
+// the game draws it, in its font, on its strip of paper, once for both players. pauser 0: not paused.
+void PauseTitle(X86Context& ctx, int pauser) {
+    static uint32_t titled = 0;  // the widget that was changed
+    static int shown = 0;
+    if (!pauser) {
+        titled = 0, shown = 0;  // (the screen is gone with its widgets; the next pause makes new ones)
+        return;
+    }
+    if (shown == pauser) return;
+    uint32_t manager = kernel::R32(0x391D64);
+    uint32_t screens = manager ? kernel::R32(manager + kChildren) : 0, count = manager ? kernel::R32(manager + kCount) : 0;
+    if (!screens || !count || count > 64) return;
+    static const bool trace = std::getenv("S2_MENU_TRACE") != nullptr;
+    auto words = [](uint32_t widget) {
+        std::string out;
+        if (!mem::IsCommitted(widget + kStringSize + 4)) return out;
+        uint32_t at = kernel::R32(widget + kString), size = kernel::R32(widget + kStringSize);
+        if (!at || size < 2 || size > 64 || !mem::IsCommitted(at) || !mem::IsCommitted(at + size * 2)) return out;
+        for (uint32_t i = 0; i + 1 < size; i++) {
+            uint16_t c = kernel::R16(at + i * 2);
+            out += c >= 32 && c < 127 ? char(c) : '?';
+        }
+        return out;
+    };
+    for (uint32_t n = count; n-- > 0 && !titled;) {  // newest first: the pause screen is on top
+        uint32_t screen = kernel::R32(screens + n * 4);
+        if (!screen || !mem::IsCommitted(screen + kCount + 4)) continue;
+        uint32_t widgets = kernel::R32(screen + kChildren), widget_count = kernel::R32(screen + kCount);
+        if (!widgets || widget_count > 64) continue;
+        for (uint32_t i = 0; i < widget_count; i++) {
+            uint32_t widget = kernel::R32(widgets + i * 4);
+            if (!widget || !mem::IsCommitted(widget + kTextId + 4)) continue;
+            std::string text = words(widget);
+            if (trace && !text.empty()) LOGI("menu: screen %u widget %u says \"%s\"", n, i, text.c_str());
+            if (text == "PAUSE" || text == "Pause" || text == "PAUSED") titled = widget;
+        }
+    }
+    if (!titled) return;
+    SetText(ctx, titled, pauser == 2 ? "P2 PAUSED" : "P1 PAUSED");
+    shown = pauser;
+    LOGI("menu: the pause screen's title says Player %d paused", pauser);
+}
 }  // namespace game_menu
 
 X86_EXTERN_FUNC(__imp__sub_0014BF00);

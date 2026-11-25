@@ -27,6 +27,9 @@ CO-OP
     If a screen says the router gives every connection a new port, forward UDP port 27025 on
     the host's router instead and enter the plain address.
 
+  - Player 2 stuck or left behind? Hold A+B+X+Y for five seconds (keyboard: T) and he is beside Player 1.
+  - Either player can pause. Leaving an online game: hold BACK (keyboard: Backspace) for two seconds.
+
 KEYBOARD
 
   Arrows = d-pad, Enter = START, Backspace = BACK, Space or J = A, K = B, U = X, I = Y,

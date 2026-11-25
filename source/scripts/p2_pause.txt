@@ -1,0 +1,6 @@
+# Player 2 pauses, moves down three times, then resumes with START
+16 START 0.2
+18 DOWN
+19 DOWN
+20 DOWN
+23 START 0.2

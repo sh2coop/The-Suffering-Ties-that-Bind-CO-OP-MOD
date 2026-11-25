@@ -51,7 +51,9 @@ internet address so it can show it to you, and asks two public STUN servers (Goo
 connection looks from outside. Nothing else is sent anywhere.
 
 Player 1 opens doors, uses things, picks up story items, triggers scenes and saves. Player 2 fights alongside, comes
-back beside Player 1 after scenes and level changes, and has a button (BACK) that brings him to Player 1.
+back beside Player 1 after scenes and level changes, and is brought to Player 1 by holding A+B+X+Y for five seconds
+(keyboard: T). Either player can pause; the pause menu says who did, and that player uses it. While two players
+are in, enemies have 30% more health and hit 30% harder, and the players cannot hurt each other.
 
 ## Also in this port
 

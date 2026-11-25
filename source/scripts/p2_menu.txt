@@ -1,0 +1,5 @@
+# Player 2 tries to use the pause menu Player 1 opened
+18 DOWN
+19 DOWN
+20 DOWN
+21 A

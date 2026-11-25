@@ -37,6 +37,9 @@
 
 namespace game_coop {
 void Controller2(input::Pad& p);  // coop.cpp
+bool SecondStart();               // Player 2 is pressing START: the pause is both players'
+bool PausedBySecond();            // the pause menu is up and Player 2 opened it: it is his to use
+input::Pad SecondRaw();
 }
 namespace game_menu {
 bool Typing();  // menu.cpp: the host's address is being typed
@@ -213,7 +216,7 @@ void Hook(int port, input::Pad& p) {
             for (const Press& s : script2)
                 if (t >= s.at && t < s.at + s.len) Apply(s.buttons, p);
         }
-        game_coop::Controller2(p);  // co-op takes Player 2's BACK button for itself
+        game_coop::Controller2(p);  // co-op takes Player 2's teleport hold, START and BACK for itself
         return;
     }
     if (port != 0) return;
@@ -230,6 +233,13 @@ void Hook(int port, input::Pad& p) {
 #ifdef _WIN32
     Keyboard(p);
 #endif
+    if (game_coop::PausedBySecond()) {  // Player 2's pause menu: his controller is the menu's, Player 1 waits
+        bool connected = p.connected;
+        p = game_coop::SecondRaw();
+        p.connected = connected;
+    } else if (game_coop::SecondStart()) {
+        p.buttons |= 16;  // Player 2's START pauses for both
+    }
     // Joined to a game online: this controller (and keyboard) goes to the host and this game sees none of it.
     // S2_PAD_SCRIPT=<file> names another script file than pad_script.txt (two games from one folder in tests).
     game_net::ClientPad(p);

@@ -1,1 +1,1 @@
-10 2026-11-25 Small fixes: update wording, no false freeze entry in the log
+11 2026-11-25 Co-op rules: teleport hold, pause by either player, +30 percent enemies, smoother online join

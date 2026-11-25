@@ -103,7 +103,8 @@ constexpr int kJpegQuality = 70;
 constexpr size_t kChunk = 1200;
 constexpr size_t kFrameHead = 23;         // a frame packet's bytes before the JPEG chunk
 constexpr int kClientTimeout = 3000;   // ms without pad packets: the remote player left
-constexpr int kHostTimeout = 15000;    // ms without frames (a host loading a level stalls a while): the joiner leaves
+constexpr int kHostTimeout = 60000;    // ms without frames (a host loading a level stalls a while; 15 s until
+                                       // 2026-11-25, which a slow disk can pass): the joiner leaves
 constexpr int kConnectTimeout = 90000;  // ms without a first frame: the host is not answering (long: over the
                                        // internet the host first has to enter this side's code)
 constexpr int kBeaconTimeout = 4000;   // ms without a beacon: the host drops off the list
@@ -685,10 +686,14 @@ void HostBeacon() {
             bool punch;
             {
                 std::lock_guard l(g_host.lock);
-                punch = g_host.punch_until > Clock::now() && !g_host.connected;
+                // five times a second for the first 90 s, then once a second for as long as he hosts and nobody
+                // is in: a friend who left can come back with the same code
+                bool known = g_host.punch.sin_port != 0 && !g_host.connected;
+                bool keen = g_host.punch_until > Clock::now();
+                punch = known && (keen ? i % 2 == 0 : i == 0);
                 peer = g_host.punch;
             }
-            if (punch && i % 2 == 0) {
+            if (punch) {
                 const uint8_t hello[5] = {'S', '2', 'C', '1', 6};
                 sendto(g_host.sock, reinterpret_cast<const char*>(hello), sizeof hello, 0, reinterpret_cast<sockaddr*>(&peer), sizeof peer);
             }
@@ -1104,6 +1109,7 @@ void StopHost() {
         g_host.connected = g_host.have_client = false;
     }
     if (was) game_coop::RemotePlayer(false);
+    g_host.punch = {};
     CloseToInternet();
     LOGR("coop: hosting off");
 }
@@ -1180,7 +1186,11 @@ bool Join(int index) {
     StopClient();
     // (tests: S2_COOP_PORT=<n> gives the joiner's socket a port known beforehand, so that a host started with
     // S2_COOP_PEER can be told where he will come from)
-    g_client.sock = Bind(std::getenv("S2_COOP_PORT") ? uint16_t(std::atoi(std::getenv("S2_COOP_PORT"))) : uint16_t(0), false);
+    // The joiner's own port is the same every time (27027, or what the test names), so that his code stays the same
+    // and the host, who keeps sending to it, lets him back in after a leave without a new swap of codes. Taken
+    // (two copies on one PC): any free port.
+    g_client.sock = Bind(std::getenv("S2_COOP_PORT") ? uint16_t(std::atoi(std::getenv("S2_COOP_PORT"))) : uint16_t(27027), false);
+    if (g_client.sock == kBad) g_client.sock = Bind(0, false);
     if (g_client.sock == kBad) return false;
     g_client.host = {};
     g_client.host.sin_family = AF_INET;
@@ -1355,9 +1365,15 @@ void ClientPad(const input::Pad& p) {
     std::memcpy(pkt, "S2C1", 4);
     pkt[4] = 1;
     uint32_t seq = ++g_client.seq;
+    uint8_t analog[8];
+    std::memcpy(analog, p.analog, 8);
+#ifdef _WIN32
+    // the keyboard's teleport: T held is A+B+X+Y held (coop.cpp counts the five seconds)
+    if (GetForegroundWindow() == static_cast<HWND>(app::Window()) && (GetAsyncKeyState('T') & 0x8000)) analog[0] = analog[1] = analog[2] = analog[3] = 255;
+#endif
     std::memcpy(pkt + 5, &seq, 4);
     std::memcpy(pkt + 9, &p.buttons, 2);
-    std::memcpy(pkt + 11, p.analog, 8);
+    std::memcpy(pkt + 11, analog, 8);
     std::memcpy(pkt + 19, &p.lx, 2);
     std::memcpy(pkt + 21, &p.ly, 2);
     std::memcpy(pkt + 23, &p.rx, 2);
