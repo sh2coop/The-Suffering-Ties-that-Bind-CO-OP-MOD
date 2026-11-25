@@ -1,0 +1,5 @@
+# second controller: walks away, then presses BACK (teleport to Player 1)
+31 LS 2.5
+36 BACK 0.2
+38 LSR 1.5
+41 BACK 0.2

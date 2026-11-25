@@ -1,0 +1,5 @@
+# Player 1 presses X (use) twice, fires, then X again
+16 X 0.2
+18 X 0.2
+20 RT 2
+24 X 0.2

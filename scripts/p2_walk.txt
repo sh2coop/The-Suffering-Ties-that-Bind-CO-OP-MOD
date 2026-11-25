@@ -1,0 +1,5 @@
+# second controller: walk forward, right, back, left (the second Player exists from about 31 s)
+36 LS 1.5
+38.5 LSR 1.5
+44 LSD 1.5
+46 LSL 1.5

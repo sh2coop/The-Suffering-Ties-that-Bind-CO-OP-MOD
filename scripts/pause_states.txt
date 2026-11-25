@@ -1,0 +1,3 @@
+# in a level: pause at 20 s, resume with B at 30
+20 START
+30 B

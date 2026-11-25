@@ -1,0 +1,5 @@
+# Player 1 transforms (WHITE) at 17 s, attacks, walks; Player 2 walks and presses WHITE too
+17 WHITE 0.3
+20 RT 0.3
+21 RT 0.3
+22 LS 1.5

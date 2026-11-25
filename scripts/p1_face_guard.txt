@@ -1,0 +1,2 @@
+# Player 1 turns a little left, to have the guard of 05b in the middle of his view (and does not fire)
+18.0 RSL 0.06

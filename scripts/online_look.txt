@@ -1,0 +1,16 @@
+# Options, Display and Co-op: the Co-op row (Off), Join online, the address entry, Host online; each held a few
+# seconds for a picture of the window (tools\winshot.py at 44.5, 48, 54.5 and 64 s)
+28 RIGHT
+29.5 RIGHT
+31 A
+35 RIGHT
+36.5 RIGHT
+38 A
+42 UP
+46 LEFT
+50 DOWN
+51 A
+52 UP
+57 B
+58 UP
+59 LEFT

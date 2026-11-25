@@ -1,0 +1,9 @@
+# in a level: walk forward a little, pause, Load Game, A on the first save, then Yes (left, A) in the question
+14 LS 2.0
+20 START
+21.5 DOWN
+22.3 DOWN
+23.5 A
+27 A
+29 LEFT
+30.5 A

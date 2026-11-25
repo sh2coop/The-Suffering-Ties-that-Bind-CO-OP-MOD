@@ -1,0 +1,2 @@
+# Player 2 walks forward for a second and a half at 14 s, to stand somewhere else than where he is made
+14 LS 1.5

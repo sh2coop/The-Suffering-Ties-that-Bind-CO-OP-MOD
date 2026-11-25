@@ -1,0 +1,9 @@
+# opens Options, Display Settings, moves to the Resolution row, and backs out; changes nothing
+28 RIGHT
+29.5 RIGHT
+31 A
+35 RIGHT
+36.5 RIGHT
+38 A
+42 DOWN
+45 B

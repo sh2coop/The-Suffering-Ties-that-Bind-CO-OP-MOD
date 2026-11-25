@@ -1,0 +1,3 @@
+# first controller, with scripts/p2_walk.txt on the second: stands while Player 2 walks, then walks right alone
+41.5 LSR 1.5
+48 LSL 1.5

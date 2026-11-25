@@ -1,0 +1,5 @@
+# Player 2 transforms at 19 s and attacks
+19 WHITE 0.3
+22 RT 0.3
+24 LS 1.5
+26 RT 0.3

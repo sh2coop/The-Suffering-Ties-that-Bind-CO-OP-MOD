@@ -1,0 +1,2 @@
+# second controller: fire for a second, later than the first
+40 RT 1.0

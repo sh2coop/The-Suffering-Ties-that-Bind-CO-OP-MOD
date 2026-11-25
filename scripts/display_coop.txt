@@ -1,0 +1,16 @@
+# opens Options, Display Settings, goes down to the Co-op row, switches it to Split screen and back to Off
+28 RIGHT
+29.5 RIGHT
+31 A
+35 RIGHT
+36.5 RIGHT
+38 A
+43 DOWN
+44 DOWN
+45 DOWN
+46 DOWN
+47 DOWN
+48 DOWN
+50.5 A
+53 A
+56 B

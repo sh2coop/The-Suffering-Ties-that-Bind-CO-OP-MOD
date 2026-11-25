@@ -1,0 +1,2 @@
+# Player 1 steps aside to the right (the guard of 05b then stands in front of where he was)
+16.5 LSR 1.2

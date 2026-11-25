@@ -1,0 +1,8 @@
+# in a level: pause, Save Game, and A through whatever it asks (pictures in between)
+20 START
+21.5 DOWN
+23 A
+27 A
+31 A
+35 A
+39 A

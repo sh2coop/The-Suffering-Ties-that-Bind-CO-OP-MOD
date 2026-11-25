@@ -1,0 +1,9 @@
+# Player 2 fires straight ahead in bursts from 15 s
+15.2 RT 3
+18.6 RT 3
+22 RT 3
+25.4 RT 3
+28.8 RT 3
+32.2 RT 3
+35.6 RT 3
+39 RT 3

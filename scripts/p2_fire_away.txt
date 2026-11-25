@@ -1,0 +1,3 @@
+# Player 2 turns away to the right and fires: does anything in front of Player 1 get hurt?
+17.0 RSR 0.8
+20 RT 6

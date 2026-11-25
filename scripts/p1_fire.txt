@@ -1,0 +1,2 @@
+# first controller: fire for a second
+35 RT 1.0

@@ -1,0 +1,14 @@
+# opens Options, Display Settings, steps down through every control and back up; changes nothing
+28 RIGHT
+29.5 RIGHT
+31 A
+35 RIGHT
+36.5 RIGHT
+38 A
+43 DOWN
+45 DOWN
+47 DOWN
+49 DOWN
+51 DOWN
+53 DOWN
+55 B

@@ -1,0 +1,5 @@
+# both players: d-pad up (first person) at 16 s, look right, fire, d-pad up again at 24 s
+16 UP
+18 RSR 0.5
+20 RT 1.0
+24 UP

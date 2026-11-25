@@ -1,0 +1,4 @@
+# Player 1 presses X (use) at 18.5 s, looks about, and X again at 25 s
+18.5 X 0.2
+21 RSR 1
+25 X 0.2

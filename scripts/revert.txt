@@ -1,0 +1,8 @@
+# in a level: pause, down to Revert To Last Checkpoint, A, then Yes (left, A) in the question
+20 START
+21.5 DOWN
+22.3 DOWN
+23.1 DOWN
+24.5 A
+26 LEFT
+27 A

@@ -1,0 +1,17 @@
+# Frame-rate measurements in a level started directly (05b: gameplay from about 12 s). The windows are read by
+# tools\measure.py: keep the two in step.
+#   20 to 23     walk forward
+#   25 to 26     turn right
+#   28           jump on the spot
+#   31 to 33     walk left
+#   35 to 37     walk forward, jump at 35.6
+#   39 to 40     turn left
+#   43 to 61     fire (the times of the reloads are compared)
+20.0 LS 3.0
+25.0 RSR 1.0
+28.0 A 0.2
+31.0 LSL 2.0
+35.0 LS 2.0
+35.6 A 0.2
+39.0 RSL 1.0
+43.0 RT 18.0

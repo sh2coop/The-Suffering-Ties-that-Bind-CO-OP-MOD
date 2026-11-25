@@ -1,0 +1,3 @@
+# second controller: walks away early; keeps pushing forward while he is down (must do nothing)
+14 LS 2.5
+38 LS 3

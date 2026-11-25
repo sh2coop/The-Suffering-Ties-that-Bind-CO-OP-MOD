@@ -1,0 +1,3 @@
+# Player 2 steps left into Player 1 s place, in front of the guard, and fires
+18.5 LSL 0.5
+20 RT 6

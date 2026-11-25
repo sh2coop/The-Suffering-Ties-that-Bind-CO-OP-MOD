@@ -1,0 +1,17 @@
+# the host, started in a level: pause, Options (a list here: two down), Display and Co-op, Co-op to Host online (two steps left: Off, Join
+# online, Host online, so that Split screen is not passed), then out of the menus and back into the game
+20 START
+21.5 DOWN
+22.3 DOWN
+23.1 DOWN
+23.9 DOWN
+25 A
+28 DOWN
+29.5 DOWN
+31 A
+34 UP
+35 LEFT
+36 LEFT
+40 B
+42 B
+44 B

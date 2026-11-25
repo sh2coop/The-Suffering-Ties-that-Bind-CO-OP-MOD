@@ -1,0 +1,6 @@
+# which button transforms: BLACK, WHITE, L3, R3, LT in turn
+17 BLACK 0.3
+19.5 WHITE 0.3
+22 L3 0.3
+24.5 R3 0.3
+27 LT 0.3

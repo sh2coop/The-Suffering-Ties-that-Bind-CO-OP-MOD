@@ -1,0 +1,6 @@
+# second controller: look right, look up, fire, jump, then walk while turning
+34 RSR 1.2
+36.5 RS 0.6
+38 RT 1.0
+40 A 0.2
+42 LS+RSL 1.5

@@ -1,0 +1,12 @@
+# main menu (shown about 25 s after start). RIGHT goes New Game, Load Game, Options, Archives, Extras, Friends.
+28 RIGHT
+29.5 RIGHT
+31 A
+35 RIGHT
+37 RIGHT
+39 RIGHT
+41 RIGHT
+43 RIGHT
+45 RIGHT
+47 RIGHT
+49 RIGHT

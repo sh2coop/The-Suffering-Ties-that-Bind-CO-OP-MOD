@@ -1,0 +1,8 @@
+# main menu (shown about 25 s after start): RIGHT goes New Game, Load Game, Options, ...; in Options RIGHT goes
+# Controller, Gameplay, Brightness, Audio, Load, Save
+28 RIGHT
+29.5 RIGHT
+31 A
+35 RIGHT
+36.5 RIGHT
+38 A

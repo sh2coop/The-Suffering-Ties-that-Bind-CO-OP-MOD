@@ -1,0 +1,3 @@
+# second controller: a step forward, then left over the grenades (he must not pick them up)
+33.2 LS 0.22
+34 LSL 2.0

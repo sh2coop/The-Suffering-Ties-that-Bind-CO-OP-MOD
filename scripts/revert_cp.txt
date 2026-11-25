@@ -1,0 +1,11 @@
+# after a checkpoint (the test puts Player 1 on one at 14.9 s): roll away three times, pause, Revert To Last Checkpoint, Yes
+17 B 0.3
+18 B 0.3
+19 B 0.3
+22 START
+23 DOWN
+23.6 DOWN
+24.2 DOWN
+25 A
+26.5 LEFT
+27.5 A

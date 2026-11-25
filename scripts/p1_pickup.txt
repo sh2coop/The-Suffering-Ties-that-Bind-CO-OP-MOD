@@ -1,0 +1,4 @@
+# first controller: steps forward out of the way, later back and left over the grenades
+32 LS 0.5
+39 LSD 0.5
+41 LSL 2.0

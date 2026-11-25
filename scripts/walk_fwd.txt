@@ -1,0 +1,6 @@
+# both controllers: walk forward in bursts
+22 LS 3
+30 LS 3
+40 LS 3
+50 LS 3
+60 LS 3

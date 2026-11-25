@@ -1,0 +1,25 @@
+# second controller: one control at a time, to learn the numbers
+20 A 0.3
+21 B 0.3
+22 X 0.3
+23 Y 0.3
+24 BLACK 0.3
+25 WHITE 0.3
+26 LT 0.3
+27 RT 0.3
+28 START 0.3
+29 BACK 0.3
+30 L3 0.3
+31 R3 0.3
+32 UP 0.3
+33 DOWN 0.3
+34 LEFT 0.3
+35 RIGHT 0.3
+36 LS 0.3
+37 LSD 0.3
+38 LSL 0.3
+39 LSR 0.3
+40 RS 0.3
+41 RSD 0.3
+42 RSL 0.3
+43 RSR 0.3

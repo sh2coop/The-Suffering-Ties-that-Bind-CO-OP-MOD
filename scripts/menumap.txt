@@ -1,0 +1,9 @@
+# maps the main menu's order: one press, one picture
+28 RIGHT
+30 RIGHT
+32 RIGHT
+34 RIGHT
+36 RIGHT
+38 RIGHT
+40 DOWN
+42 LEFT

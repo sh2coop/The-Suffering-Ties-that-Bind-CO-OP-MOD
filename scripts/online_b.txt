@@ -1,0 +1,15 @@
+# Options, Display and Co-op, Join online, the Host address row: A starts the entry, UP turns a digit, B gives the
+# entry up (the page must stay), then B again closes the page.
+28 RIGHT
+29.5 RIGHT
+31 A
+35 RIGHT
+36.5 RIGHT
+38 A
+42 UP
+43 LEFT
+44 DOWN
+45 A
+46 UP
+47.5 B
+50 B

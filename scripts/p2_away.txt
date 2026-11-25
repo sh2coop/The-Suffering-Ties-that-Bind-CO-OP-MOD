@@ -1,0 +1,2 @@
+# second controller: walks away before the test scene (frames 1500 to 1680, about 36 to 39 s)
+31 LS 2.5

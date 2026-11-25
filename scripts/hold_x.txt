@@ -1,0 +1,3 @@
+# Player 1 holds X (pick up) twice
+18.5 X 2.5
+23 X 2.5
