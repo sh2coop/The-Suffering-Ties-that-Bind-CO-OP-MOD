@@ -74,7 +74,11 @@ foreach ($pair in ($Vars -split ";" | Where-Object { $_ -match "=" })) {
 if ($Audio) { $env:S2_AUDIO_WAV = (Join-Path $rel "audio.wav"); $env:S2_AUDIO_LOG = "1" }
 # this run's log is the one that is not there yet (the runtime numbers them upwards and keeps 30)
 $logsBefore = @(Get-ChildItem $logdir -File -Filter "suffering2*.log" -ErrorAction SilentlyContinue | ForEach-Object Name)
+# test runs are not seen or heard: the window is off screen, never in front, silent, and the game runs at low priority
+$env:XBE_TEST_HIDDEN = "1"
 $p = Start-Process -FilePath (Join-Path $rel "Suffering2.exe") -WorkingDirectory $rel -PassThru
+try { $p.PriorityClass = "BelowNormal" } catch {}
+Remove-Item Env:XBE_TEST_HIDDEN -ErrorAction SilentlyContinue
 Set-Content $pidFile $p.Id
 # the game reads the cmd file ten times a second and has it open for a moment: a write that fails is tried again
 function Send-Cmd([string]$text) {

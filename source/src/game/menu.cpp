@@ -48,6 +48,7 @@
 #include <vector>
 
 #include "app/app.h"
+#include "core/input.h"
 #include "core/log.h"
 #include "kernel/memory.h"
 #include "xdk/hle.h"
@@ -69,6 +70,7 @@ std::string CallersOf(X86Context& ctx);  // (traces)
 }
 namespace game_net {  // net.cpp
 bool HostHasPlayer();
+bool HostNotStarted();  // joining: the host answered, and has not started the game yet
 int JoinState();  // 0 not joined, 1 asking the host, 2 playing in the host's game
 std::string LastNote();
 void ClearNote();
@@ -484,6 +486,23 @@ std::string Clipboard() {
     CloseClipboard();
     return out;
 }
+// Ctrl+C or a controller's X on the code row: this PC's code goes to the clipboard, to be pasted into a message to
+// the friend (asked for after the first online session, 2026-11-25: the codes were read out and typed by hand).
+std::chrono::steady_clock::time_point g_copied_at{};
+bool JustCopied() { return std::chrono::steady_clock::now() - g_copied_at < std::chrono::milliseconds(2500); }
+void CopyMine() {
+    std::string code = game_net::OutsideAddress();
+    if (code.empty() || !OpenClipboard(static_cast<HWND>(app::Window()))) return;
+    EmptyClipboard();
+    if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, code.size() + 1)) {
+        std::memcpy(GlobalLock(h), code.c_str(), code.size() + 1);
+        GlobalUnlock(h);
+        if (!SetClipboardData(CF_TEXT, h)) GlobalFree(h);
+        else g_copied_at = std::chrono::steady_clock::now(), LOGI("menu: this PC's code was copied");
+    }
+    CloseClipboard();
+}
+void JoinNow();
 // Ctrl+V: an address anywhere in the clipboard's text (a friend's message with it in). Outside the digit entry a
 // host name is taken too.
 void Paste() {
@@ -503,6 +522,7 @@ void Paste() {
         } else {
             g_address = CodeText(f);
             game_net::ClearNote();
+            if (!game_net::JoinState()) JoinNow();  // (a pasted code is whole: the join starts at once)
         }
         LOGI("menu: a code was pasted");
         return;
@@ -677,11 +697,12 @@ std::string Help() {
             if (game_net::HostHasPlayer()) return "Player 2 has joined your game and comes in once a level is in play.";
             if (g_typing)
                 return "Enter the code your friend's screen shows. Up and down change the digit, A is done, B cancels. Ctrl+V pastes it.";
+            if (JustCopied()) return "Copied. Paste it into a message to your friend.";
             if (game_net::HostExpecting()) return "Waiting for your friend to come in. This can take half a minute.";
             if (game_net::OutsideKind() == 2)
                 return "Your router gives every connection a new port, so a code cannot work. Forward UDP port 27025 to this PC instead.";
             if (!game_net::OutsideAddress().empty())
-                return "1. Send your code to your friend. 2. He enters it under Join online and sends you his. 3. Press A here and enter his code.";
+                return "X (Ctrl+C) copies your code for your friend. He joins with it and sends his back: Y (Ctrl+V) pastes it here, A types it.";
             switch (game_net::InternetState()) {
                 case 1: return "Hosting. Looking up your internet address...";
                 case 2: return "Hosting. Your friend chooses Join online and enters your address. Waiting for Player 2.";
@@ -699,7 +720,9 @@ std::string Help() {
             if (game_net::JoinState() == 1) {
                 if (game_net::OutsideKind() == 2)
                     return "Your router gives every connection a new port, so a code cannot work. The host has to forward UDP port 27025. Hold BACK to stop.";
-                return "WAITING FOR THE HOST. Send him YOUR code below. He enters it under Host online and you are in. Hold BACK to stop.";
+                if (JustCopied()) return "Copied. Paste it into a message to the host.";
+                if (game_net::HostNotStarted()) return "CONNECTED. The host has not started the game yet: you come in when he does. Hold BACK to stop.";
+                return "WAITING FOR THE HOST. X (Ctrl+C) copies YOUR code below: send it to him. He enters it and you are in. Hold BACK to stop.";
             }
             if (game_net::JoinState()) return "Joined. To leave the game, hold BACK (keyboard: Backspace) for two seconds.";
             std::string note = game_net::LastNote();
@@ -708,7 +731,7 @@ std::string Help() {
                 return note;
             }
             if (row == kCoop) return "Join a friend's game: go down to Host's code. To leave a game later, hold BACK (Backspace) for two seconds.";
-            return "Press A, enter the code your friend sees under Host online, then press A to join.";
+            return "Y (Ctrl+V) pastes the host's code and joins. Or press A, enter the code he sees under Host online, and press A.";
         }
     }
     return "Play with a friend: Split screen on this PC, or Host online and Join online over the internet.";
@@ -829,7 +852,19 @@ void Tick(X86Context& ctx) {
     if (g_after_entry > 0) g_after_entry--;
     SettleHost(false);
 #ifdef _WIN32
-    if (g_page.focus == kOnline + 1 && ((CoopChoice() == kJoin && !game_net::JoinState()) || CoopChoice() == kHost)) Keys(g_typing);
+    bool code_row = g_page.focus == kOnline + 1 && (CoopChoice() == kJoin || CoopChoice() == kHost);
+    bool takes_code = code_row && ((CoopChoice() == kJoin && !game_net::JoinState()) || CoopChoice() == kHost);
+    {   // copy and paste on the code row: Ctrl+C and Ctrl+V, or a controller's X and Y
+        static uint16_t held = 0;
+        uint16_t now = input::HeldOnAnyController(), pressed = uint16_t(now & ~held);
+        held = now;
+        bool front = GetForegroundWindow() == static_cast<HWND>(app::Window());
+        bool copy_key = Pressed('C') && (GetAsyncKeyState(VK_CONTROL) & 0x8000);
+        constexpr uint16_t kPadX = 0x4000, kPadY = 0x8000;
+        if (code_row && front && (copy_key || (pressed & kPadX))) CopyMine();
+        if (takes_code && front && !g_typing && (pressed & kPadY)) Paste();
+    }
+    if (takes_code) Keys(g_typing);
 #endif
     Refresh(ctx);
 }

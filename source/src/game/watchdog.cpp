@@ -306,7 +306,11 @@ void Run() {
             std::error_code ec;
             // (missing: the first start. Older than the program: an update, which builds it all again)
             auto dll = app::ExeDir() / "Suffering2.dll", exe = app::ExeDir() / "Suffering2.exe";
-            if (!std::filesystem::exists(dll, ec) || std::filesystem::last_write_time(dll, ec) < std::filesystem::last_write_time(exe, ec)) {
+            // (Built is not yet running: the progress window then waits for the player's Start, for as long as he
+            // likes. Both players' first starts of 2026-11-25 logged a "freeze" there. The built code is in use once
+            // it has been loaded into the program.)
+            bool loaded = GetModuleHandleW(L"Suffering2.dll") != nullptr;
+            if (!loaded || !std::filesystem::exists(dll, ec) || std::filesystem::last_write_time(dll, ec) < std::filesystem::last_write_time(exe, ec)) {
                 moving = clock::now();
                 continue;
             }

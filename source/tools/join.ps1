@@ -34,7 +34,11 @@ foreach ($pair in ($Vars -split ";" | Where-Object { $_ -match "=" })) {
     Set-Item -Path ("Env:" + $k) -Value $v
     $set += $k
 }
+# test runs are not seen or heard: the window is off screen, never in front, silent, and the game runs at low priority
+$env:XBE_TEST_HIDDEN = "1"
 $p = Start-Process (Join-Path $rel "Suffering2.exe") -WorkingDirectory $rel -PassThru
+try { $p.PriorityClass = "BelowNormal" } catch {}
+Remove-Item Env:XBE_TEST_HIDDEN -ErrorAction SilentlyContinue
 Remove-Item Env:S2_COOP_JOIN, Env:S2_PAD_SCRIPT, Env:S2_NO_CMD -ErrorAction SilentlyContinue
 foreach ($k in $set) { Remove-Item ("Env:" + $k) -ErrorAction SilentlyContinue }
 Remove-Item Env:S2_CAPTURE_AT, Env:XBE_CAPTURE_DIR, Env:S2_JOIN_DUMP -ErrorAction SilentlyContinue

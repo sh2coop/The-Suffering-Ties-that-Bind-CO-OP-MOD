@@ -5,6 +5,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <cstdlib>
 #include <windows.h>
 #include <xaudio2.h>
 
@@ -36,6 +37,7 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
             LOGE("audio: XAudio2 unavailable (%08X), no sound", unsigned(hr));
             return;
         }
+        if (std::getenv("XBE_TEST_HIDDEN")) master->SetVolume(0.0f);  // [local change] a hidden test run is silent (a recording still gets the sound)
         voice->Start();
         constexpr uint32_t kFrames = kRate / 100;
         constexpr uint32_t kMinQueued = 3;

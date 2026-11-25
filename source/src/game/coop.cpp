@@ -441,6 +441,7 @@ bool g_wanted = false;  // co-op is on now (the setting, or a test's switch)
 bool g_host_failed = false;  // hosting could not start (the port is taken): not tried again until the setting changes
 
 // net.cpp asks and tells
+bool InLevel() { return g_player_object != 0 && g_player != 0; }  // a level is in play on this PC (it has its Player)
 void RemotePlayer(bool connected) { LOGI("coop: the remote player %s", connected ? "is in" : "is gone"); }
 bool SplitActive() { return g_second_object && ViewCamera2() && !g_one_view && !g_stream_view; }
 // While the game is paused the joined player is sent the finished frame, the host's whole screen with the pause
@@ -599,6 +600,10 @@ bool InScene() {
     // first person (d-pad up puts a mode 0 on the stack). Until 2026-11-25 mode 0 counted as a scene: Player 1
     // looking through his own eyes took Player 2's view away and hid him. A scene that uses mode 0 shows by one of
     // the signs below.
+    // Player 1 at a security monitor (bit 0x400000 of his flags at +0xBC) is not a scene: the camera shows the
+    // monitor's picture in his view, and Player 2 keeps his own view and his controls. (In the first online session,
+    // 2026-11-25, a monitor took Player 2's view away and put him beside Player 1 afterwards.)
+    if (g_player && (kernel::R32(g_player + 0xBC) & 0x400000)) return false;
     if (mode != 3 && mode != 0) return g_scene_why = "the camera is neither following nor the Player's own", true;
     // ... or a sequence moves it: bit 1 of its flags at +0x2C (its own once-a-frame method does nothing then)
     if (kernel::R32(camera + 0x2C) & 1) return g_scene_why = "a sequence moves the camera", true;
@@ -617,12 +622,10 @@ bool InScene() {
     // moment he is on the truck's gun in chapter 10; run truck1: the truck drove him 250 m away and Player 2 stood
     // where the level began). A mount that stays where it is leaves Player 2 free: it only counts once he is more
     // than 15 m behind, and then until Player 1 is off the mount. He comes back beside Player 1 as after a scene.
-    // ... or Player 1 sits (the chess table the game opens at: he is "mounted", bit 0x200000, but not on a weapon,
-    // which shows as bit 1 of his flags at +0xB0; seated 0x1A000004, on a gun 0x18000207). A seat is a story
-    // moment: with two copies connected, Player 2 stood free in the yard while Player 1 sat through the opening
-    // (run intro_join). Now he watches it and comes in beside Player 1 afterwards.
-    if (g_player && (kernel::R32(g_player + 0xBC) & 0x200000) && !(kernel::R32(g_player + 0xB0) & 2))
-        return g_scene_why = "Player 1 is seated (a story moment)", true;
+    // (Until 2026-11-25 "Player 1 sits" counted as a scene too: bit 0x200000 without bit 1 of +0xB0, as at the chess
+    // table the game opens at. But the game sets exactly that for a second or two on every door, ladder, switch and
+    // monitor Player 1 uses: in the first online session it made 34 "scenes" in twenty minutes, and each one took
+    // Player 2's view, hid him and put him back beside Player 1, sometimes inside a wall. It is not a scene.)
     static bool riding = false;
     bool mounted = g_player && (kernel::R32(g_player + 0xBC) & 0x200000);
     if (!mounted || !g_second_object) riding = false;
@@ -646,14 +649,56 @@ constexpr uint32_t kObjectShow = 0x183C70;
 // Player, matrix) writes his object's matrix, his body's place in the physics ([Player +0xF0] +0x84) and his last
 // position (+0x186). (Writing the matrix alone left the body behind: after an 11 m move he slid 2.5 m.)
 constexpr uint32_t kPlayerStop = 0x2ED90, kPlayerTeleport = 0x2F060;
+// Where: a place Player 1 has just walked over (his trail: a point every half metre, the last sixty), the newest
+// that is between 0.9 and 4 m from where he stands now and about level with him. Such a place is inside the level
+// and can be stood on. Until 2026-11-25 it was one metre along Player 1's right whatever was there: after the dock
+// scene of the first online session that was outside the docks, and elsewhere inside walls. With no such point
+// (a scene has just set Player 1 down somewhere new) it is Player 1's own place.
+struct TrailPoint {
+    float at[3];
+};
+std::vector<TrailPoint> g_trail;
+void TrailStep() {
+    if (!g_player_object || !mem::IsCommitted(g_player_object + 0x60)) {
+        g_trail.clear();
+        return;
+    }
+    TrailPoint now;
+    for (int i = 0; i < 3; i++) now.at[i] = ReadF(g_player_object + kPosition + i * 4);
+    if (!g_trail.empty()) {
+        float d = 0;
+        for (int i = 0; i < 3; i++) d += (now.at[i] - g_trail.back().at[i]) * (now.at[i] - g_trail.back().at[i]);
+        if (d < 0.5f * 0.5f) return;
+        if (d > 6.0f * 6.0f) g_trail.clear();  // (he was moved, not walking: what is behind him is another place)
+    }
+    g_trail.push_back(now);
+    if (g_trail.size() > 60) g_trail.erase(g_trail.begin());
+}
+float FromFirst(uint32_t object) {  // metres between Player 1 and an object
+    float d = 0;
+    for (int i = 0; i < 3; i++) {
+        float v = ReadF(g_player_object + kPosition + i * 4) - ReadF(object + kPosition + i * 4);
+        d += v * v;
+    }
+    return std::sqrt(d);
+}
 void BesideFirst(X86Context& ctx) {
     if (!g_second || !g_second_object || !g_player_object) return;
     static uint32_t matrix = mem::AllocSystem(64);
     std::memcpy(kernel::HostPtr(matrix), kernel::HostPtr(g_player_object + kMatrix), 64);
-    for (int i = 0; i < 3; i++) {
-        float v = ReadF(g_player_object + kPosition + i * 4) + ReadF(g_player_object + kMatrix + i * 4);
-        std::memcpy(kernel::HostPtr(matrix + 0x30 + i * 4), &v, 4);
+    float first[3], place[3];
+    for (int i = 0; i < 3; i++) place[i] = first[i] = ReadF(g_player_object + kPosition + i * 4);
+    const char* how = "Player 1's own place";
+    for (size_t k = g_trail.size(); k-- > 0;) {
+        const float* t = g_trail[k].at;
+        float flat = (t[0] - first[0]) * (t[0] - first[0]) + (t[2] - first[2]) * (t[2] - first[2]), up = std::fabs(t[1] - first[1]);
+        if (flat < 0.9f * 0.9f || flat > 4.0f * 4.0f || up > 1.2f) continue;
+        std::memcpy(place, t, sizeof place);
+        how = "where Player 1 has just walked";
+        break;
     }
+    LOGI("coop: Player 2 is put at %.1f %.1f %.1f (%s; Player 1 is at %.1f %.1f %.1f)", place[0], place[1], place[2], how, first[0], first[1], first[2]);
+    for (int i = 0; i < 3; i++) std::memcpy(kernel::HostPtr(matrix + 0x30 + i * 4), &place[i], 4);
     uint32_t ecx = ctx.ecx;
     ctx.ecx = g_second;
     kernel::CallGuest(ctx, kPlayerStop, {});
@@ -735,9 +780,11 @@ void Views(X86Context& ctx, bool one) {
     uint32_t view = kernel::R32(kViewPointer), second = ViewCamera2();
     if (!view || !second || one == g_one_view) return;
     g_one_view = one;
-    // In a scene Player 2 is not to be seen; after it he is back beside Player 1.
+    // In a scene Player 2 is not to be seen. After it he is where he was, unless the scene took Player 1 away
+    // (more than 12 m from him): then he comes to Player 1. (Until 2026-11-25 he was put beside Player 1 after
+    // every scene, however short.)
     if (g_second_object && !Down()) {
-        if (!one) BesideFirst(ctx);
+        if (!one && g_player_object && FromFirst(g_second_object) > 12.0f) BesideFirst(ctx);
         uint32_t ecx = ctx.ecx;
         ctx.ecx = g_second_object;
         kernel::CallGuest(ctx, kObjectShow, {one ? 0u : 1u});
@@ -1072,6 +1119,7 @@ void Frame(X86Context& ctx) {
     TestMeter(ctx);
     TestCall(ctx);
     TestBody();
+    TrailStep();
     TestSound(ctx);
     TestSounds(ctx);
     {   // S2_TEST_OBJCLR=<frame>,<offset hex>,<mask hex>[,1 to set]: clears (or sets) bits of Player 2's object from that

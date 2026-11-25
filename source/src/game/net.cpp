@@ -86,6 +86,7 @@ bool StreamView();                  // player two is in and the frames handed ov
 extern uint32_t g_p2_invert, g_p2_speed;  // this PC's Player 2 look settings
 void RemoteLookFrom(uint32_t invert, uint32_t speed);  // a joined player's, as his PC sends them
 void RemoteLookForget();
+bool InLevel();  // a level is in play on this PC
 extern uint32_t g_p2_volume;  // this PC's volume for a host's sound, per cent
 void RemoteVolumeFrom(uint32_t volume);  // a joined player's, as his PC sends it
 }
@@ -216,6 +217,7 @@ std::string IpText(uint32_t ip_be) {
 }
 
 // the last thing that happened, for the menu's status line ("CONNECTION TO X LOST" ...)
+std::atomic<Clock::time_point> g_host_waits{};  // when the host last said "not in a level yet"
 std::mutex g_note_lock;
 std::string g_note;
 void Note(const std::string& n) {
@@ -595,6 +597,18 @@ void HostListen() {
         std::lock_guard l(g_host.lock);
         bool same = g_host.have_client && from.sin_addr.s_addr == g_host.client.sin_addr.s_addr &&
                     from.sin_port == g_host.client.sin_port;
+        // A player comes in once the host is in a level (asked for after the first online session, 2026-11-25).
+        // Until then his PC is told so once a second (packet type 8) and goes on waiting; he is not let in.
+        if (!g_host.connected && !game_coop::InLevel()) {
+            static Clock::time_point told{};
+            if (Clock::now() - told > std::chrono::milliseconds(1000)) {
+                told = Clock::now();
+                const uint8_t wait[5] = {'S', '2', 'C', '1', 8};
+                sendto(g_host.sock, reinterpret_cast<const char*>(wait), sizeof wait, 0, reinterpret_cast<const sockaddr*>(&from), sizeof from);
+                LOGI("coop: a player is waiting to come in (the game has not been started here yet)");
+            }
+            continue;
+        }
         if (!same) {
             if (g_host.have_client && Clock::now() - g_host.last_input < std::chrono::milliseconds(kClientTimeout))
                 continue;  // one remote player at a time
@@ -995,6 +1009,12 @@ void ClientRecv() {
         if (n > 0 && ++packets == 1) LOGI("coop: first packet from the host (%d bytes, type %d)", n, n > 4 ? buf[4] : -1);
         if (StunAnswer(buf.data(), n)) continue;                                        // (how the joiner looks from outside)
         if (n >= 5 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 6) continue;  // (the host's hole-punching hello)
+        if (n >= 5 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 8) {          // the host is there, not in a level yet
+            std::lock_guard l(g_client.lock);
+            g_client.last_frame = Clock::now();  // (he answers: the wait for a first picture starts again)
+            g_host_waits = Clock::now();
+            continue;
+        }
         if (n >= 7 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 7) {          // my look settings, changed in the host's menu
             uint32_t invert = buf[5] ? 1 : 0, speed = std::clamp<uint32_t>(buf[6], 40, 100);
             uint32_t volume = n >= 8 ? std::min<uint32_t>(buf[7], 100) : game_coop::g_p2_volume;
@@ -1286,6 +1306,9 @@ std::vector<std::string> Games() {
     for (const Found& h : g_found) out.push_back(h.name);
     return out;
 }
+
+// the host answered a moment ago that he has not started the game yet (packet type 8)
+bool HostNotStarted() { return g_client.run && Clock::now() - g_host_waits.load() < std::chrono::milliseconds(3000); }
 
 // the joiner's state for the menu: 0 not joined, 1 connecting, 2 playing in the host's game
 int JoinState() {

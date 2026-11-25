@@ -5,6 +5,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <cstdlib>
 #include <windows.h>
 #include <dbghelp.h>
 #include <timeapi.h>
@@ -105,6 +106,16 @@ void ApplyNow() {
         g_mode_changed = ChangeDisplaySettingsExW(mi.szDevice, &dm, nullptr, CDS_FULLSCREEN, nullptr) == DISP_CHANGE_SUCCESSFUL;
         GetMonitorInfoW(mon, &mi);
     }
+    // [local change, The Suffering: Ties That Bind] XBE_TEST_HIDDEN=1 (test runs): a window of the size asked for,
+    // far off every screen, never in front and not on the taskbar, so that a test does not get in the way of
+    // whoever is using the PC. It still draws, and can be captured (PrintWindow).
+    static const bool hidden = std::getenv("XBE_TEST_HIDDEN") != nullptr;
+    if (hidden) {
+        SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_POPUP | visible);
+        SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
+        SetWindowPos(g_hwnd, HWND_BOTTOM, -30000, -30000, int(out.width), int(out.height), SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        return;
+    }
     if (s.display_mode == DisplayMode::Windowed) {
         RECT r{0, 0, LONG(out.width), LONG(out.height)};
         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
@@ -159,6 +170,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case kOpenWindow:
             CloseSplash();
             if (wp) ApplyNow();
+            if (std::getenv("XBE_TEST_HIDDEN")) {  // [local change] a test run: shown, never brought to the front
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                return 0;
+            }
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
             return 0;
@@ -271,7 +286,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (!app::FindGame(game)) return 1;
     if (!app::PrepareGameCode(game)) return 1;
 
-    bool splash = app::OpenSplash(), handover = app::StartHandover();
+    const bool test_hidden = std::getenv("XBE_TEST_HIDDEN") != nullptr;  // [local change] no splash in a hidden test run
+    bool splash = !test_hidden && app::OpenSplash(), handover = app::StartHandover();
 
     WNDCLASSEXW wc{sizeof(wc)};
     wc.style = CS_HREDRAW | CS_VREDRAW;
@@ -288,7 +304,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         app::ApplyNow();
     } else if (!splash) {
         app::ApplyNow();
-        ShowWindow(app::g_hwnd, SW_SHOW);
+        ShowWindow(app::g_hwnd, test_hidden ? SW_SHOWNOACTIVATE : SW_SHOW);
     }
 
     IMGUI_CHECKVERSION();

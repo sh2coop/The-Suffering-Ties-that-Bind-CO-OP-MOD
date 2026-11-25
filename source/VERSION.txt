@@ -1,1 +1,1 @@
-33 2026-11-25 HD textures taken out again (same game as version 31)
+34 2026-11-25 Player 2 is no longer pulled to Player 1 by doors, ladders and cameras; copy and paste for the codes; joining once the host is in the game
