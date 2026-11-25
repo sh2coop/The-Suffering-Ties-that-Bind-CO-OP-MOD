@@ -1,1 +1,1 @@
-19 2026-11-25 The partner health bar is clear of the insanity meter
+20 2026-11-25 Player 2 starts with the same grenades and ammunition as Player 1, and they show on him

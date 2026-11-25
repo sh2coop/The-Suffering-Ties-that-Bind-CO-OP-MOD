@@ -484,10 +484,33 @@ void BeforeSave(X86Context& ctx) {
 constexpr uint32_t kInventory = 0x128, kInventoryCopy = 0x11380;
 constexpr uint32_t kEquip = 0x14F30, kEquipped = 0x16320;  // (this = Player, weapon's template, slot): as 0x171F0 calls them
 uint64_t g_arm_at = 0;
+uint32_t ClassOfTemplate(uint32_t index);
+bool ForBoth(uint32_t cls);
 void Arm(X86Context& ctx) {
     uint32_t ecx = ctx.ecx;
-    ctx.ecx = g_second + kInventory;
-    kernel::CallGuest(ctx, kInventoryCopy, {g_player + kInventory});
+    // Each thing Player 1 carries that is for both (weapons, ammunition, grenades, health: ForBoth) is GIVEN to Player
+    // 2 the game's own way (0x153A0, this = Player; item, how many), and then his count of it is set to Player 1's.
+    // Until 2026-11-25 the list was copied as bytes (0x11380): he had the numbers but nothing on him showed them
+    // (no grenade on his belt, empty hands), and he got Player 1's keys and notes as well, against the rule that
+    // those are Player 1's alone.
+    {
+        std::vector<std::pair<uint32_t, uint32_t>> items;
+        uint32_t list = kernel::R32(g_player + kInventory), n = kernel::R32(g_player + kInventory + 8);
+        for (uint32_t i = 0; list && i < n && i < 256; i++) {
+            uint32_t item = kernel::R32(list + i * 12 + 4), count = kernel::R32(list + i * 12 + 8);
+            if (int32_t(count) > 0 && ForBoth(ClassOfTemplate(item))) items.push_back({item, count});
+        }
+        AsSecond as(g_second);
+        for (const auto& [item, count] : items) {
+            ctx.ecx = g_second;
+            kernel::CallGuest(ctx, 0x153A0, {item, count});
+        }
+        uint32_t mine = kernel::R32(g_second + kInventory), mine_n = kernel::R32(g_second + kInventory + 8);
+        for (uint32_t i = 0; mine && i < mine_n && i < 256; i++)
+            for (const auto& [item, count] : items)
+                if (kernel::R32(mine + i * 12 + 4) == item) kernel::W32(mine + i * 12 + 8, count);
+        LOGI("coop: Player 2 is given %zu kinds of things Player 1 carries (weapons, ammunition, grenades, health)", items.size());
+    }
     {
         // the weapon Player 1 holds (the object in his right hand, handle at +0x3AC; an item is its template's number)
         uint32_t table = kernel::R32(kObjectManager + 0x0C), handle = kernel::R32(g_player + 0x3AC) & 0xFFFF;
