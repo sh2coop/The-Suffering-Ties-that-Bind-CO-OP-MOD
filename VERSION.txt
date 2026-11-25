@@ -1,1 +1,1 @@
-3 2026-11-25 Update program fixed: it could miss a new version
+4 2026-11-25 Update program fixed: it fetches the exact release

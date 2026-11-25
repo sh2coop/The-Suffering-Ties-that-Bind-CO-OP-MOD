@@ -13,7 +13,10 @@
 #include <bcrypt.h>
 #include <wincrypt.h>
 
-static const wchar_t kRepoPath[] = L"/sh2coop/The-Suffering-Ties-that-Bind-CO-OP-MOD/releases/latest/download/";
+// "latest" is only asked for the version: GitHub answers it from a copy that can be minutes old, and one file at a
+// time (run update3: version.txt said 3 while "latest" update.zip was still release 2's, correctly signed, and the
+// folder ended up half a version behind). The zip and its signature are fetched from the release of that number.
+static const wchar_t kRepoPath[] = L"/sh2coop/The-Suffering-Ties-that-Bind-CO-OP-MOD/releases/";
 static const char kPublicKey[] =
     "-----BEGIN PUBLIC KEY-----\n"
     "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAxBM+O8mIMbNukfJIWhCT\n"
@@ -31,7 +34,7 @@ static const char kPublicKey[] =
 static int Download(const wchar_t* name, const wchar_t* to, const wchar_t* what) {
     int result = -1;
     wchar_t path[512];
-    _snwprintf(path, 512, L"%ls%ls", kRepoPath, name);
+    _snwprintf(path, 512, L"%ls%ls", kRepoPath, name);  // name: "latest/download/<file>" or "download/v<n>/<file>"
     HINTERNET session = WinHttpOpen(L"Suffering2-Update", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     HINTERNET connect = session ? WinHttpConnect(session, L"github.com", INTERNET_DEFAULT_HTTPS_PORT, 0) : NULL;
     HINTERNET request = connect ? WinHttpOpenRequest(connect, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE | WINHTTP_FLAG_REFRESH) : NULL;
@@ -138,7 +141,7 @@ static int Update(void) {
     char mine[200] = "0", theirs[200] = "";
     ReadSmall(version_file, mine, sizeof mine);
     ShowLine(L"Looking for a newer version");
-    int got = Download(L"version.txt", remote_file, NULL);
+    int got = Download(L"latest/download/version.txt", remote_file, NULL);
     if (got != 0 || !ReadSmall(remote_file, theirs, sizeof theirs)) {
         wchar_t text[400];
         if (got == 404) _snwprintf(text, 400, L"No release was found to update from yet.");
@@ -167,7 +170,10 @@ static int Update(void) {
     ShowLine(line);
     BYTE hash[32], signature[1024];
     DWORD signature_size = 0;
-    int ok = Download(L"update.zip.sig", sig, NULL) == 0 && Download(L"update.zip", zip, line) == 0;
+    wchar_t zip_name[64], sig_name[64];
+    _snwprintf(zip_name, 64, L"download/v%d/update.zip", atoi(theirs));
+    _snwprintf(sig_name, 64, L"download/v%d/update.zip.sig", atoi(theirs));
+    int ok = Download(sig_name, sig, NULL) == 0 && Download(zip_name, zip, line) == 0;
     if (ok) {
         HANDLE f = CreateFileW(sig, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (f != INVALID_HANDLE_VALUE) { ReadFile(f, signature, sizeof signature, &signature_size, NULL); CloseHandle(f); }
@@ -199,6 +205,15 @@ static int Update(void) {
     }
     DeleteFileW(zip);
     DeleteFileW(sig);
+    // the folder says what it is now: it must be the version that was asked for
+    char now[200] = "";
+    ReadSmall(version_file, now, sizeof now);
+    if (atoi(now) != atoi(theirs)) {
+        wchar_t wrong[400];
+        _snwprintf(wrong, 400, L"The update was unpacked, but the folder says version %d and not %d.\n\nStart Update again in a few minutes.", atoi(now), atoi(theirs));
+        Tell(wrong, MB_ICONERROR);
+        return 1;
+    }
     wchar_t text[600];
     _snwprintf(text, 600, L"Updated to version %hs.\n\nStart \"The Suffering 2\" as usual. The first start after an update takes a minute or two longer.", theirs);
     Tell(text, MB_ICONINFORMATION);
