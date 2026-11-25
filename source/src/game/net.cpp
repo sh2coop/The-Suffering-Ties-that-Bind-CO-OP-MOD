@@ -83,6 +83,7 @@ namespace game_coop {
 void RemotePlayer(bool connected);  // the host's remote player came or went
 bool SplitActive();                 // player two is in and the screen is split
 bool StreamView();                  // player two is in and the frames handed over are his view, whole
+void SecondLook(input::Pad& p);     // Player 2's own look settings, on his right stick
 }
 
 namespace game_net {
@@ -1437,10 +1438,12 @@ void ClientPad(const input::Pad& p) {
     std::memcpy(pkt + 5, &seq, 4);
     std::memcpy(pkt + 9, &p.buttons, 2);
     std::memcpy(pkt + 11, analog, 8);
+    input::Pad mine = p;
+    game_coop::SecondLook(mine);  // this player's own look settings (he is Player 2 in the host's game)
     std::memcpy(pkt + 19, &p.lx, 2);
     std::memcpy(pkt + 21, &p.ly, 2);
-    std::memcpy(pkt + 23, &p.rx, 2);
-    std::memcpy(pkt + 25, &p.ry, 2);
+    std::memcpy(pkt + 23, &mine.rx, 2);
+    std::memcpy(pkt + 25, &mine.ry, 2);
     sendto(g_client.sock, reinterpret_cast<const char*>(pkt), sizeof pkt, 0, reinterpret_cast<sockaddr*>(&g_client.host),
            sizeof g_client.host);
 }

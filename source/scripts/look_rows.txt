@@ -1,0 +1,16 @@
+# in a level: pause, Options, Display and Co-op; up to Co-op, Split screen; down to Player 2 look, swapped; down to his speed, one step down
+20 START
+21.5 DOWN
+22.3 DOWN
+23.1 DOWN
+23.9 DOWN
+25 A
+28 DOWN
+29.5 DOWN
+31 A
+34 UP
+35.5 RIGHT
+37 DOWN
+38.5 RIGHT
+40 DOWN
+41.5 LEFT

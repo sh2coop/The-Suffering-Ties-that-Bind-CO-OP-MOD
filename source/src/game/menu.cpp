@@ -60,6 +60,7 @@ namespace game_coop {             // coop.cpp
 extern uint32_t g_mode_setting;   // 0 off, 1 split screen (kept in the settings file as "coop")
 extern bool g_host_setting;       // host online: a choice for this run
 extern bool g_host_failed;        // hosting could not start (the port is taken)
+extern uint32_t g_p2_invert, g_p2_speed;  // Player 2's own look: the other way up, and his speed in per cent
 std::string CallersOf(X86Context& ctx);  // (traces)
 }
 namespace game_net {  // net.cpp
@@ -89,7 +90,7 @@ constexpr uint32_t kSetState = 0x38;
 constexpr uint32_t kUp = 0x40A, kDown = 0x40B, kLeft = 0x40C, kRight = 0x40D, kAccept = 0x41A, kBack = 0x421;
 constexpr uint32_t kHidden = 2, kIdle = 4, kHighlighted = 5;
 
-enum Row { kResolution, kWindow, kShape, kRate, kVsync, kCoop, kOnline, kRows };
+enum Row { kResolution, kWindow, kShape, kRate, kVsync, kCoop, kOnline, kLook, kSpeed, kRows };
 enum Coop { kOff, kSplit, kHost, kJoin, kCoops };
 
 struct Page {
@@ -554,13 +555,21 @@ std::string Value(int row) {
         case kRate: return kRateNames[IndexOf(kRates, s.fps_cap)];
         case kVsync: return s.vsync ? "On" : "Off";
         case kCoop: return kCoopNames[CoopChoice()];
+        case kLook: return game_coop::g_p2_invert ? "Up and down swapped" : "As the game has it";
+        case kSpeed:
+            std::snprintf(out, sizeof out, "%u%%", std::clamp<uint32_t>(game_coop::g_p2_speed, 40, 100));
+            return out;
     }
     return "";
 }
 
-constexpr const char* kLabels[kRows] = {"Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "Co-op", "Online"};
+constexpr const char* kLabels[kRows] = {"Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "Co-op", "Online", "Player 2 look", "Player 2 look speed"};
 
-bool Visible(int row) { return row != kOnline || CoopChoice() == kHost || CoopChoice() == kJoin; }
+// Player 2's own look rows: where his controller is on this PC (split screen), or this player is Player 2 (joining)
+bool Visible(int row) {
+    if (row == kLook || row == kSpeed) return CoopChoice() == kSplit || CoopChoice() == kJoin;
+    return row != kOnline || CoopChoice() == kHost || CoopChoice() == kJoin;
+}
 bool Focusable(int row) { return row != kOnline || CoopChoice() == kJoin || CoopChoice() == kHost; }
 
 // The row under Co-op. Hosting: this PC's code (its game port as seen from outside), or its address when no code
@@ -599,13 +608,19 @@ std::string OnlineText(bool focused) {
 std::string RowText(int row, bool focused) {
     if (row == kOnline) return OnlineText(focused);
     std::string v = Value(row);
-    return std::string(kLabels[row]) + (focused ? ":  < " : ":  ") + v + (focused ? " >" : "");
+    std::string label = kLabels[row];
+    if (CoopChoice() == kJoin && row == kLook) label = "My look";  // (the one who joins is Player 2)
+    if (CoopChoice() == kJoin && row == kSpeed) label = "My look speed";
+    return label + (focused ? ":  < " : ":  ") + v + (focused ? " >" : "");
 }
 
 // What the page's instructions say while a co-op row is in focus (empty: the game's own words about the slider).
 // The box holds five lines of about thirty characters.
 std::string Help() {
     int row = g_page.focus - 1;
+    if (row == kLook)
+        return "Player 2's own up and down. It only changes Player 2. Try both: one of them will feel right.";
+    if (row == kSpeed) return "How fast Player 2 turns, as a share of the game's own look speed. It only changes Player 2.";
     if (row != kCoop && row != kOnline) return "";
     switch (CoopChoice()) {
         case kSplit:
@@ -682,6 +697,12 @@ void Step(int row, int dir) {
         // as the host or as the one who joins. Split screen takes effect at once (coop.cpp: Player 2 comes in when
         // a level is in play, and is taken out when it is switched off).
         case kCoop: SetCoop(wrap(CoopChoice(), kCoops)); break;
+        case kLook: game_coop::g_p2_invert = game_coop::g_p2_invert ? 0 : 1; break;
+        case kSpeed: {
+            int percent = int(std::clamp<uint32_t>(game_coop::g_p2_speed, 40, 100)) + dir * 10;
+            game_coop::g_p2_speed = uint32_t(percent > 100 ? 40 : percent < 40 ? 100 : percent);
+            break;
+        }
     }
     app::Save();
     LOGI("menu: %s is now %s", kLabels[row], Value(row).c_str());
@@ -782,7 +803,7 @@ void Build(X86Context& ctx, uint32_t screen) {
     constexpr float kWordsUp = 80.0f;         // the instructions move up by this much
     constexpr float kSliderUp = 69.0f;        // and the slider by this much
     constexpr float kSliderDrawnTop = 6.2f, kSliderDrawnBottom = 27.4f;  // where its picture lies in its box
-    constexpr float kCaptionGap = 7.0f, kRowsGap = 18.0f, kStep = 20.0f;
+    constexpr float kCaptionGap = 7.0f, kRowsGap = 14.0f, kStep = 16.0f;  // (nine rows since Player 2's look; seven were 20 apart)
     if (margin_top < 0 || margin_top > 100 || margin_bottom < 0 || margin_bottom > 100) {
         LOGW("menu: unexpected text margins %.1f %.1f, no display rows", margin_top, margin_bottom);
         return;

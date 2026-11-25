@@ -400,6 +400,18 @@ void Dump(const char* what, uint32_t at, uint32_t bytes) {
 //   S2_COOP=1             on, whatever the setting (tests)
 //   S2_COOP_SPAWN=<frame> on from that frame (tests with timed controller scripts)
 uint32_t g_mode_setting = 0;  // 0 off, 1 split screen on this PC
+// Player 2's own look (decided 2026-11-25: each player's settings are his own). The game has one "invert look" and
+// one sensitivity for everybody, the host's. These two belong to Player 2 and are applied to his right stick before
+// the game sees it, on the PC his controller is plugged into (so a joined player's are in his own settings file):
+// up and down swapped or not, and how fast he turns, as a share of the game's own speed.
+uint32_t g_p2_invert = 0;   // 0 as the game has it, 1 the other way up
+uint32_t g_p2_speed = 100;  // per cent, 40 to 100
+void SecondLook(input::Pad& p) {
+    float k = float(std::clamp<uint32_t>(g_p2_speed, 40, 100)) / 100.0f;
+    float rx = float(p.rx) * k, ry = float(p.ry) * k * (g_p2_invert ? -1.0f : 1.0f);
+    p.rx = int16_t(std::clamp(rx, -32767.0f, 32767.0f));
+    p.ry = int16_t(std::clamp(ry, -32767.0f, 32767.0f));
+}
 // Host online (a joiner is sent Player 2's view): the menu's choice for this run. It is not kept in the settings
 // file: a game that opens a port on the router and looks its address up each time it starts, because of a choice
 // made weeks ago, is not what a player expects.

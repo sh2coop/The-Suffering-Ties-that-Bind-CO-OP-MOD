@@ -13,6 +13,7 @@ void Loaded();
 namespace game_watchdog { void Init(); }  // freeze report (src/game/watchdog.cpp)
 namespace game_coop {
 void Ui(double fps);  // coop.cpp
+extern uint32_t g_p2_invert, g_p2_speed;  // Player 2's own look
 extern uint32_t g_mode_setting;  // coop.cpp: 0 off, 1 split screen
 }
 namespace game_view { extern uint32_t g_shape_setting; }  // Display Settings: picture shape (src/game/view.cpp)
@@ -34,7 +35,8 @@ const app::GameInfo app::kGame = {
     .splash = L"splash",                  // optional splash.png or splash.bmp beside the exe
     .missing = L"Put the game in the assets folder: its disc image (.iso), or default.xbe with its folders beside it.",
     .images = {{"default.xbe", "Suffering2"}},  // each recompiled xbe and its exe, for title launches
-    .options = {{"picture_shape", nullptr, &game_view::g_shape_setting}, {"coop", nullptr, &game_coop::g_mode_setting}},  // game settings kept in the settings file
+    .options = {{"picture_shape", nullptr, &game_view::g_shape_setting}, {"coop", nullptr, &game_coop::g_mode_setting},
+                {"p2_invert_look", nullptr, &game_coop::g_p2_invert}, {"p2_look_speed", nullptr, &game_coop::g_p2_speed}},  // game settings kept in the settings file
     .load = nullptr,                      // reads more from the settings file's toml::table
     .save = nullptr,                      // writes more into it
     .init = GameInit,                      // after the settings load, before the window and boot

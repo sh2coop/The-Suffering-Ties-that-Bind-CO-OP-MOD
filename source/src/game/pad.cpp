@@ -38,6 +38,7 @@
 namespace game_coop {
 void Controller2(input::Pad& p);  // coop.cpp
 bool SecondStart();               // Player 2 is pressing START: the pause is both players'
+void SecondLook(input::Pad& p);   // Player 2's own look settings, on his right stick
 bool PausedBySecond();            // the pause menu is up and Player 2 opened it: it is his to use
 input::Pad SecondRaw();
 }
@@ -210,13 +211,15 @@ void Hook(int port, input::Pad& p) {
         // a second controller for tests: pad_script2.txt beside the exe plugs one in on port 1 and plays it
         static const std::vector<Press> script2 = LoadScript("pad_script2.txt");
         if (game_net::RemotePad(p)) {
-            // hosting online with a player in: his controller, from the network, is controller 2
+            // hosting online with a player in: his controller, from the network, is controller 2 (his own look
+            // settings were applied on his PC)
         } else if (!script2.empty()) {
             p.connected = true;
             double t = Now();
             for (const Press& s : script2)
                 if (t >= s.at && t < s.at + s.len) Apply(s.buttons, p);
         }
+        if (!game_net::RemotePad(p)) game_coop::SecondLook(p);  // (a remote player's are applied on his own PC)
         game_coop::Controller2(p);  // co-op takes Player 2's teleport hold, START and BACK for itself
         return;
     }
