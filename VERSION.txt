@@ -1,1 +1,1 @@
-20 2026-11-25 Player 2 starts with the same grenades and ammunition as Player 1, and they show on him
+21 2026-11-25 The partner arrow sits closer over his head

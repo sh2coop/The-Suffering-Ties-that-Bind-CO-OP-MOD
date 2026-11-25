@@ -1127,6 +1127,11 @@ void Frame(X86Context& ctx) {
                     std::memcpy(m, kernel::HostPtr(eye + kMatrix), 64);
                     for (int i = 0; i < 3; i++) d[i] = ReadF(partner[v] + kPosition + i * 4) - m[12 + i];
                     d[1] += up;
+                    // (his head is not straight above the point his object is at: Torque stands a little turned, and
+                    // the arrow hung about a hand's width to one side of his head, the same side in every picture.
+                    // It is moved that much along his own first row. S2_ARROW_SIDE=<metres> for trying.)
+                    static const float side = std::getenv("S2_ARROW_SIDE") ? float(std::atof(std::getenv("S2_ARROW_SIDE"))) : 0.05f;
+                    for (int i = 0; i < 3; i++) d[i] += side * ReadF(partner[v] + kMatrix + i * 4);
                     float rx = d[0] * m[0] + d[1] * m[1] + d[2] * m[2], ry = d[0] * m[4] + d[1] * m[5] + d[2] * m[6];
                     float rz = d[0] * m[8] + d[1] * m[9] + d[2] * m[10];
                     // (a camera's object looks along its third row backwards: run arrow3, the partner straight ahead
