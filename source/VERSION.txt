@@ -1,1 +1,1 @@
-23 2026-11-25 Each player's own settings; the settings page in two sections
+24 2026-11-25 Partner arrow see-through at 60%

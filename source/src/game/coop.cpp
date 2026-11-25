@@ -2477,7 +2477,7 @@ void TestCall(X86Context& ctx) {
 // is how solid it is. The joined player's is drawn into his picture by net.cpp.
 #include <imgui.h>
 namespace game_coop {
-constexpr float kArrowAlpha = 1.0f;
+constexpr float kArrowAlpha = 0.6f;  // (decided 2026-11-25: orange, see-through at 60%)
 void Ui(double) {
     bool halves = SplitActive(), whole = StreamView();
     if (!halves && !whole) return;
@@ -2491,9 +2491,11 @@ void Ui(double) {
         float cx = x0 + std::clamp(ax, 0.03f, 0.97f) * width, tip = top + std::clamp(ay, 0.06f, 0.97f) * vh;
         float h = vh / 48.0f, w = h * 0.95f, edge = std::max(1.5f, vh / 540.0f);
         ImVec2 a(cx - w, tip - h), b(cx + w, tip - h), c(cx, tip);
-        draw->AddTriangleFilled(ImVec2(a.x - edge * 1.6f, a.y - edge), ImVec2(b.x + edge * 1.6f, b.y - edge), ImVec2(c.x, c.y + edge * 1.8f),
-                                IM_COL32(12, 8, 3, int(220 * kArrowAlpha)));
+        // (the dark edge is a line around it, not a larger triangle under it: under a see-through orange that
+        // would make the orange muddy)
         draw->AddTriangleFilled(a, b, c, IM_COL32(237, 133, 26, int(255 * kArrowAlpha)));
+        draw->AddTriangle(ImVec2(a.x - edge * 0.8f, a.y - edge * 0.5f), ImVec2(b.x + edge * 0.8f, b.y - edge * 0.5f), ImVec2(c.x, c.y + edge * 0.9f),
+                          IM_COL32(12, 8, 3, int(220 * kArrowAlpha)), edge);
     }
 }
 }  // namespace game_coop

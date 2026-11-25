@@ -781,16 +781,18 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
                     const uint8_t colour[3] = {uint8_t(pass ? 237 : 12), uint8_t(pass ? 133 : 8), uint8_t(pass ? 26 : 3)};
                     for (int y = std::max(0, int(y0) - 1); y <= std::min(int(oh) - 1, int(y1) + 1); y++)
                         for (int x = std::max(0, int(tx - hw) - 1); x <= std::min(int(ow) - 1, int(tx + hw) + 1); x++) {
-                            int inside = 0;
+                            int inside = 0, inner = 0;  // (inner: of the orange triangle, which the dark edge stays out of)
                             for (int k = 0; k < 16; k++) {
                                 float sx = float(x) + (float(k % 4) + 0.5f) / 4, sy = float(y) + (float(k / 4) + 0.5f) / 4;
                                 if (sy < y0 || sy > y1) continue;
                                 float half = hw * (y1 - sy) / (y1 - y0);  // the triangle's half width at that height
                                 inside += std::fabs(sx - tx) <= half;
+                                if (!pass && sy >= tip - th && sy <= tip) inner += std::fabs(sx - tx) <= tw * (tip - sy) / th;
                             }
+                            inside -= std::min(inside, inner);
                             if (!inside) continue;
                             uint8_t* d = g_host.frame.data() + (size_t(y) * ow + size_t(x)) * 3;
-                            for (int c = 0; c < 3; c++) d[c] = uint8_t((d[c] * (16 - inside) + colour[c] * inside) / 16);
+                            for (int c = 0; c < 3; c++) d[c] = uint8_t((d[c] * (80 - inside * 3) + colour[c] * inside * 3) / 80);  // (see-through at 60%)
                         }
                 }
             }
