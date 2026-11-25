@@ -622,6 +622,17 @@ private:
     void DrawFrame(Target* t, uint32_t bi);
     void BlitFrame(Target& t, D3D12_CPU_DESCRIPTOR_HANDLE rh);
     void RenderUi();
+    // [local change, The Suffering: Ties That Bind] the co-op health bars in the title's own bar art
+    void NoteHudArt(const TextureDesc& d, const uint8_t* guest);
+    void DrawHudBars();
+    struct HudBar {
+        float x0, y0, x1, y1, health;
+        bool blue;
+    };
+    std::vector<HudBar> hud_bars_;
+    Tex hud_art_tex_;
+    uint32_t hud_art_made_ = 0;  // g_hud_art.ready the GPU copy was made at
+    uint32_t ui_inc_ = 0;
     void ReleaseOldTextures();
     void ResetFrame();
     void CountFps();
@@ -921,7 +932,7 @@ void D3D12Backend::CreateHeaps() {
     smp_inc_ = CreateHeap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerCount, true, smp_heap_);
     rtv_inc_ = CreateHeap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, kRtvCount + kFrames, false, rtv_heap_);
     dsv_inc_ = CreateHeap(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, kDsvCount, false, dsv_heap_);
-    CreateHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, true, ui_heap_);
+    ui_inc_ = CreateHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 2, true, ui_heap_);  // (ImGui's font, and the HUD bar art)
     for (uint32_t i = kRtvCount; i-- > 0;) free_rtv_.push_back(i);
     for (uint32_t i = kDsvCount; i-- > 0;) free_dsv_.push_back(i);
 }
@@ -1945,6 +1956,7 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
             tx.sig = sig;
             UploadTexture(tx, d, fi, p, colours, same);
             tx.pack_gen = 0;
+            if (d.width == 256 && d.height == 256 && fi.host == Host::BC3 && !d.cube && !d.linear) NoteHudArt(d, p);
         }
     }
     if (tx.pack_gen != texturedumper::Generation()) LatchPackKey(tx, d, fi, colours);
@@ -3347,16 +3359,21 @@ void D3D12Backend::BlitFrame(Target& t, D3D12_CPU_DESCRIPTOR_HANDLE rh) {
         };
         // a bar from layout x 37 to 150 and rows top to bottom; the layout's 640 columns start at `from` (of the
         // frame's 640) and are `part` of a frame wide; `down` scales the rows
-        auto bar = [&](float from, float part, float down, float top, float bottom, float health, bool blue) {
+        // (`size`: a partner's bar is the same art, smaller)
+        auto bar = [&](float from, float part, float down, float top, float size, float health, bool blue) {
             if (health < 0) return;
-            float rows = 480.0f - 2 * kOverscan;
-            float x0 = vp.TopLeftX + (from + 37.0f * part) / 640.0f * vw, x1 = vp.TopLeftX + (from + 150.0f * part) / 640.0f * vw;
+            float rows = 480.0f - 2 * kOverscan, bottom = top + 13.0f * size;
+            float x0 = vp.TopLeftX + (from + 37.0f * part) / 640.0f * vw, x1 = vp.TopLeftX + (from + (37.0f + 113.0f * size) * part) / 640.0f * vw;
             float y0 = vp.TopLeftY + (top * down - kOverscan) / rows * vh, y1 = vp.TopLeftY + (bottom * down - kOverscan) / rows * vh;
+            if (hud_art_made_) {  // in the title's art, drawn with the UI layer (DrawHudBars)
+                hud_bars_.push_back({x0, y0, x1, y1, std::clamp(health, 0.0f, 1.0f), blue});
+                return;
+            }
             float filled = x0 + (x1 - x0) * std::clamp(health, 0.0f, 1.0f);
             rect(x0 - edge, y0 - edge, x1 + edge, y1 + edge, 0.02f, 0.01f, 0.01f);
             if (blue) {
-                rect(x0, y0, x1, y1, 0.03f, 0.06f, 0.16f);
-                if (filled > x0) rect(x0, y0, filled, y1, 0.24f, 0.45f, 0.86f);
+                rect(x0, y0, x1, y1, 0.06f, 0.14f, 0.03f);
+                if (filled > x0) rect(x0, y0, filled, y1, 0.55f, 0.86f, 0.16f);  // (lime green)
             } else {
                 rect(x0, y0, x1, y1, 0.16f, 0.03f, 0.03f);
                 if (filled > x0) rect(x0, y0, filled, y1, 0.80f, 0.22f, 0.24f);
@@ -3364,20 +3381,126 @@ void D3D12Backend::BlitFrame(Target& t, D3D12_CPU_DESCRIPTOR_HANDLE rh) {
         };
         if (halves) {
             float down = g_flat2d.half_sy;
-            bar(320.0f, 0.5f, down, 40.0f, 53.0f, h2, true);   // Player 2's own, in his half
+            bar(320.0f, 0.5f, down, 40.0f, 1.0f, h2, true);   // Player 2's own, in his half
             // (the title's insanity meter sits right under its health bar, to about row 80 (its scratchy line is taller than the bar): the partner's bar is
             // below that, so that it never covers the meter)
-            bar(320.0f, 0.5f, down, 88.0f, 93.0f, h1, false);  // ... and his partner's under it
-            bar(0.0f, 0.5f, down, 88.0f, 93.0f, h2, true);     // Player 1's partner, under the title's bar and meter
+            bar(320.0f, 0.5f, down, 86.0f, 0.65f, h1, false);  // ... and his partner's under it
+            bar(0.0f, 0.5f, down, 86.0f, 0.65f, h2, true);     // Player 1's partner, under the title's bar and meter
         } else if (whole) {
             // the 2D layer keeps its 4:3 shape in the middle of a wide picture (g_flat2d)
             float sx = g_flat2d.on ? g_flat2d.sx : 1.0f, sy = g_flat2d.on ? g_flat2d.sy : 1.0f;
             float from = 320.0f - 320.0f * sx;
             (void)sy;
-            bar(from, sx, 1.0f, 88.0f, 93.0f, h2, true);
+            bar(from, sx, 1.0f, 86.0f, 0.65f, h2, true);
         }
         // (the arrows above the partners' heads are drawn smooth in the ImGui layer: the title's GameInfo::ui)
     }
+}
+
+// [local change, The Suffering: Ties That Bind] The title's health bar strips out of its HUD texture, when the game
+// uploads it. Told by what is in it, not by a name: at three places the red filled strip, the white flash strip and
+// the dark empty bar. DXT5 blocks: two alpha ends and 16 three-bit picks, two 565 colours and 16 two-bit picks.
+void D3D12Backend::NoteHudArt(const TextureDesc& d, const uint8_t* guest) {
+    std::vector<uint8_t> blocks;
+    uint32_t pitch = 0;
+    DecodeLevel(d, 0, 0, guest, nullptr, blocks, pitch);
+    if (pitch < 64 * 16 || blocks.size() < size_t(pitch) * 64) return;
+    constexpr uint32_t kTop = 256 - kHudArtH;
+    std::vector<uint8_t> art(size_t(kHudArtW) * kHudArtH * 2 * 4);
+    for (uint32_t by = kTop / 4; by < 64; by++)
+        for (uint32_t bx = 0; bx < kHudArtW / 4; bx++) {
+            const uint8_t* b = blocks.data() + size_t(by) * pitch + size_t(bx) * 16;
+            uint32_t alpha[8] = {b[0], b[1]};
+            for (uint32_t i = 2; i < 8; i++)
+                alpha[i] = alpha[0] > alpha[1] ? ((8 - i) * alpha[0] + (i - 1) * alpha[1]) / 7
+                         : i < 6 ? ((6 - i) * alpha[0] + (i - 1) * alpha[1]) / 5 : i == 6 ? 0 : 255;
+            uint64_t apick = 0;
+            for (int i = 0; i < 6; i++) apick |= uint64_t(b[2 + i]) << (8 * i);
+            uint32_t c[2] = {uint32_t(b[8] | b[9] << 8), uint32_t(b[10] | b[11] << 8)};
+            uint32_t rgb[4][3];
+            for (int k = 0; k < 2; k++) {
+                uint32_t r = c[k] >> 11, g = (c[k] >> 5) & 63, bl = c[k] & 31;
+                rgb[k][0] = (r << 3) | (r >> 2), rgb[k][1] = (g << 2) | (g >> 4), rgb[k][2] = (bl << 3) | (bl >> 2);
+            }
+            for (int ch = 0; ch < 3; ch++) {
+                rgb[2][ch] = (2 * rgb[0][ch] + rgb[1][ch]) / 3;
+                rgb[3][ch] = (rgb[0][ch] + 2 * rgb[1][ch]) / 3;
+            }
+            uint32_t cpick = uint32_t(b[12] | b[13] << 8 | b[14] << 16 | uint32_t(b[15]) << 24);
+            for (uint32_t t = 0; t < 16; t++) {
+                uint32_t x = bx * 4 + (t & 3), y = by * 4 + (t >> 2) - kTop;
+                const uint32_t* col = rgb[(cpick >> (2 * t)) & 3];
+                uint8_t a = uint8_t(alpha[(apick >> (3 * t)) & 7]);
+                uint8_t* red = art.data() + (size_t(y) * kHudArtW + x) * 4;
+                uint8_t* blue = art.data() + (size_t(y + kHudArtH) * kHudArtW + x) * 4;
+                red[0] = uint8_t(col[2]), red[1] = uint8_t(col[1]), red[2] = uint8_t(col[0]), red[3] = a;      // B G R A
+                // Player 2's: lime green (decided 2026-11-25, first blue). The red goes to the green, a good part of
+                // it to the red as well, and little is left in the blue.
+                blue[0] = uint8_t(std::min(col[1], col[2]) / 2), blue[1] = uint8_t(col[0]),
+                blue[2] = uint8_t(std::min<uint32_t>(255, col[0] * 62 / 100 + col[1] * 30 / 100)), blue[3] = a;
+            }
+        }
+    auto at = [&](uint32_t x, uint32_t row) { return art.data() + (size_t(row - kTop) * kHudArtW + x) * 4; };
+    const uint8_t* fill = at(30, 214);
+    const uint8_t* flash = at(30, 229);
+    const uint8_t* empty = at(30, 246);
+    bool is_it = fill[3] > 230 && fill[2] > 140 && fill[1] < 120 && fill[0] < 120 &&
+                 flash[3] > 230 && flash[0] > 220 && flash[1] > 220 && flash[2] > 220 &&
+                 empty[3] > 230 && empty[0] < 70 && empty[1] < 70 && empty[2] < 70;
+    if (!is_it) return;
+    std::lock_guard l(g_hud_art.lock);
+    if (g_hud_art.bgra == art) return;
+    g_hud_art.bgra = std::move(art);
+    uint32_t n = ++g_hud_art.ready;
+    LOGR("co-op bars: the title's health bar art is taken from its HUD texture (%u)", n);
+}
+
+// The bars BlitFrame listed, in that art: the empty bar, and over it the filled strip up to the health. The GPU copy
+// of the art is made here, the first time and when the art was taken anew.
+void D3D12Backend::DrawHudBars() {
+    uint32_t ready = g_hud_art.ready.load();
+    if (ready != hud_art_made_) {
+        texturedumper::Image img;
+        img.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        img.width = kHudArtW, img.height = kHudArtH * 2;
+        img.levels.resize(1);
+        {
+            std::lock_guard l(g_hud_art.lock);
+            img.levels[0].px = g_hud_art.bgra;
+        }
+        img.levels[0].pitch = kHudArtW * 4;
+        if (hud_art_tex_.res) CurrentFrame().garbage.push_back(hud_art_tex_.res);
+        hud_art_tex_ = {};
+        CreatePackTexture(hud_art_tex_, img);
+        if (hud_art_tex_.res) {
+            D3D12_CPU_DESCRIPTOR_HANDLE h = ui_heap_->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += ui_inc_;
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            sv.Texture2D.MipLevels = 1;
+            dev_->CreateShaderResourceView(hud_art_tex_.res.Get(), &sv, h);
+            hud_art_made_ = ready;
+        }
+    }
+    if (hud_art_made_) {
+        D3D12_GPU_DESCRIPTOR_HANDLE g = ui_heap_->GetGPUDescriptorHandleForHeapStart();
+        g.ptr += ui_inc_;
+        ImTextureID id = reinterpret_cast<ImTextureID>(uintptr_t(g.ptr));
+        ImDrawList* draw = ImGui::GetBackgroundDrawList();
+        constexpr float kRows = float(kHudArtH * 2), kAcross = 98.0f / float(kHudArtW);
+        for (const HudBar& b : hud_bars_) {
+            float v = b.blue ? float(kHudArtH) : 0.0f, h = b.y1 - b.y0;
+            // (the empty bar's strip is 16 rows to the filled strip's 13: it stands out a little above and below)
+            draw->AddImage(id, ImVec2(b.x0, b.y0 - h * 1.5f / 13.0f), ImVec2(b.x1, b.y1 + h * 1.5f / 13.0f),
+                           ImVec2(0.0f, (v + 32.0f) / kRows), ImVec2(kAcross, (v + 47.5f) / kRows));
+            if (b.health > 0.0f)
+                draw->AddImage(id, ImVec2(b.x0, b.y0), ImVec2(b.x0 + (b.x1 - b.x0) * b.health, b.y1),
+                               ImVec2(0.0f, (v + 3.0f) / kRows), ImVec2(kAcross * b.health, (v + 16.0f) / kRows));
+        }
+    }
+    hud_bars_.clear();
 }
 
 void D3D12Backend::RenderUi() {
@@ -3385,6 +3508,7 @@ void D3D12Backend::RenderUi() {
     ImGui_ImplDX12_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
+    DrawHudBars();
     if (app::kGame.ui) app::kGame.ui(fps_);
     ImGui::Render();
     ID3D12DescriptorHeap* uh[] = {ui_heap_.Get()};

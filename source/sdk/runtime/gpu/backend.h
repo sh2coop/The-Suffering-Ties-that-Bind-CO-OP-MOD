@@ -1,5 +1,7 @@
 #pragma once
 #include <atomic>
+#include <vector>
+#include <mutex>
 #include <cstdint>
 #include <memory>
 
@@ -131,6 +133,18 @@ inline std::atomic<float> g_second_health{-1.0f};
 // from another PC: his thin bar goes under the title's own bar of the whole frame.
 inline std::atomic<float> g_first_health{-1.0f};
 inline std::atomic<bool> g_partner_whole{false};
+// The title's own health bar art, for those bars: the part of its HUD texture (256 x 256, DXT5) that holds the bar's
+// strips, columns 0 to 99 and rows 208 to 255, decoded when the game uploads that texture. Rows 0 to 47: as the
+// title has it (red); rows 48 to 95: the same with red and blue swapped (Player 2's). In it the filled strip is
+// rows 3 to 15 and the empty bar rows 32 to 47, both columns 0 to 97. Nothing of it is in the program: it comes from
+// the player's own disc image at run time. Until it has been seen the bars are plain rectangles.
+constexpr uint32_t kHudArtW = 100, kHudArtH = 48;
+struct HudArt {
+    std::mutex lock;
+    std::vector<uint8_t> bgra;       // kHudArtW x 2 kHudArtH, four bytes a texel
+    std::atomic<uint32_t> ready{0};  // counts up each time it is taken anew
+};
+inline HudArt g_hud_art;
 // ... and a small arrow above the partner's head, in the title's orange, drawn over the finished frame so that it
 // shows through walls (no name tags). For each view (0: Player 1's, the left half or the whole frame; 1: Player
 // 2's, the right half) the point it hangs over, as a share of that view across and down; x below 0: none.

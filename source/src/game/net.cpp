@@ -743,11 +743,46 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
             }
     };
     // (Player 2's own bar is blue; under it, thin, his partner's in the title's red: see gpu::g_first_health)
+    // In the title's own bar art when the runtime has taken it from the HUD texture (gpu::g_hud_art: the empty bar's
+    // strip rows 32 to 47, the filled strip rows 3 to 15, columns 0 to 97; Player 2's 48 rows further down), each
+    // pixel sampled between the art's texels and blended in by its alpha. Plain rectangles until then.
+    std::vector<uint8_t> art;
+    if (gpu::g_hud_art.ready.load()) {
+        std::lock_guard a(gpu::g_hud_art.lock);
+        art = gpu::g_hud_art.bgra;
+    }
+    auto strip = [&](float l, float t, float r, float b, float u1, float v0, float v1) {  // texels 0..u1 across, v0..v1 down
+        if (r <= l || b <= t) return;
+        for (int y = std::max(int(t), 0); y < std::min(int(std::ceil(b)), int(oh)); y++)
+            for (int x = std::max(int(l), 0); x < std::min(int(std::ceil(r)), int(ow)); x++) {
+                float u = (float(x) + 0.5f - l) / (r - l) * u1 - 0.5f, v = v0 + (float(y) + 0.5f - t) / (b - t) * (v1 - v0) - 0.5f;
+                if (u < -0.5f || u > u1 - 0.5f || v < v0 - 0.5f || v > v1 - 0.5f) continue;
+                int ui = int(std::floor(u)), vi = int(std::floor(v));
+                float fu = u - float(ui), fv = v - float(vi), c[4] = {};
+                for (int k = 0; k < 4; k++) {
+                    int tx = std::clamp(ui + (k & 1), 0, int(gpu::kHudArtW) - 1), ty = std::clamp(vi + (k >> 1), int(v0), int(std::ceil(v1)) - 1);
+                    float wgt = ((k & 1) ? fu : 1 - fu) * ((k >> 1) ? fv : 1 - fv);
+                    const uint8_t* texel = art.data() + (size_t(ty) * gpu::kHudArtW + size_t(tx)) * 4;
+                    for (int i = 0; i < 4; i++) c[i] += float(texel[i]) * wgt;
+                }
+                float alpha = c[3] / 255.0f;
+                uint8_t* d = g_host.frame.data() + (size_t(y) * ow + size_t(x)) * 3;
+                d[0] = uint8_t(float(d[0]) * (1 - alpha) + c[2] * alpha);  // (the art is B G R A, the frame R G B)
+                d[1] = uint8_t(float(d[1]) * (1 - alpha) + c[1] * alpha);
+                d[2] = uint8_t(float(d[2]) * (1 - alpha) + c[0] * alpha);
+            }
+    };
     auto bar_of = [&](int left, int top, int right, int bottom, float value, bool blue) {
         if (value < 0) return;
+        if (!art.empty()) {
+            float part = std::clamp(value, 0.0f, 1.0f), high = float(bottom - top), v = blue ? float(gpu::kHudArtH) : 0.0f;
+            strip(float(left), float(top) - high * 1.5f / 13.0f, float(right), float(bottom) + high * 1.5f / 13.0f, 98.0f, v + 32.0f, v + 48.0f);
+            strip(float(left), float(top), float(left) + float(right - left) * part, float(bottom), 98.0f * part, v + 3.0f, v + 16.0f);
+            return;
+        }
         int filled = left + int(float(right - left) * std::clamp(value, 0.0f, 1.0f));
         rect(left - 1, top - 1, right + 1, bottom + 1, 5, 3, 3);
-        if (blue) rect(left, top, right, bottom, 8, 15, 41), rect(left, top, filled, bottom, 61, 115, 219);
+        if (blue) rect(left, top, right, bottom, 15, 36, 8), rect(left, top, filled, bottom, 140, 219, 41);  // (Player 2: lime green)
         else rect(left, top, right, bottom, 41, 8, 8), rect(left, top, filled, bottom, 204, 56, 61);
     };
     auto bar = [&](int left, int top, int right, int bottom) { bar_of(left, top, right, bottom, health, true); };
@@ -766,7 +801,7 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
         auto px = [&](float x) { return int((320.0f + (x - 320.0f) * sx) * kx); };
         auto py = [&](float y) { return int((240.0f + (y - 240.0f) * sy) * ky); };
         if (health >= 0) bar(px(37), py(40), px(150), py(53));
-        bar_of(px(37), py(88), px(150), py(93), partner, false);
+        bar_of(px(37), py(86), px(37.0f + 113.0f * 0.65f), py(86.0f + 13.0f * 0.65f), partner, false);  // (the same art, smaller)
         {   // the arrow above his partner's head (gpu::g_partner_arrow[1]: where, as a share of his view), as the
             // runtime draws it on the host's own screen
             float ax = gpu::g_partner_arrow[1].x.load(), ay = gpu::g_partner_arrow[1].y.load();
