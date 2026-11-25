@@ -1,1 +1,1 @@
-25 2026-11-25 Health bars in the game's own bar art, Player 2's lime green
+26 2026-11-25 Shadows in Player 2's view

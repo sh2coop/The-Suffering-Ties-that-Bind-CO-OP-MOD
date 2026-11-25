@@ -202,6 +202,7 @@ extern bool g_paused_now;
 extern std::map<uint32_t, int> g_hurt_us;
 void Downs(X86Context& ctx);
 bool g_screen_pass = false;     // the engine is drawing Player 2's view camera
+uint64_t Frames() { return g_frames; }
 
 // Player 2's view camera, wherever it is in the list now (0: none)
 uint32_t ViewCamera2() {
@@ -1419,6 +1420,13 @@ X86_FUNC(sub_001FB080) {
         kernel::Return(ctx, 0xFFFFFFF7, 3);
         return;
     }
+    // S2_RT_TRACE=<frame>: every other texture the renderer is pointed at in that frame and the next (shadows),
+    // with who asked and whether Player 2's view is being drawn
+    static const uint64_t trace_at = std::getenv("S2_RT_TRACE") ? uint64_t(std::atoll(std::getenv("S2_RT_TRACE"))) : 0;
+    if (trace_at && game_coop::Frames() >= trace_at && game_coop::Frames() < trace_at + 2)
+        LOGI("coop: rt trace: frame %llu texture %08X from %08X (stack %08X %08X %08X %08X) second view %d",
+             (unsigned long long)game_coop::Frames(), kernel::R32(ctx.esp + 4), kernel::R32(ctx.esp), kernel::R32(ctx.esp + 8),
+             kernel::R32(ctx.esp + 12), kernel::R32(ctx.esp + 16), kernel::R32(ctx.esp + 20), int(game_coop::g_screen_pass));
     __imp__sub_001FB080(ctx, base);
 }
 
@@ -2499,3 +2507,87 @@ void Ui(double) {
     }
 }
 }  // namespace game_coop
+
+// ---- shadows for both players --------------------------------------------------------------------------------
+// The shadow manager (0x1E2270, once a frame) keeps a character's shadow only near "the eye": it takes the eye's
+// place from [0x3934D4] +0x8C (Player 1's camera), the caster's place from 0x18CD30, and fades the shadow out with
+// the distance squared ([0x3A7C44] to [0x3A7C48]), dropping it beyond. With two players that left Player 2 without
+// a shadow as soon as he was some metres from Player 1's camera, in both views: he looked as if he stood on nothing
+// (seen by the owner, 2026-11-25). Here the eye is, for each caster, the nearer of the two players' cameras: the
+// copy of the eye's place the manager holds on its stack is replaced when Player 2's camera is the nearer one.
+// S2_COOP_NO_SHADOW_FIX=1 leaves the game's rule.
+X86_EXTERN_FUNC(__imp__sub_0018CD30);
+X86_FUNC(sub_0018CD30) {
+    constexpr uint32_t kFromShadows = 0x001E23B9, kEyeOnStack = 0x28;
+    uint32_t esp = ctx.esp, caster = ctx.ecx, record = ctx.esi;
+    bool shadows = kernel::R32(esp) == kFromShadows;
+    __imp__sub_0018CD30(ctx, base);
+    if (!shadows || !game_coop::g_second_object) return;
+    static const bool trace = std::getenv("S2_SHADOW_TRACE") != nullptr;  // each caster the manager looks at, every 120th frame
+    if (trace && game_coop::Frames() % 120 == 0 && ctx.eax && mem::IsCommitted(ctx.eax + 12))
+        LOGI("coop: shadow trace: frame %llu caster %08X%s at %.1f %.1f %.1f eye %.1f %.1f %.1f size %.2f", (unsigned long long)game_coop::Frames(), caster,
+             caster == game_coop::g_second_object ? " (Player 2)" : caster == game_coop::g_player_object ? " (Player 1)" : "",
+             game_coop::ReadF(ctx.eax), game_coop::ReadF(ctx.eax + 4), game_coop::ReadF(ctx.eax + 8), game_coop::ReadF(esp + 4 + kEyeOnStack),
+             game_coop::ReadF(esp + 8 + kEyeOnStack), game_coop::ReadF(esp + 12 + kEyeOnStack), game_coop::ReadF(caster + 0x58));
+    if (trace && game_coop::Frames() % 120 == 0)
+        LOGI("coop: shadow trace: record %08X strength %.2f (last frame) limits %.1f %.1f %.1f texture %08X flags %02X", record, game_coop::ReadF(record + 8),
+             game_coop::ReadF(0x3A7C44), game_coop::ReadF(0x3A7C48), game_coop::ReadF(0x3A7C4C), kernel::R32(record + 0x2A), kernel::R32(record + 0x0C) >> 16);
+    if (trace && game_coop::Frames() % 120 == 0) {
+        std::string line;
+        char one[32];
+        for (uint32_t at = 0x0E; at < 0x2A; at += 4) std::snprintf(one, sizeof one, " %.2f", game_coop::ReadF(record + at)), line += one;
+        line += " |";
+        for (uint32_t at = 0x2E; at < 0x6E; at += 4) std::snprintf(one, sizeof one, " %.2f", game_coop::ReadF(record + at)), line += one;
+        LOGI("coop: shadow trace: record %08X +0E:%s", record, line.c_str());
+    }
+    static const bool off = std::getenv("S2_COOP_NO_SHADOW_FIX") != nullptr;
+    uint32_t camera = game_coop::ViewCamera2(), eye = camera && mem::IsCommitted(camera + 0xA4) ? kernel::R32(camera + 0xA0) : 0;
+    uint32_t place = ctx.eax, held = esp + 4 + kEyeOnStack;
+    if (off || !eye || !mem::IsCommitted(eye + 0x50) || !place || !mem::IsCommitted(place + 12)) return;
+    float mine = 0, other = 0, second[3];
+    for (int i = 0; i < 3; i++) {
+        float at = game_coop::ReadF(place + i * 4);
+        second[i] = game_coop::ReadF(eye + 0x44 + i * 4);
+        float a = game_coop::ReadF(held + i * 4) - at, b = second[i] - at;
+        mine += a * a, other += b * b;
+    }
+    if (other < mine) std::memcpy(kernel::HostPtr(held), second, sizeof second);
+}
+
+// The world is drawn for a view camera (0x1D1E00, this = 0x3972E8). It runs the shadow manager only when the view's
+// switch at +0x50 is set, and the camera loop (0x1B83E0) sets that for camera 0 alone, "the screen": so shadows were
+// drawn into Player 1's view only, and nobody had a shadow in Player 2's. While Player 2's camera is drawn the
+// switch is set here as well (and put back after).
+X86_EXTERN_FUNC(__imp__sub_001D1E00);
+X86_FUNC(sub_001D1E00) {
+    static const bool off = std::getenv("S2_COOP_NO_SHADOW_FIX") != nullptr;
+    uint32_t view = kernel::R32(game_coop::kViewPointer);
+    bool second = game_coop::g_screen_pass && view && !off && !kernel::R32(view + 0x50);
+    if (second) kernel::W32(view + 0x50, 1);
+    __imp__sub_001D1E00(ctx, base);
+    if (second && kernel::R32(game_coop::kViewPointer) == view) kernel::W32(view + 0x50, 0);
+}
+
+// A shadow is dropped by the manager when its volume is outside the camera being drawn (0x1E0A00: the test at
+// 0x1E0D7F, 0x17C450 with this = that camera's frustum at +0x110; "outside" makes the manager drop the record,
+// 0x1E11F0). With the manager now run for both cameras, a character one player sees and the other does not would
+// be dropped in one pass and made anew in the other, every frame. Here a shadow counts as inside while either
+// player's camera sees it.
+X86_EXTERN_FUNC(__imp__sub_0017C450);
+X86_FUNC(sub_0017C450) {
+    constexpr uint32_t kFromShadow = 0x001E0D84, kFrustum = 0x110;
+    bool shadow = kernel::R32(ctx.esp) == kFromShadow;
+    uint32_t mine = ctx.ecx, volume = kernel::R32(ctx.esp + 4);
+    __imp__sub_0017C450(ctx, base);
+    if (!shadow || !(ctx.eax & 0xFF) || !game_coop::g_second_object) return;
+    static const bool off = std::getenv("S2_COOP_NO_SHADOW_FIX") != nullptr;
+    uint32_t view = kernel::R32(game_coop::kViewPointer), first = view ? kernel::R32(view + game_coop::kViewCameras) : 0;
+    uint32_t second = game_coop::ViewCamera2();
+    if (off || !first || !second) return;
+    uint32_t other = mine == first + kFrustum ? second + kFrustum : first + kFrustum;
+    uint32_t ecx = ctx.ecx;
+    ctx.ecx = other;
+    uint32_t outside = kernel::CallGuest(ctx, 0x0017C450, {volume});
+    ctx.ecx = ecx;
+    ctx.eax = (ctx.eax & ~0xFFu) | (outside & 0xFF);
+}
