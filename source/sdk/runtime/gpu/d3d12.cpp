@@ -3294,6 +3294,7 @@ void D3D12Backend::BlitFrame(Target& t, D3D12_CPU_DESCRIPTOR_HANDLE rh) {
     constexpr float kOverscan = 2.0f;
     float uv[4] = {kOverscan / 640.0f, kOverscan / 480.0f, 1 - 2 * kOverscan / 640.0f, 1 - 2 * kOverscan / 480.0f};
     D3D12_VIEWPORT vp{(w - vw) / 2, (h - vh) / 2, vw, vh, 0, 1};
+    g_picture[0] = vp.TopLeftX, g_picture[1] = vp.TopLeftY, g_picture[2] = vw, g_picture[3] = vh;  // [local change, The Suffering: Ties That Bind]
     D3D12_RECT scissor{0, 0, LONG(bb_w_), LONG(bb_h_)};
     cl_->RSSetViewports(1, &vp);
     cl_->RSSetScissorRects(1, &scissor);
@@ -3375,24 +3376,7 @@ void D3D12Backend::BlitFrame(Target& t, D3D12_CPU_DESCRIPTOR_HANDLE rh) {
             (void)sy;
             bar(from, sx, 1.0f, 74.0f, 79.0f, h2, true);
         }
-        // the arrows above the partners' heads: a small triangle pointing down, orange with a dark edge
-        for (int view = 0; view < 2; view++) {
-            float ax = g_partner_arrow[view].x.load(), ay = g_partner_arrow[view].y.load();
-            if (ax < 0 || !(halves || (whole && view == 0))) continue;
-            float left = halves ? vp.TopLeftX + vw * 0.5f * float(view) : vp.TopLeftX, width = halves ? vw * 0.5f : vw;
-            float cx = left + std::clamp(ax, 0.03f, 0.97f) * width, tip = vp.TopLeftY + std::clamp(ay, 0.06f, 0.97f) * vh;
-            float unit = std::max(1.0f, std::round(vh / 360.0f));  // one row of the triangle
-            constexpr int kRows = 6;
-            for (int pass = 0; pass < 2; pass++) {      // the dark edge, then the orange
-                float grow = pass ? 0.0f : unit;
-                for (int row = 0; row < kRows; row++) {  // the tip is the lowest row
-                    float half_width = unit * float(row + 1) + grow;
-                    float y1 = tip - unit * float(row) + (row == 0 ? grow : 0.0f), y0 = tip - unit * float(row + 1) - (row == kRows - 1 ? grow : 0.0f);
-                    if (pass) rect(cx - half_width, y0, cx + half_width, y1, 0.93f, 0.52f, 0.10f);
-                    else rect(cx - half_width, y0, cx + half_width, y1, 0.05f, 0.03f, 0.01f);
-                }
-            }
-        }
+        // (the arrows above the partners' heads are drawn smooth in the ImGui layer: the title's GameInfo::ui)
     }
 }
 

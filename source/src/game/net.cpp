@@ -761,6 +761,34 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
         auto py = [&](float y) { return int((240.0f + (y - 240.0f) * sy) * ky); };
         if (health >= 0) bar(px(37), py(40), px(150), py(53));
         bar_of(px(37), py(74), px(150), py(79), partner, false);
+        {   // the arrow above his partner's head (gpu::g_partner_arrow[1]: where, as a share of his view), as the
+            // runtime draws it on the host's own screen
+            float ax = gpu::g_partner_arrow[1].x.load(), ay = gpu::g_partner_arrow[1].y.load();
+            if (ax >= 0) {
+                // a triangle pointing down, each pixel coloured by how much of it the triangle covers (16 samples),
+                // first a little larger in a dark colour, then the orange
+                float tx = std::clamp(ax, 0.03f, 0.97f) * float(ow), tip = std::clamp(ay, 0.06f, 0.97f) * float(oh);
+                float th = float(oh) / 48.0f, tw = th * 0.95f;
+                for (int pass = 0; pass < 2; pass++) {
+                    float grow = pass ? 0.0f : std::max(1.0f, float(oh) / 540.0f);
+                    float hw = tw + grow * 1.6f, y0 = tip - th - grow, y1 = tip + grow * 1.8f;
+                    const uint8_t colour[3] = {uint8_t(pass ? 237 : 12), uint8_t(pass ? 133 : 8), uint8_t(pass ? 26 : 3)};
+                    for (int y = std::max(0, int(y0) - 1); y <= std::min(int(oh) - 1, int(y1) + 1); y++)
+                        for (int x = std::max(0, int(tx - hw) - 1); x <= std::min(int(ow) - 1, int(tx + hw) + 1); x++) {
+                            int inside = 0;
+                            for (int k = 0; k < 16; k++) {
+                                float sx = float(x) + (float(k % 4) + 0.5f) / 4, sy = float(y) + (float(k / 4) + 0.5f) / 4;
+                                if (sy < y0 || sy > y1) continue;
+                                float half = hw * (y1 - sy) / (y1 - y0);  // the triangle's half width at that height
+                                inside += std::fabs(sx - tx) <= half;
+                            }
+                            if (!inside) continue;
+                            uint8_t* d = g_host.frame.data() + (size_t(y) * ow + size_t(x)) * 3;
+                            for (int c = 0; c < 3; c++) d[c] = uint8_t((d[c] * (16 - inside) + colour[c] * inside) / 16);
+                        }
+                }
+            }
+        }
         int cx = int(ow) / 2, cy = int(oh) / 2;
         int arm = std::max(3, int(5.0f * ky)), gap = std::max(1, int(2.0f * ky)), thick = std::max(1, int(1.0f * ky + 0.5f));
         for (int pass = 0; pass < 2; pass++) {  // the dark edge, then the light cross

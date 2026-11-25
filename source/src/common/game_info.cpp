@@ -12,6 +12,7 @@ void Loaded();
 
 namespace game_watchdog { void Init(); }  // freeze report (src/game/watchdog.cpp)
 namespace game_coop {
+void Ui(double fps);  // coop.cpp
 extern uint32_t g_mode_setting;  // coop.cpp: 0 off, 1 split screen
 }
 namespace game_view { extern uint32_t g_shape_setting; }  // Display Settings: picture shape (src/game/view.cpp)
@@ -40,7 +41,7 @@ const app::GameInfo app::kGame = {
     .loaded = game_diag::Loaded,                    // image in memory, before its entry point runs
     .window = nullptr,                    // the game window is up
     .message = nullptr,                   // window messages first; true takes one
-    .ui = nullptr,                        // ImGui drawing each frame
+    .ui = game_coop::Ui,                  // ImGui drawing each frame: the arrow above the partner's head
     .pad = game_pad::Hook,                       // changes a polled pad
     .rumble = nullptr,                    // changes a rumble before it is set
 };

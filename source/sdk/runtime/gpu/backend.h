@@ -138,5 +138,8 @@ struct PartnerArrow {
     std::atomic<float> x{-1.0f}, y{-1.0f};
 };
 inline PartnerArrow g_partner_arrow[2];
+// where the title's picture is in the window (left, top, width, height in back buffer pixels), for a title that
+// draws over it in the ImGui layer (GameInfo::ui)
+inline std::atomic<float> g_picture[4] = {};
 
 }  // namespace gpu

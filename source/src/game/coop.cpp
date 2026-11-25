@@ -2399,3 +2399,30 @@ void TestCall(X86Context& ctx) {
     ctx.ecx = ecx;
 }
 }  // namespace game_coop
+
+// ---- the arrow above the partner's head, on the screen ------------------------------------------------------------
+// Drawn in the runtime's ImGui layer, over the finished frame (through walls), as a smooth triangle at the window's
+// own resolution (the first version was six stacked bars and looked pixelated). Orange with a dark edge; kArrowAlpha
+// is how solid it is. The joined player's is drawn into his picture by net.cpp.
+#include <imgui.h>
+namespace game_coop {
+constexpr float kArrowAlpha = 1.0f;
+void Ui(double) {
+    bool halves = SplitActive(), whole = StreamView();
+    if (!halves && !whole) return;
+    float left = gpu::g_picture[0].load(), top = gpu::g_picture[1].load(), vw = gpu::g_picture[2].load(), vh = gpu::g_picture[3].load();
+    if (vw < 16 || vh < 16) return;
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    for (int view = 0; view < 2; view++) {
+        float ax = gpu::g_partner_arrow[view].x.load(), ay = gpu::g_partner_arrow[view].y.load();
+        if (ax < 0 || (whole && view == 1)) continue;
+        float x0 = halves ? left + vw * 0.5f * float(view) : left, width = halves ? vw * 0.5f : vw;
+        float cx = x0 + std::clamp(ax, 0.03f, 0.97f) * width, tip = top + std::clamp(ay, 0.06f, 0.97f) * vh;
+        float h = vh / 48.0f, w = h * 0.95f, edge = std::max(1.5f, vh / 540.0f);
+        ImVec2 a(cx - w, tip - h), b(cx + w, tip - h), c(cx, tip);
+        draw->AddTriangleFilled(ImVec2(a.x - edge * 1.6f, a.y - edge), ImVec2(b.x + edge * 1.6f, b.y - edge), ImVec2(c.x, c.y + edge * 1.8f),
+                                IM_COL32(12, 8, 3, int(220 * kArrowAlpha)));
+        draw->AddTriangleFilled(a, b, c, IM_COL32(237, 133, 26, int(255 * kArrowAlpha)));
+    }
+}
+}  // namespace game_coop

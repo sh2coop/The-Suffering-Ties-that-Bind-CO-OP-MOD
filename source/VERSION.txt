@@ -1,1 +1,1 @@
-15 2026-11-25 Orange arrow above the partner; partner health bar below the insanity meter
+16 2026-11-25 The partner arrow is smooth, and the joined player has it too
