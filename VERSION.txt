@@ -1,1 +1,1 @@
-36 2026-11-25 Smoother picture for the joined player
+37 2026-11-25 Fixed the smeared see-through box around enemies as they appear and around heat and fire effects.

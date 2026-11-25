@@ -656,6 +656,19 @@ uint32_t SceneTexture() {
     return g_scene_texture;
 }
 
+// [local change, The Suffering: Ties That Bind] A texture of the title's own over the scene buffer's memory, made
+// from the buffer's description (here: the picture's size). The title addresses it in the console's antialiased
+// texels all the same (the shimmer around an enemy that appears, 0x1BF340, doubles u), so it is drawn as the scene
+// texture above. Left as it was, the coordinates ran off the right edge: a see-through box with the background
+// squeezed to half its width and smeared (seen 2026-11-25).
+uint32_t SceneAsConsole(uint32_t tex) {
+    if (!tex || (g_sample_x == 1 && g_sample_y == 1) || tex == g_scene_texture) return tex;
+    uint32_t back = g_buffers[1];
+    if (!back || R32(tex + 4) != R32(back + 4) || R32(tex + 16) != R32(back + 16)) return tex;
+    LOG_FIRST(1, "d3d: the title's own texture %08X over the scene buffer is read in the console's antialiased texels", tex);
+    return SceneTexture();
+}
+
 // as D3DDevice_SetTexture does
 void BindTexture(X86Context& ctx, uint32_t stage, uint32_t tex) {
     uint32_t old = Dev(kDevTextures + stage * 4);
@@ -925,7 +938,7 @@ HLE_STDCALL(D3DDevice_SetTexture, 2) {
     if (!same) AddRef(ctx, tex);
     SetDev(kDevTextures + stage * 4, tex);
     if (!same) Release(ctx, old);
-    g_state.textures[stage] = tex;
+    g_state.textures[stage] = SceneAsConsole(tex);
     W32(kDirtyFlags, R32(kDirtyFlags) | XDK_DirtyFlags_Texture);
     return 0;
 }
@@ -1370,6 +1383,15 @@ void Trace2D(const uint8_t* vertices, uint32_t stride, uint32_t count) {
     }
     LOGI("2d trace: %u vertices, box %.0f %.0f to %.0f %.0f, target %s, called from%s", count, x0, y0, x1, y1,
          Dev(kDevRenderTarget) == PostBuffer() ? "shown buffer" : "other", stack.c_str());
+    if (stride == 0x20 && count >= 100) {  // a mesh of screen positions with texture coordinates: its first vertices
+        for (uint32_t i = 0; i < 24 && i < count; i++) {
+            float v[8];
+            std::memcpy(v, vertices + size_t(i) * stride, 32);
+            uint32_t c;
+            std::memcpy(&c, &v[4], 4);
+            LOGI("2d trace:   %u: x %.1f y %.1f z %.4f w %.4f colour %08X u %.2f v %.2f", i, v[0], v[1], v[2], v[3], c, v[6], v[7]);
+        }
+    }
 }
 
 // vertices: the draw's vertices where they are at hand (x and y lead each), else null

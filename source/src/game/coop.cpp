@@ -972,6 +972,7 @@ void Controller2(input::Pad& p) {
 // (the players' line has their health) and in the pictures.
 uint32_t ClassOfTemplate(uint32_t index);
 uint32_t g_test_enemy = 0;  // its engine object
+void TestLineup(X86Context& ctx);
 void TestEnemy(X86Context& ctx) {
     static const char* v = std::getenv("S2_COOP_ENEMY");
     if (!v || !g_player_object || g_frames != uint64_t(std::atoll(v))) return;
@@ -989,7 +990,7 @@ void TestEnemy(X86Context& ctx) {
         uint32_t cls = ClassOfTemplate(i);
         for (size_t k = 0; k < std::size(kEnemies); k++) {
             if (cls != kEnemies[k].cls) continue;
-            if (listed++ < 60) LOGI("coop: test: template %u is a %s", i, kEnemies[k].name);
+            if (listed++ < 400) LOGI("coop: test: template %u is a %s", i, kEnemies[k].name);
             if (k < rank) pick = i, rank = k;
         }
     }
@@ -1019,6 +1020,60 @@ void TestEnemy(X86Context& ctx) {
     kernel::W32(kObjectManager + kManagerState, (kernel::R32(kObjectManager + kManagerState) & ~2u) | (state & 2));
     LOGR("coop: test: enemy from template %u (class %08X) at %.2f %.2f %.2f: object %08X", pick, ClassOfTemplate(pick), pos[0], pos[1], pos[2],
          g_test_enemy);
+}
+
+// Tests: S2_TEST_LINEUP=<frame>,<first>,<how many>[,<metres>]: at that frame the level's enemy and character
+// templates (the classes TestEnemy knows, in the order the level lists them) number <first> onwards are made in a
+// row across Player 1's view, 1.5 m apart, <metres> (5) in front of him, each with a log line: for looking at how
+// every kind is drawn (the owner saw two kinds with a wrong texture, 2026-11-25).
+void TestLineup(X86Context& ctx) {
+    static const char* v = std::getenv("S2_TEST_LINEUP");
+    if (!v || !g_player_object || g_frames != uint64_t(std::atoll(v))) return;
+    static const struct {
+        uint32_t cls;
+        const char* name;
+    } kKinds[] = {{0x4E28364F, "Slayer"}, {0x127243E5, "Mainliner"}, {0x285A9A1F, "Burrower"}, {0x137B74CF, "InfernaBurrower"},
+                  {0x26EB0742, "Wretch"}, {0xDB1BE225, "CartWheeler"}, {0xE2EBCB51, "Fester"}, {0x0E15C87E, "Unspeakable NPC"}, {0xC3F8C321, "NPC"}};
+    int first = 0, many = 8;
+    float far = 5.0f;
+    if (const char* a = std::strchr(v, ',')) {
+        first = std::atoi(a + 1);
+        if (const char* b = std::strchr(a + 1, ',')) {
+            many = std::atoi(b + 1);
+            if (const char* c = std::strchr(b + 1, ',')) far = float(std::atof(c + 1));
+        }
+    }
+    static const bool creatures = std::getenv("S2_TEST_LINEUP_CREATURES") != nullptr;  // (without the human characters)
+    uint32_t table = kernel::R32(0x384BA4), count = table ? kernel::R32(table + 0x18) : 0;
+    std::vector<std::pair<uint32_t, const char*>> list;
+    for (uint32_t i = 0; i < count && i < 0x8000; i++) {
+        uint32_t cls = ClassOfTemplate(i);
+        for (const auto& k : kKinds)
+            if (cls == k.cls && !(creatures && k.cls == 0x0E15C87E)) list.push_back({i, k.name});
+    }
+    LOGR("lineup: the level has %zu such templates; making %d from number %d", list.size(), many, first);
+    static uint32_t matrix = mem::AllocSystem(64);
+    uint32_t state = kernel::R32(kObjectManager + kManagerState);
+    for (int k = 0; k < many && size_t(first + k) < list.size(); k++) {
+        std::memcpy(kernel::HostPtr(matrix), kernel::HostPtr(g_player_object + kMatrix), 64);
+        // (across the VIEW: away from the game's camera through Player 1, not along the way Player 1 faces, which
+        // in the first try put them all behind the camera)
+        static const float gap = std::getenv("S2_TEST_LINEUP_GAP") ? float(std::atof(std::getenv("S2_TEST_LINEUP_GAP"))) : 1.6f;
+        float pos[3], side = (float(k) - float(many - 1) * 0.5f) * gap, dir[3] = {1, 0, 0};
+        uint32_t cam = kernel::R32(kGameCamera);
+        if (cam && mem::IsCommitted(cam + 0x60)) {
+            dir[0] = ReadF(g_player_object + kPosition) - ReadF(cam + kPosition), dir[2] = ReadF(g_player_object + kPosition + 8) - ReadF(cam + kPosition + 8);
+            float len = std::sqrt(dir[0] * dir[0] + dir[2] * dir[2]);
+            if (len > 0.01f) dir[0] /= len, dir[2] /= len;
+        }
+        float right[3] = {-dir[2], 0, dir[0]};
+        for (int i = 0; i < 3; i++) pos[i] = ReadF(g_player_object + kPosition + i * 4) + far * dir[i] + side * right[i];
+        std::memcpy(kernel::HostPtr(matrix + 0x30), pos, 12);
+        kernel::W32(kObjectManager + kManagerState, state & ~2u);
+        uint32_t made = kernel::CallGuest(ctx, kSpawn, {g_player_object, matrix, 0, list[size_t(first + k)].first});
+        LOGR("lineup: place %d: template %u, a %s, object %08X", k, list[size_t(first + k)].first, list[size_t(first + k)].second, made);
+    }
+    kernel::W32(kObjectManager + kManagerState, (kernel::R32(kObjectManager + kManagerState) & ~2u) | (state & 2));
 }
 
 // Tests: S2_COOP_FACE=1 keeps Player 2 turned to the enemy S2_COOP_ENEMY made (four times a second, the game's
@@ -1144,6 +1199,7 @@ void Frame(X86Context& ctx) {
     static const bool god = std::getenv("S2_TEST_GOD") != nullptr;
     if (god && g_player && kernel::R32(g_player + 0x1E) != 1) kernel::W32(g_player + 0x1E, 1);
     TestEnemy(ctx);
+    TestLineup(ctx);
     TestFace(ctx);
     TestExit(ctx);
     TestCensus();
@@ -2870,6 +2926,10 @@ void Outfit(const gpu::State& s) {
 }
 uint32_t DrawVariant(X86Context& ctx, const gpu::State& s) {
     static const uint64_t trace_at = std::getenv("S2_DRAW_TRACE") ? uint64_t(std::atoll(std::getenv("S2_DRAW_TRACE"))) : 0;
+    // S2_CAPTURE_AT=<frame> (with XBE_CAPTURE_DIR): the runtime's frame capture, as F3 would, at that frame
+    static const uint64_t cap_at = std::getenv("S2_CAPTURE_AT") ? uint64_t(std::atoll(std::getenv("S2_CAPTURE_AT"))) : 0;
+    static bool cap_done = false;
+    if (cap_at && !cap_done && g_frames + 1 >= cap_at) cap_done = true, gpu::g_capture = true;
     if (trace_at && g_frames == trace_at) {
         gpu::TextureDesc d;
         bool has = s.textures[0] && gpu::Describe(s.textures[0], d);

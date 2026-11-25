@@ -68,7 +68,12 @@ void Write(Level lv, const char* fmt, ...) {
     n = std::min(n, int(sizeof(line)) - 1);
     if (g_file) {
         std::fwrite(line, 1, size_t(n), g_file);
-        if (lv >= Level::Warn) std::fflush(g_file);
+        // [local change, The Suffering: Ties That Bind] ordinary lines reach the disk within a quarter of a second
+        // too: a game that is closed from outside (or freezes) used to lose the last seconds of its session log,
+        // the part that says what it was doing.
+        static auto flushed = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        if (lv >= Level::Warn || now - flushed > std::chrono::milliseconds(250)) std::fflush(g_file), flushed = now;
     }
     std::fwrite(line, 1, size_t(n), stderr);
 }
