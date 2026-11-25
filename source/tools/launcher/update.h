@@ -1,22 +1,22 @@
-// "Update.exe" (the launcher under that name): brings the folder up to the newest release of the project's repository.
+// "Update.exe" (the launcher under that name): brings the folder up to what the project's repository holds now.
+// The repository's main branch is the playable folder itself (asked for on 2026-11-25: one place, overwritten at
+// every version, no releases), and Update reads it straight from there:
 //
-//   https://github.com/<kRepo>/releases/latest/download/version.txt      "<number> <text>"
-//   .../update.zip        every file of the folder that can change (all but the two big compiler programs)
-//   .../update.zip.sig    RSA signature (PKCS#1 v1.5, SHA-256) of update.zip, made with the release key
+//   https://raw.githubusercontent.com/<repository>/main/VERSION.txt                      "<number> <date> <text>"
+//   .../main/Game%20Files/signed-update/update-<number>.zip       every file that can change (not the two big tools)
+//   .../main/Game%20Files/signed-update/update-<number>.zip.sig   RSA signature (PKCS#1 v1.5, SHA-256), release key
 //
-// It asks for version.txt, compares its number with VERSION.txt beside this program, and when the release is newer
-// downloads the two files, checks the signature against the public key below (so a file that did not come from the
-// release key is never unpacked, whatever server answered), and unpacks it over the folder with Windows' own tar.
-// The game then rebuilds what it must on its next start (the SDK does that when Suffering2.exe is newer than the
-// built code). Nothing of the player's is touched: saves, settings, the image and the logs are not in the zip.
+// It compares the number with VERSION.txt beside this program, and when the repository is newer downloads the zip
+// of exactly that number (GitHub answers from copies that can be minutes old, one file at a time: a name with the
+// number in it cannot be an older file), checks the signature against the public key below (a file that did not
+// come from the release key is never unpacked, whatever server answered), and unpacks it over the folder with
+// Windows' own tar. The game then rebuilds what it must on its next start. Nothing of the player's is touched:
+// saves, settings, the image and the logs are not in the zip.
 #include <winhttp.h>
 #include <bcrypt.h>
 #include <wincrypt.h>
 
-// "latest" is only asked for the version: GitHub answers it from a copy that can be minutes old, and one file at a
-// time (run update3: version.txt said 3 while "latest" update.zip was still release 2's, correctly signed, and the
-// folder ended up half a version behind). The zip and its signature are fetched from the release of that number.
-static const wchar_t kRepoPath[] = L"/sh2coop/The-Suffering-Ties-that-Bind-CO-OP-MOD/releases/";
+static const wchar_t kRepoPath[] = L"/sh2coop/The-Suffering-Ties-that-Bind-CO-OP-MOD/main/";
 static const char kPublicKey[] =
     "-----BEGIN PUBLIC KEY-----\n"
     "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAxBM+O8mIMbNukfJIWhCT\n"
@@ -30,13 +30,13 @@ static const char kPublicKey[] =
     "9KqeRHNmkWTopmFIckNomFeUAdE4JTX2hTUnirDOV0RrAgMBAAE=\n"
     "-----END PUBLIC KEY-----\n";
 
-// GET https://github.com<kRepoPath><name> into a file (redirects followed). -> 0 ok, else an HTTP status or -1
+// GET https://raw.githubusercontent.com<kRepoPath><name> into a file. -> 0 ok, else an HTTP status or -1
 static int Download(const wchar_t* name, const wchar_t* to, const wchar_t* what) {
     int result = -1;
     wchar_t path[512];
-    _snwprintf(path, 512, L"%ls%ls", kRepoPath, name);  // name: "latest/download/<file>" or "download/v<n>/<file>"
+    _snwprintf(path, 512, L"%ls%ls", kRepoPath, name);
     HINTERNET session = WinHttpOpen(L"Suffering2-Update", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    HINTERNET connect = session ? WinHttpConnect(session, L"github.com", INTERNET_DEFAULT_HTTPS_PORT, 0) : NULL;
+    HINTERNET connect = session ? WinHttpConnect(session, L"raw.githubusercontent.com", INTERNET_DEFAULT_HTTPS_PORT, 0) : NULL;
     HINTERNET request = connect ? WinHttpOpenRequest(connect, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE | WINHTTP_FLAG_REFRESH) : NULL;
     // (asked for fresh: a copy of "latest" kept somewhere on the way answered with the release before, run update2)
     if (request && WinHttpSendRequest(request, L"Cache-Control: no-cache\r\nPragma: no-cache\r\n", (DWORD)-1, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(request, NULL)) {
@@ -141,10 +141,10 @@ static int Update(void) {
     char mine[200] = "0", theirs[200] = "";
     ReadSmall(version_file, mine, sizeof mine);
     ShowLine(L"Looking for a newer version");
-    int got = Download(L"latest/download/version.txt", remote_file, NULL);
+    int got = Download(L"VERSION.txt", remote_file, NULL);
     if (got != 0 || !ReadSmall(remote_file, theirs, sizeof theirs)) {
         wchar_t text[400];
-        if (got == 404) _snwprintf(text, 400, L"No release was found to update from yet.");
+        if (got == 404) _snwprintf(text, 400, L"The project's page has no version to update from yet.");
         else _snwprintf(text, 400, L"The update server could not be reached (%d).\n\nCheck the internet connection and try again.", got);
         Tell(text, MB_ICONINFORMATION);
         return 1;
@@ -170,9 +170,9 @@ static int Update(void) {
     ShowLine(line);
     BYTE hash[32], signature[1024];
     DWORD signature_size = 0;
-    wchar_t zip_name[64], sig_name[64];
-    _snwprintf(zip_name, 64, L"download/v%d/update.zip", atoi(theirs));
-    _snwprintf(sig_name, 64, L"download/v%d/update.zip.sig", atoi(theirs));
+    wchar_t zip_name[96], sig_name[96];
+    _snwprintf(zip_name, 96, L"Game%%20Files/signed-update/update-%d.zip", atoi(theirs));
+    _snwprintf(sig_name, 96, L"Game%%20Files/signed-update/update-%d.zip.sig", atoi(theirs));
     int ok = Download(sig_name, sig, NULL) == 0 && Download(zip_name, zip, line) == 0;
     if (ok) {
         HANDLE f = CreateFileW(sig, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);

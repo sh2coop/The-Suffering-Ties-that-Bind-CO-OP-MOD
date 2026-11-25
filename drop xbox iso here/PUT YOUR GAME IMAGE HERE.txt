@@ -1,0 +1,5 @@
+﻿Put your own Xbox disc image of The Suffering: Ties That Bind here
+(the USA / Europe release; a file ending in .iso).
+
+If you have it as an archive (.7z, .zip, .rar), unpack it first.
+Then double-click "Build Recomp" in the folder above.

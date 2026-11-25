@@ -67,16 +67,61 @@ if (-not (Test-Path "$clone\.git")) {
     & git clone -q "https://github.com/$Repo.git" $clone 2>$null
     if (-not (Test-Path "$clone\.git")) { throw "the repository could not be cloned" }
 }
+# The repository's main branch IS the playable folder, so that the green Code button's "Download ZIP" gives a folder
+# that works as it is (asked for on 2026-11-25): the hand-out folder at the top, the source under "source".
+# clang.exe is over GitHub's 100 MB limit for one file, so the two big compiler programs go in zipped (42 and 28 MB)
+# and Build Recomp unpacks them. The zips are made once and kept: a new zip of the same program would differ in its
+# dates and add 70 MB to the repository's history at every release.
+$keep = Join-Path $rel "keep"
+New-Item -ItemType Directory -Force $keep | Out-Null
+foreach ($tool in "clang", "lld-link") {
+    $have = Join-Path $clone "Game Files\compiler\$tool.zip"
+    if (Test-Path $have) { Move-Item $have $keep }
+    else {
+        Push-Location (Join-Path $out "Game Files\compiler")
+        & $tar -a -cf (Join-Path $keep "$tool.zip") "$tool.exe"
+        Pop-Location
+    }
+}
 Get-ChildItem $clone -Force | Where-Object { $_.Name -ne ".git" } | Remove-Item -Recurse -Force
+& robocopy $out $clone /E /XF clang.exe lld-link.exe /NFL /NDL /NJH /NJS /NP | Out-Null
+foreach ($tool in "clang", "lld-link") { Move-Item (Join-Path $keep "$tool.zip") (Join-Path $clone "Game Files\compiler") }
+Remove-Item $keep
+# what Update fetches: this version's zip and its signature, under a name with the number in it
+$signed = Join-Path $clone "Game Files\signed-update"
+New-Item -ItemType Directory -Force $signed | Out-Null
+Copy-Item "$rel\update.zip" (Join-Path $signed "update-$number.zip")
+Copy-Item "$rel\update.zip.sig" (Join-Path $signed "update-$number.zip.sig")
+Set-Content -Encoding ascii (Join-Path $clone "Logs\what is this folder.txt") "The game writes one file here every time it is started, and its crash reports.`r`nIf something goes wrong, zip this folder and send it."
+$source = Join-Path $clone "source"
+New-Item -ItemType Directory $source | Out-Null
 $archive = Join-Path $rel "source.tar"
 & git -C $proj archive --format=tar -o $archive HEAD
-& $tar -xf $archive -C $clone
+& $tar -xf $archive -C $source
 Remove-Item $archive
+Move-Item (Join-Path $source "README.md") $clone
+Copy-Item (Join-Path $source "LICENSE") $clone
+# nothing is to be changed on the way in or out, and what a player's folder gains is never committed
+Set-Content -Encoding ascii (Join-Path $clone ".gitattributes") "* -text"
+Set-Content -Encoding ascii (Join-Path $clone ".gitignore") @"
+/drop xbox iso here/*
+!/drop xbox iso here/PUT YOUR GAME IMAGE HERE.txt
+/Logs/*
+!/Logs/what is this folder.txt
+/Game Files/assets/
+/Game Files/Suffering2.dll
+/Game Files/compiler/work/
+/Game Files/compiler/clang.exe
+/Game Files/compiler/lld-link.exe
+/Game Files/hdd/
+/Game Files/shader_cache/
+/Game Files/update/
+/Game Files/settings.toml
+/Update.old.exe
+"@
 & git -C $clone add -A
 & git -C $clone -c user.name="sh2coop" -c user.email="sh2coop@users.noreply.github.com" commit -q -m "Version $number`: $Note" -m "Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>"
 & git -C $clone branch -M main
 & git -C $clone push -q -u origin main
 if ($LASTEXITCODE -ne 0) { throw "the push failed" }
-& gh release create "v$number" "$rel\version.txt" "$rel\update.zip" "$rel\update.zip.sig" "$rel\The-Suffering-2-PC.zip" --repo $Repo --title "Version $number" --notes $Note --latest
-if ($LASTEXITCODE -ne 0) { throw "the release was not created" }
-"published: https://github.com/$Repo/releases/tag/v$number"
+"published: https://github.com/$Repo (main is version $number)"

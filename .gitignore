@@ -1,35 +1,14 @@
-# build
-/out/
-/build/
-*.zip
-*.pdb
-*.exe
-*.obj
-*.o
-
-# recompiled code, derived from the game
-/generated/
-
-# user's own game files
-/assets/
-
-# runtime files
-settings.toml
-/logs/
-/hdd/
-/CrashDumps/
-
-# editors
-.vs/
-.vscode/
-.idea/
-
-# Local temporary folder
-.local
-
-# this project
-/tools/llvm
-/runs/
-/build.log
-/build2.log
-configure.log
+/drop xbox iso here/*
+!/drop xbox iso here/PUT YOUR GAME IMAGE HERE.txt
+/Logs/*
+!/Logs/what is this folder.txt
+/Game Files/assets/
+/Game Files/Suffering2.dll
+/Game Files/compiler/work/
+/Game Files/compiler/clang.exe
+/Game Files/compiler/lld-link.exe
+/Game Files/hdd/
+/Game Files/shader_cache/
+/Game Files/update/
+/Game Files/settings.toml
+/Update.old.exe

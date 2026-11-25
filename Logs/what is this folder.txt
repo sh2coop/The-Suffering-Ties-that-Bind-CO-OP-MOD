@@ -1,0 +1,2 @@
+The game writes one file here every time it is started, and its crash reports.
+If something goes wrong, zip this folder and send it.

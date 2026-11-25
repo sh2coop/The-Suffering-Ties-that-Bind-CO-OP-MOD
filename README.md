@@ -1,9 +1,9 @@
 # The Suffering: Ties That Bind - PC port with co-op
 
-## [⬇ DOWNLOAD THE GAME (newest version)](https://github.com/sh2coop/The-Suffering-Ties-that-Bind-CO-OP-MOD/releases/latest/download/The-Suffering-2-PC.zip)
+## [⬇ DOWNLOAD (the green Code button, then "Download ZIP", does the same)](https://github.com/sh2coop/The-Suffering-Ties-that-Bind-CO-OP-MOD/archive/refs/heads/main.zip)
 
-That link is always the newest playable build. The green **Code** button on this page gives the source code only,
-not the game.
+This page is the game folder itself, always the newest version. Download it, unpack it, add your own Xbox disc image,
+and play. **No game data is in here: every player needs his own Xbox image of the game.**
 
 An unofficial native PC port of the original Xbox version of *The Suffering: Ties That Bind*, with split-screen and
 online co-op for two players. It is made with the [Xbox XBE Recomp](https://github.com/TGP482/XboxXBE-Recomp) tool:
@@ -16,7 +16,7 @@ This is a test build. Things will be rough in places.
 
 ## Playing
 
-1. Download the game with the link at the top of this page and unpack it anywhere.
+1. Download with the link at the top of this page and unpack the zip anywhere.
 2. Put your Xbox disc image (the `.iso` file) into the folder `drop xbox iso here`.
 3. Double-click `Build Recomp`. It builds the game for your PC, which takes a few minutes and happens once.
    When it says it is ready, press Enter.
@@ -48,17 +48,18 @@ back beside Player 1 after scenes and level changes, and has a button (BACK) tha
 
 ## Building from source
 
-Visual Studio 2022 with "Desktop development with C++", "C++ Clang tools for Windows" and "C++ CMake tools for
-Windows". Put the disc's files (with `default.xbe`) or the image in `assets`, then run `build.bat`. The program is
-written to `out\build\release`. `tools\package.ps1` makes the folder that the release zip holds.
+The source is in the `source` folder. Visual Studio 2022 with "Desktop development with C++", "C++ Clang tools for
+Windows" and "C++ CMake tools for Windows". Put the disc's files (with `default.xbe`) or the image in `source\assets`,
+then run `source\build.bat`. `source\tools\package.ps1` makes the folder you see on this page.
 
 ## Credits and license
 
 - [Xbox XBE Recomp](https://github.com/TGP482/XboxXBE-Recomp) by TGP482 (MIT), the recompiler and runtime in `sdk`.
 - [XenonRecomp](https://github.com/hedge-dev/XenonRecomp), [Zydis](https://github.com/zyantific/zydis),
   [toml++](https://github.com/marzer/tomlplusplus), [Dear ImGui](https://github.com/ocornut/imgui) and
-  [SDL](https://github.com/libsdl-org/SDL); see `sdk\THIRD_PARTY.txt`.
+  [SDL](https://github.com/libsdl-org/SDL); see `source\sdk\THIRD_PARTY.txt`.
 - *The Suffering: Ties That Bind* is the property of its owners. This project is not affiliated with them.
 
-The port's own code (`src`, `tools`, `config`) is under the GNU General Public License v3 (`LICENSE`). The `sdk`
-folder keeps its own MIT license (`sdk\LICENSE`).
+The port's own code (`source\src`, `source\tools`, `source\config`) is under the GNU General Public License v3
+(`LICENSE`). The `source\sdk` folder keeps its own MIT license. The programs in `Game Files\compiler` are LLVM's
+(`LLVM-LICENSE.txt` beside them).

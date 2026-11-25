@@ -177,6 +177,25 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR args, int show) {
     CreateDirectoryW(og, NULL);
     CreateDirectoryW(assets, NULL);
 
+    // The two big compiler programs come zipped when the folder is the repository's own download (GitHub takes no
+    // file over 100 MB, and clang.exe is 108): Build Recomp unpacks them once, with Windows' own tar.
+    if (build) {
+        static const wchar_t* const tools[] = {L"clang", L"lld-link"};
+        for (int i = 0; i < 2; i++) {
+            wchar_t exe[MAX_PATH * 2], zip[MAX_PATH * 2], dir[MAX_PATH * 2], command[MAX_PATH * 6];
+            _snwprintf(exe, MAX_PATH * 2, L"%ls\\compiler\\%ls.exe", files, tools[i]);
+            _snwprintf(zip, MAX_PATH * 2, L"%ls\\compiler\\%ls.zip", files, tools[i]);
+            _snwprintf(dir, MAX_PATH * 2, L"%ls\\compiler", files);
+            if (Exists(exe) || !Exists(zip)) continue;
+            ShowLine(L"Unpacking the build tools");
+            _snwprintf(command, MAX_PATH * 6, L"\"%ls\\System32\\tar.exe\" -xf \"%ls\" -C \"%ls\"", _wgetenv(L"SystemRoot") ? _wgetenv(L"SystemRoot") : L"C:\\Windows", zip, dir);
+            if (RunQuiet(command) != 0 || !Exists(exe)) {
+                Tell(L"The build tools could not be unpacked.\n\nCheck that the drive has about 1 GB free and that the folder can be written to, then double-click \"Build Recomp\" again.", MB_ICONERROR);
+                return 1;
+            }
+        }
+    }
+
     // the game is in place already?
     _snwprintf(probe, MAX_PATH * 2, L"%ls\\default.xbe", assets);
     int placed = Exists(probe) || FindWithExt(assets, L".iso", found, MAX_PATH * 2);

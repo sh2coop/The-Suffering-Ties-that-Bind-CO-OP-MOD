@@ -1,0 +1,38 @@
+﻿THE SUFFERING: TIES THAT BIND on PC, with co-op (test build)
+
+HOW TO START
+
+  1. Put your Xbox disc image of the game (the .iso file) into the folder "drop xbox iso here".
+  2. Double-click "Build Recomp".
+  3. Wait while it builds the game (a few minutes, only this once).
+     When it says it is ready, press Enter. The game starts.
+
+That is all. From then on, double-click "The Suffering 2" to play.
+
+GOOD TO KNOW
+
+  - Your image is a .7z, .zip or .rar? Unpack it first, the .iso is inside.
+  - Windows asks once if the game may use the network. Say Allow if you want to play online.
+  - No game data comes with this folder. You need your own copy of the game.
+
+CO-OP
+
+  In the game: Options, then "Display and Co-op".
+  - Split screen: two controllers on one PC. Controller 1 is Player 1.
+  - Online: one player picks "Host online". The other picks "Join online" and types the
+    host's address. Over the internet the host must forward UDP port 27025 to his PC.
+
+KEYBOARD
+
+  Arrows = d-pad, Enter = START, Backspace = BACK, Space or J = A, K = B, U = X, I = Y,
+  O = white, P = black, W A S D = move, Q and E = triggers, numpad 8 2 4 6 = look.
+
+UPDATES
+
+  Double-click "Update". It fetches the newest version when there is one.
+  The version you have is in VERSION.txt.
+
+SOMETHING WENT WRONG?
+
+  Zip the "Logs" folder (it is right here, beside "The Suffering 2") and send it.
+  It has one file for every time the game was started, and the crash reports.

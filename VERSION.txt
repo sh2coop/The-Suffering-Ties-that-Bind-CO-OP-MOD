@@ -1,1 +1,1 @@
-4 2026-11-25 Update program fixed: it fetches the exact release
+5 2026-11-25 The main page is the game folder; Update reads it from there
