@@ -304,7 +304,9 @@ void Run() {
         // nothing is frozen then. The clock starts when the built code is there.
         if (!seen_frames) {
             std::error_code ec;
-            if (!std::filesystem::exists(app::ExeDir() / "Suffering2.dll", ec)) {
+            // (missing: the first start. Older than the program: an update, which builds it all again)
+            auto dll = app::ExeDir() / "Suffering2.dll", exe = app::ExeDir() / "Suffering2.exe";
+            if (!std::filesystem::exists(dll, ec) || std::filesystem::last_write_time(dll, ec) < std::filesystem::last_write_time(exe, ec)) {
                 moving = clock::now();
                 continue;
             }

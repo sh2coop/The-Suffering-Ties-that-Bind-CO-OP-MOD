@@ -215,7 +215,7 @@ static int Update(void) {
         return 1;
     }
     wchar_t text[600];
-    _snwprintf(text, 600, L"Updated to version %hs.\n\nStart \"The Suffering 2\" as usual. The first start after an update takes a minute or two longer.", theirs);
+    _snwprintf(text, 600, L"Updated to version %hs.\n\nStart \"The Suffering 2\" as usual. The first start after an update builds the game again, which takes a few minutes.", theirs);
     Tell(text, MB_ICONINFORMATION);
     return 0;
 }
