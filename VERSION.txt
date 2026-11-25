@@ -1,1 +1,1 @@
-37 2026-11-25 Fixed the smeared see-through box around enemies as they appear and around heat and fire effects.
+38 2026-11-25 The joining player now gets a clear waiting screen that says what he is waiting for, and a short Joining step before the game appears.

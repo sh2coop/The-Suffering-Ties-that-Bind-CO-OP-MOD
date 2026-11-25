@@ -2926,8 +2926,8 @@ void Outfit(const gpu::State& s) {
 }
 uint32_t DrawVariant(X86Context& ctx, const gpu::State& s) {
     static const uint64_t trace_at = std::getenv("S2_DRAW_TRACE") ? uint64_t(std::atoll(std::getenv("S2_DRAW_TRACE"))) : 0;
-    // S2_CAPTURE_AT=<frame> (with XBE_CAPTURE_DIR): the runtime's frame capture, as F3 would, at that frame
-    static const uint64_t cap_at = std::getenv("S2_CAPTURE_AT") ? uint64_t(std::atoll(std::getenv("S2_CAPTURE_AT"))) : 0;
+    // S2_CAPTURE_FRAME=<frame> (with XBE_CAPTURE_DIR): the runtime's frame capture, as F3 would, at that frame
+    static const uint64_t cap_at = std::getenv("S2_CAPTURE_FRAME") ? uint64_t(std::atoll(std::getenv("S2_CAPTURE_FRAME"))) : 0;
     static bool cap_done = false;
     if (cap_at && !cap_done && g_frames + 1 >= cap_at) cap_done = true, gpu::g_capture = true;
     if (trace_at && g_frames == trace_at) {

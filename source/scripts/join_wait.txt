@@ -1,0 +1,13 @@
+# the joining copy, from its main menu to the Host code row of Display and Co-op (the code is pasted by S2_KEYS):
+# Options, Display and Co-op, down to the section row, right to Co-op, down to Co-op, left to Join online, down
+28 RIGHT
+29.5 RIGHT
+31 A
+35 RIGHT
+36.5 RIGHT
+38 A
+42 DOWN
+43 RIGHT
+44 DOWN
+45 LEFT
+46 DOWN

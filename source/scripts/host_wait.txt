@@ -1,0 +1,7 @@
+# the host waits in its main menu, then starts a new game
+62 A
+66 A
+70 A
+74 A
+78 A
+82 A

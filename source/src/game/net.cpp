@@ -221,6 +221,7 @@ std::string IpText(uint32_t ip_be) {
 }
 
 // the last thing that happened, for the menu's status line ("CONNECTION TO X LOST" ...)
+constexpr int kJoiningMs = 2000;  // the joiner's "joining" screen before the host's picture is shown
 std::atomic<Clock::time_point> g_host_waits{};  // when the host last said "not in a level yet"
 std::mutex g_note_lock;
 std::string g_note;
@@ -985,6 +986,7 @@ struct ClientState {
     std::string name;
     uint32_t seq = 0;
     Clock::time_point joined, last_frame, back_since;
+    Clock::time_point first_frame;  // when the host's first picture came: it is shown a moment later (kJoiningMs)
     bool back = false;
     // frames: assembling, and the newest decoded one (BGRA, 640 x 480 letterboxed), handed to the renderer
     std::mutex lock;
@@ -1139,6 +1141,7 @@ void ClientRecv() {
         stbi_image_free(px);
         std::lock_guard l(g_client.lock);
         if (!g_client.have_frame) LOGR("coop: joined %s, first picture in", g_client.name.c_str());
+        if (!g_client.have_frame) g_client.first_frame = Clock::now();
         g_client.shown.swap(boxed);
         g_client.have_frame = true;
         g_client.last_frame = Clock::now();
@@ -1150,6 +1153,9 @@ const uint8_t* Present(uint32_t& w, uint32_t& h) {
     if (!g_client.run) return nullptr;
     std::lock_guard l(g_client.lock);
     if (!g_client.have_frame) return nullptr;
+    // (the joiner's own screen says "joining" for a moment first: cut straight from his menu to the middle of the
+    // host's game, he could not tell what had happened; Skylar's first online session, 2026-11-25)
+    if (Clock::now() - g_client.first_frame < std::chrono::milliseconds(kJoiningMs)) return nullptr;
     g_client.present = g_client.shown;
     static uint32_t calls = 0;
     if (++calls % 300 == 1) {  // (a check now and then: is there a picture in it)
@@ -1392,7 +1398,17 @@ bool HostNotStarted() { return g_client.run && Clock::now() - g_host_waits.load(
 int JoinState() {
     if (!g_client.run) return 0;
     std::lock_guard l(g_client.lock);
-    return g_client.have_frame ? 2 : 1;
+    return g_client.have_frame && Clock::now() - g_client.first_frame >= std::chrono::milliseconds(kJoiningMs) ? 2 : 1;
+}
+// ... and what he is waiting for while it is 1: 1 the host has not answered (he still has to enter this player's
+// code), 2 the host answered and is not in a level yet, 3 the host is in the game and this player comes in now
+int JoinPhase() {
+    if (!g_client.run) return 0;
+    {
+        std::lock_guard l(g_client.lock);
+        if (g_client.have_frame) return Clock::now() - g_client.first_frame >= std::chrono::milliseconds(kJoiningMs) ? 4 : 3;
+    }
+    return HostNotStarted() ? 2 : 1;
 }
 std::string JoinName() {
     std::lock_guard l(g_client.lock);

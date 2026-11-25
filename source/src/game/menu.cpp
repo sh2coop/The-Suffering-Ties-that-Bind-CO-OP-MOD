@@ -72,6 +72,7 @@ namespace game_net {  // net.cpp
 bool HostHasPlayer();
 bool HostNotStarted();  // joining: the host answered, and has not started the game yet
 int JoinState();  // 0 not joined, 1 asking the host, 2 playing in the host's game
+int JoinPhase();  // while it is 1: 1 no answer yet, 2 the host is not in a level yet, 3 coming in now
 std::string LastNote();
 void ClearNote();
 bool JoinAddress(const std::string& typed);
@@ -116,6 +117,10 @@ struct Page {
     float row_y[kRows] = {};
     uint32_t title = 0;
     bool seconds = false;      // laid out as Player 2's own page
+    std::string title_text;    // what the title says now
+    uint32_t prompt = 0;       // the button line ("A Accept, B Cancel"): not on the waiting screen, where neither does anything
+    bool no_prompt = false;
+    bool plain = false;        // the waiting screen is up: no slider, no rows but this player's code
     std::string help;          // what the instructions say now (empty: the game's own text)
     int focus = 0;  // 0 the slider, 1.. the rows
 };
@@ -615,7 +620,12 @@ constexpr const char* kLabels[kRows] = {"Settings", "Resolution", "Window mode",
 // chooses the section. Player 2's look rows are his alone: on Player 1's page they only show for a player who is
 // about to join someone (he is Player 2 there, and these are his own PC's settings).
 void MoveFocusTo(int focus);
+// The waiting screen: this player has asked to join and is not in the host's game yet. The page then says only what
+// he is waiting for (title and instructions) and, while the host still needs it, his code.
+bool Waiting() { return !SecondsPage() && CoopChoice() == kJoin && game_net::JoinState() == 1; }
+
 bool Visible(int row) {
+    if (Waiting()) return row == kOnline && game_net::JoinPhase() == 1 && !g_typing;
     // (his volume is for a player on another PC: in split screen both players have one sound)
     if (SecondsPage()) return row == kLook || row == kSpeed || (row == kVolume && game_net::HostHasPlayer());
     switch (row) {
@@ -717,12 +727,14 @@ std::string Help() {
         case kJoin: {
             if (g_typing)
                 return "Up and down change the digit, left and right move. A joins, B cancels. A keyboard can type the code, or paste it with Ctrl+V.";
+            if (game_net::JoinPhase() == 3) return "The host is in the game. You are coming in as Player 2 now.";
+            if (game_net::JoinPhase() == 2)
+                return "You are connected. The host is still in his menu. You come in by yourself as soon as he starts or loads a game. Hold BACK to stop.";
             if (game_net::JoinState() == 1) {
                 if (game_net::OutsideKind() == 2)
                     return "Your router gives every connection a new port, so a code cannot work. The host has to forward UDP port 27025. Hold BACK to stop.";
                 if (JustCopied()) return "Copied. Paste it into a message to the host.";
-                if (game_net::HostNotStarted()) return "CONNECTED. The host has not started the game yet: you come in when he does. Hold BACK to stop.";
-                return "WAITING FOR THE HOST. X (Ctrl+C) copies YOUR code below: send it to him. He enters it and you are in. Hold BACK to stop.";
+                return "The host has to enter YOUR code. X (Ctrl+C) copies it: send it to him. Then you are connected. Hold BACK to stop.";
             }
             if (game_net::JoinState()) return "Joined. To leave the game, hold BACK (keyboard: Backspace) for two seconds.";
             std::string note = game_net::LastNote();
@@ -799,14 +811,31 @@ void Refresh(X86Context& ctx) {
     auto state = [&](uint32_t widget, uint32_t want) {
         if (widget && kernel::R32(widget + kState) != want) Method(ctx, widget, kSetState, {want});
     };
-    bool seconds = SecondsPage();
+    bool seconds = SecondsPage(), waiting = Waiting();
+    if (waiting) MoveFocusTo(kOnline + 1);  // (his code's row: X copies it)
     if (seconds != g_page.seconds) {  // (the page is built once and can be either: who opened it decides)
         g_page.seconds = seconds;
-        if (g_page.title) SetText(ctx, g_page.title, seconds ? "PLAYER 2 SETTINGS" : "DISPLAY AND CO-OP");
         if (seconds && g_page.focus == 0) MoveFocusTo(kLook + 1);
-        if (g_page.slider) Method(ctx, g_page.slider, kSetState, {seconds ? kHidden : kIdle});  // (no brightness on his page)
     }
-    state(g_page.caption, seconds ? kHidden : g_page.focus == 0 ? kHighlighted : kIdle);
+    // the title: the page's name, or what a joining player is waiting for
+    static const char* const kWaitTitles[] = {"", "WAITING FOR HOST", "CONNECTED", "JOINING GAME"};
+    int phase = waiting ? std::clamp(game_net::JoinPhase(), 1, 3) : 0;
+    std::string title = phase ? kWaitTitles[phase] : seconds ? "PLAYER 2 SETTINGS" : "DISPLAY AND CO-OP";
+    if (g_page.title && title != g_page.title_text) {
+        SetText(ctx, g_page.title, title);
+        if (phase) LOGR("menu: the joining player's screen says %s", title.c_str());
+        g_page.title_text = title;
+    }
+    bool plain = seconds || waiting;  // (no brightness on Player 2's page or the waiting screen)
+    if (plain != g_page.plain) {
+        g_page.plain = plain;
+        if (g_page.slider) Method(ctx, g_page.slider, kSetState, {plain ? kHidden : kIdle});
+    }
+    state(g_page.caption, plain ? kHidden : g_page.focus == 0 ? kHighlighted : kIdle);
+    if (waiting != g_page.no_prompt) {
+        g_page.no_prompt = waiting;
+        if (g_page.prompt) Method(ctx, g_page.prompt, kSetState, {waiting ? kHidden : kIdle});
+    }
     int slot = 0;
     for (int r = 0; r < kRows; r++) {
         if (!g_page.rows[r]) continue;
@@ -842,7 +871,7 @@ void MoveFocus(int dir) {
     int f = g_page.focus;
     for (int tries = 0; tries <= kRows + 1; tries++) {
         f = (f + dir + kRows + 1) % (kRows + 1);
-        if (f == 0 ? !SecondsPage() : (Visible(f - 1) && Focusable(f - 1))) break;  // (0 is the brightness: not on Player 2's page)
+        if (f == 0 ? !SecondsPage() && !Waiting() : (Visible(f - 1) && Focusable(f - 1))) break;  // (0 is the brightness: not on Player 2's page)
     }
     g_page.focus = f;
 }
@@ -953,6 +982,7 @@ void Build(X86Context& ctx, uint32_t screen) {
     }
     g_page.slot_top = top, g_page.slot_step = step, g_page.margin = margin_top;
     g_page.title = title;
+    g_page.prompt = prompt;
     g_page.seconds = false;
     g_section = 0;
     g_page.screen = screen;
@@ -963,6 +993,7 @@ void Build(X86Context& ctx, uint32_t screen) {
     WriteF(title + kX, ReadF(title + kX) - kTitleWider / 2);
     WriteF(title + kW, ReadF(title + kW) + kTitleWider);
     SetText(ctx, title, "DISPLAY AND CO-OP");  // (the title font's P is drawn with a straight right side)
+    g_page.title_text = "DISPLAY AND CO-OP";
     Refresh(ctx);
     LOGI("menu: Display and Co-op page built, rows from %.0f, %.1f apart (text margins %.1f and %.1f), %zu resolutions", top, step,
          margin_top, margin_bottom, Sizes().size());
@@ -978,6 +1009,7 @@ bool BackCloses(X86Context& ctx) {
         if (manager && ThisCall(ctx, 0x1A09C0, kernel::R32(0x384BC8), {manager + 0x68, kBack, 1})) EntryEnd(false);
         return false;
     }
+    if (Waiting()) return false;  // (the waiting screen stays up: holding BACK stops the join)
     return g_after_entry == 0;
 }
 }  // namespace
