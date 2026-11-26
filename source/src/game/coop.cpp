@@ -626,16 +626,26 @@ bool InScene() {
     // table the game opens at. But the game sets exactly that for a second or two on every door, ladder, switch and
     // monitor Player 1 uses: in the first online session it made 34 "scenes" in twenty minutes, and each one took
     // Player 2's view, hid him and put him back beside Player 1, sometimes inside a wall. It is not a scene.)
-    static bool riding = false;
+    // (And only a mount that moves him: until 2026-11-26 the rule was "mounted, and Player 2 more than 15 m away".
+    // But every door, ladder and switch is a mount for a second or two. With the two players apart, each door Player 1
+    // opened took Player 2's view for two seconds and put him beside Player 1: 16 times in the 15 minutes of
+    // suffering2_011.log. Now Player 1 must also be 25 m from where he got on.)
+    static bool riding = false, was_mounted = false;
+    static float got_on[3] = {0, 0, 0};
     bool mounted = g_player && (kernel::R32(g_player + 0xBC) & 0x200000);
+    if (mounted && !was_mounted && g_player_object)
+        for (int i = 0; i < 3; i++) got_on[i] = ReadF(g_player_object + kPosition + i * 4);
+    was_mounted = mounted;
     if (!mounted || !g_second_object) riding = false;
     else if (!riding && g_player_object) {
-        float d = 0;
+        float d = 0, moved = 0;
         for (int i = 0; i < 3; i++) {
             float v = ReadF(g_player_object + kPosition + i * 4) - ReadF(g_second_object + kPosition + i * 4);
             d += v * v;
+            float m = ReadF(g_player_object + kPosition + i * 4) - got_on[i];
+            moved += m * m;
         }
-        riding = d > 15.0f * 15.0f;
+        riding = d > 15.0f * 15.0f && moved > 25.0f * 25.0f;
     }
     if (riding) return g_scene_why = "Player 1 is carried off on a mount (a vehicle)", true;
     return false;
@@ -1190,7 +1200,13 @@ void Frame(X86Context& ctx) {
     // Hosting online: the game listens while the setting says so, and Player 2 is in while a player is connected.
     static const bool host_test = std::getenv("S2_COOP_HOST") != nullptr;
     bool host = g_host_setting || host_test;
-    if (host != game_net::Hosting() && !(host && g_host_failed)) g_host_failed = host && !game_net::Host(host);
+    // (Until 2026-11-26 this read "g_host_failed = host && !Host(host)": with host false the call was never made, so
+    // hosting, once on, stayed on until the game closed. "Stop inviting" and a change to split screen did nothing,
+    // and the invite code went on working: Skylar's log suffering2_011 has no "hosting off" after either.)
+    if (host != game_net::Hosting() && !(host && g_host_failed)) {
+        bool done = game_net::Host(host);
+        g_host_failed = host && !done;
+    }
     if (!host) g_host_failed = false;
     g_wanted = test_on || (g_mode_setting == 1 && !host) || (host && game_net::HostHasPlayer());
     Session(ctx, g_wanted);
@@ -2655,10 +2671,42 @@ void TestGoto(X86Context& ctx) {
 // 2 played, he didn't transform when player 1 transform"). The same is now done for Player 2 right after.
 // S2_TEST_STORY_FORM=<frame>: the fill and the change at that frame, the change back 600 frames later (tests).
 namespace game_coop {
+// While the story keeps Player 1 as the creature his meter does not run down, and Player 2's did: in the prison
+// riot's last fight (suffering2_011.log) Player 2 was a man again after 21 s, was changed once more when the script
+// repeated its step, and was a man again 6 s later, while Player 1 stayed the creature for 35 s. From the story's
+// change until its change back, Player 2's meter is kept at Player 1's, and he is changed again if he is not the
+// creature.
+bool g_story_creature = false;
+void StoryHold(X86Context& ctx) {
+    if (!g_story_creature) return;
+    if (!g_player || !mem::IsCommitted(g_player + 0x490)) {
+        g_story_creature = false;
+        return;
+    }
+    if (!g_second || !mem::IsCommitted(g_second + 0x490)) return;
+    uint32_t one = kernel::R32(g_player + 0xBC), two = kernel::R32(g_second + 0xBC);
+    if (!(one & 0x80000)) {  // Player 1 is on his way in (or out): nothing to hold yet
+        if (!(one & 0x40000)) g_story_creature = false, LOGI("coop: the story's creature form is over for Player 1: Player 2's is no longer held");
+        return;
+    }
+    float meter = ReadF(g_player + 0x48A);
+    if (ReadF(g_second + 0x48A) < meter) std::memcpy(kernel::HostPtr(g_second + 0x48A), &meter, 4);
+    static uint64_t tried = 0;
+    if (!(two & 0x80000) && !(two & 0x40000) && g_frames - tried > 120) {
+        tried = g_frames;
+        uint32_t ecx = ctx.ecx;
+        ctx.ecx = g_second;
+        kernel::CallGuest(ctx, 0x2B230, {});
+        ctx.ecx = ecx;
+        LOGI("coop: the story keeps the player as the creature: Player 2 is changed again");
+    }
+}
 void StoryForm(X86Context& ctx, int what) {
     static const char* const kSteps[3] = {"fills the insanity meter", "turns the player into the creature", "turns the player back into a man"};
     LOGI("story: the script %s (Player 1's meter is now %.1f, his state %08X)", kSteps[what], g_player ? ReadF(g_player + 0x48A) : 0.0f,
          g_player ? kernel::R32(g_player + 0xBC) : 0);
+    if (what == 1) g_story_creature = true;
+    if (what == 2) g_story_creature = false;
     uint32_t p2 = g_second;
     if (!p2 || !mem::IsCommitted(p2 + 0x490)) return;
     bool creature = (kernel::R32(p2 + 0xBC) & 0x80000) != 0;
@@ -2682,7 +2730,9 @@ void TestStoryForm(X86Context& ctx) {
     static const uint64_t at = std::getenv("S2_TEST_STORY_FORM") ? uint64_t(std::atoll(std::getenv("S2_TEST_STORY_FORM"))) : 0;
     if (!at || !g_player) return;
     if (g_frames == at) LOGR("test: the story's fill and change of form"), kernel::CallGuest(ctx, 0x100930, {0}), kernel::CallGuest(ctx, 0x100840, {0});
-    if (g_frames == at + 600) LOGR("test: the story's change back"), kernel::CallGuest(ctx, 0x1008B0, {0});
+    static const char* comma = std::getenv("S2_TEST_STORY_FORM") ? std::strchr(std::getenv("S2_TEST_STORY_FORM"), ',') : nullptr;
+    static const uint64_t length = comma ? uint64_t(std::atoll(comma + 1)) : 600;  // (S2_TEST_STORY_FORM=<frame>,<frames until the change back>)
+    if (g_frames == at + length) LOGR("test: the story's change back"), kernel::CallGuest(ctx, 0x1008B0, {0});
 }
 }  // namespace game_coop
 X86_EXTERN_FUNC(__imp__sub_00100930);
@@ -2718,6 +2768,7 @@ void TestMeter(X86Context& ctx) {
         }
     }
     TestStoryForm(ctx);
+    StoryHold(ctx);
     static uint32_t form[2] = {0, 0};
     uint32_t players[2] = {g_player, g_second};
     for (int i = 0; i < 2; i++) {
