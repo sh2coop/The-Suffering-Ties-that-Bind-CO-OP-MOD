@@ -227,6 +227,7 @@ std::string IpText(uint32_t ip_be) {
 struct NetRecord {
     std::atomic<uint32_t> pads{0}, pads_missing{0}, pads_late{0}, pad_gap_ms{0};         // host: controller packets in
     std::atomic<uint32_t> pictures{0}, picture_bytes{0}, encode_us{0}, encode_worst_us{0};  // host: pictures out
+    std::atomic<uint32_t> sound_dry{0};                                                   // joiner: the sound ran out of data
     std::atomic<uint32_t> sounds{0};                                                      // sound packets out (host) or in (joiner)
     std::atomic<uint32_t> pads_out{0}, bytes_in{0};                                       // joiner
     std::atomic<uint32_t> trip_us{0}, trip_worst_us{0}, trips{0};                         // joiner: there and back
@@ -1180,8 +1181,8 @@ void ClientRecv() {
                     uint32_t trips = g_rec.trips.exchange(0), trip = g_rec.trip_us.exchange(0), worst = g_rec.trip_worst_us.exchange(0);
                     char there[96] = "the host does not answer timing packets (an older copy)";
                     if (trips) std::snprintf(there, sizeof there, "to the host and back %.1f ms (%.1f at worst)", trip / 1000.0 / trips, worst / 1000.0);
-                    LOGI("net: joined, last 5 s: %.0f kB a second came in, %u sound packets, %u controller packets sent; %s", g_rec.bytes_in.exchange(0) / 1024.0 / 5.0,
-                         g_rec.sounds.exchange(0), g_rec.pads_out.exchange(0), there);
+                    LOGI("net: joined, last 5 s: %.0f kB a second came in, %u sound packets (the sound ran dry %u times), %u controller packets sent; %s",
+                         g_rec.bytes_in.exchange(0) / 1024.0 / 5.0, g_rec.sounds.exchange(0), g_rec.sound_dry.exchange(0), g_rec.pads_out.exchange(0), there);
                 }
                 stats_at = now, stat_shown = stat_lost = stat_repaired = 0, stat_gap = 0;
             }
@@ -1421,7 +1422,7 @@ void SoundTap(float* out, uint32_t frames) {
     std::lock_guard l(g_sound.lock);
     auto& r = g_sound.ring;
     if (!g_sound.playing && r.size() >= kAudioStart) g_sound.playing = true;
-    if (g_sound.playing && r.size() < size_t(frames)) g_sound.playing = false;  // ran dry: silence until it fills again
+    if (g_sound.playing && r.size() < size_t(frames)) g_sound.playing = false, g_rec.sound_dry++;  // ran dry: silence until it fills again
     if (!g_sound.playing) {
         std::fill(out, out + frames * 2, 0.0f);
         return;

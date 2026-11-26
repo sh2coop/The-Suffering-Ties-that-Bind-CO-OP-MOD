@@ -1198,9 +1198,10 @@ bool PauseItemP1Only() { return g_p1_item.load(); }
 // the game draws it, in its font, on its strip of paper, once for both players. pauser 0: not paused.
 // tests: S2_MENU_TRACE=1 logs the words of the newest screen's widgets whenever another screen comes to the top
 void TraceTop() {
+    // (always since 2026-11-26: where in the menus the player is belongs in every session log; the widgets' words
+    // only with S2_MENU_TRACE, except the first few with any, which name the screen)
     static const bool trace = std::getenv("S2_MENU_TRACE") != nullptr;
     static uint32_t before = 0;
-    if (!trace) return;
     uint32_t manager = kernel::R32(0x391D64);
     uint32_t screens = manager ? kernel::R32(manager + kChildren) : 0, count = manager ? kernel::R32(manager + kCount) : 0;
     uint32_t top = screens && count && count <= 64 ? kernel::R32(screens + (count - 1) * 4) : 0;
@@ -1208,7 +1209,8 @@ void TraceTop() {
     before = top;
     uint32_t widgets = kernel::R32(top + kChildren), n = kernel::R32(top + kCount);
     LOGI("menu: screen %08X is on top (%u screens, %u widgets, methods %08X)", top, count, n, kernel::R32(top));
-    for (uint32_t i = 0; widgets && i < n && i < 64; i++) {
+    int named = 0;
+    for (uint32_t i = 0; widgets && i < n && i < 64 && (trace || named < 3); i++) {
         uint32_t w = kernel::R32(widgets + i * 4);
         if (!w || !mem::IsCommitted(w + kTextId + 4)) continue;
         uint32_t at = kernel::R32(w + kString), size = kernel::R32(w + kStringSize);
@@ -1218,6 +1220,7 @@ void TraceTop() {
             uint16_t c = kernel::R16(at + k * 2);
             text += c >= 32 && c < 127 ? char(c) : '?';
         }
+        named++;
         LOGI("menu:   widget %u (state %u): \"%s\"", i, kernel::R32(w + kState), text.c_str());
     }
 }

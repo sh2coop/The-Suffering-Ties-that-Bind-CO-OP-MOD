@@ -1,1 +1,1 @@
-44 2026-11-25 When the story turns Player 1 into the creature, Player 2 now transforms too.
+45 2026-11-25 Session logs record more again: story events, both players' state, sounds, levels and menu screens.

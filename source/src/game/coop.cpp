@@ -1441,6 +1441,32 @@ void Frame(X86Context& ctx) {
             before[i] = now;
         }
     }
+    {   // the record: a level comes into play, a level is left; a player's health reaches nothing
+        static bool in_before = false;
+        static std::chrono::steady_clock::time_point since{};
+        bool in = InLevel();
+        if (in != in_before) {
+            if (in) LOGI("level: a level is in play (Player 1 is %08X)", g_player);
+            else LOGI("level: the level was left after %.0f s of play", std::chrono::duration<double>(std::chrono::steady_clock::now() - since).count());
+            since = std::chrono::steady_clock::now(), in_before = in;
+        }
+        static bool down[2] = {false, false};
+        const uint32_t players[2] = {g_player, g_second};
+        for (int i = 0; i < 2; i++) {
+            bool now = players[i] && mem::IsCommitted(players[i] + 0x20) && ReadF(players[i] + 0x16) <= 0.0f;
+            if (now != down[i] && players[i]) LOGI("coop: Player %d's health %s", i + 1, now ? "is gone: he is down" : "is back");
+            down[i] = now;
+        }
+    }
+    if (g_frames % 60 == 0 && g_player && g_player_object && InLevel()) {  // (what else each player is, once a second)
+        uint32_t view = kernel::R32(kViewPointer);
+        char two[96] = "";
+        if (g_second && mem::IsCommitted(g_second + 0x490))
+            std::snprintf(two, sizeof two, "; Player 2 %08X %08X meter %.0f", kernel::R32(g_second + 0xB0), kernel::R32(g_second + 0xBC), ReadF(g_second + 0x48A));
+        LOGI("state: Player 1 %08X %08X meter %.0f morality %.0f%s; %u view cameras, %s", kernel::R32(g_player + 0xB0), kernel::R32(g_player + 0xBC),
+             ReadF(g_player + 0x48A), ReadF(g_player + 0x482), two, view ? kernel::R32(view + kViewCount) : 0,
+             g_one_view ? "one view" : g_stream_view ? "a view for the stream" : g_second_object ? "split" : "alone");
+    }
     if (g_frames % 60 == 0 && !g_second_object && g_player_object && g_player && InLevel()) {  // (alone: one line a second too)
         LOGI("coop: player 1 at %.2f %.2f %.2f facing %.0f health %.0f, alone", ReadF(g_player_object + kPosition), ReadF(g_player_object + kPosition + 4),
              ReadF(g_player_object + kPosition + 8), std::atan2(ReadF(g_player_object + kMatrix + 0x20), ReadF(g_player_object + kMatrix + 0x28)) * 57.29578f,
@@ -2630,6 +2656,9 @@ void TestGoto(X86Context& ctx) {
 // S2_TEST_STORY_FORM=<frame>: the fill and the change at that frame, the change back 600 frames later (tests).
 namespace game_coop {
 void StoryForm(X86Context& ctx, int what) {
+    static const char* const kSteps[3] = {"fills the insanity meter", "turns the player into the creature", "turns the player back into a man"};
+    LOGI("story: the script %s (Player 1's meter is now %.1f, his state %08X)", kSteps[what], g_player ? ReadF(g_player + 0x48A) : 0.0f,
+         g_player ? kernel::R32(g_player + 0xBC) : 0);
     uint32_t p2 = g_second;
     if (!p2 || !mem::IsCommitted(p2 + 0x490)) return;
     bool creature = (kernel::R32(p2 + 0xBC) & 0x80000) != 0;
@@ -3118,6 +3147,24 @@ X86_FUNC(sub_00191070) {
     uint32_t from = kernel::R32(ctx.esp), sound = kernel::R32(ctx.esp + 4), place = kernel::R32(ctx.esp + 8), flags = kernel::R32(ctx.esp + 12);
     float scale = game_coop::ReadF(ctx.esp + 16);
     __imp__sub_00191070(ctx, base);
+    {   // the record: how many sounds started, how many were refused, which packages they came from
+        static uint32_t started = 0, refused = 0, packages[8] = {}, kinds = 0, said = 0;
+        static std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+        uint32_t package = sound >> 16;
+        if (ctx.eax) started++;
+        else if (++refused, said < 6 && ++said) LOGI("sound: the sound %08X was asked for and not played (place %08X, flags %X, asked from %08X)", sound, place, flags, from);
+        bool known = false;
+        for (uint32_t i = 0; i < kinds; i++) known |= packages[i] == package;
+        if (!known && kinds < 8) packages[kinds++] = package;
+        auto now = std::chrono::steady_clock::now();
+        if (now - since >= std::chrono::seconds(10)) {
+            char list[80] = "";
+            int n = 0;
+            for (uint32_t i = 0; i < kinds; i++) n += std::snprintf(list + n, sizeof list - size_t(n), " %X", packages[i]);
+            LOGI("sound: %u sounds started in the last 10 s, %u not played; from the packages%s", started, refused, list);
+            since = now, started = refused = kinds = said = 0;
+        }
+    }
     if (trace) {
         float at[3] = {0, 0, 0};
         if (place && mem::IsCommitted(place + 12)) std::memcpy(at, kernel::HostPtr(place), 12);
