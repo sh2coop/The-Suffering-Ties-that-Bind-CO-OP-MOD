@@ -11,6 +11,7 @@ void Loaded();
 }
 
 namespace game_watchdog { void Init(); }  // freeze report (src/game/watchdog.cpp)
+namespace game_record { void Init(); }    // the session record: clock, load, window, controllers (src/game/record.cpp)
 namespace game_coop {
 void Ui(double fps);  // coop.cpp
 extern uint32_t g_p2_invert, g_p2_speed;  // Player 2's own look
@@ -24,6 +25,7 @@ static void GameInit() {
     game_pad::Init();
     game_diag::Init();
     game_watchdog::Init();
+    game_record::Init();
 }
 
 // what the runtime asks of the game; strings must be set, hooks may stay null

@@ -1,1 +1,1 @@
-39 2026-11-25 Smoother for the host while a friend is joined, and every session log now records how smoothly the game ran.
+40 2026-11-25 Session logs now record far more: controllers, network quality, PC load, long frames and what each player was doing.

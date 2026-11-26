@@ -1419,6 +1419,33 @@ void Frame(X86Context& ctx) {
         gpu::g_first_health = -1.0f;
         gpu::g_partner_whole = false;
     }
+    {   // the record: what each player is doing, when it changes (the Player's state word, +0xBC)
+        static uint32_t before[2] = {0, 0};
+        static const struct {
+            uint32_t bit;
+            const char* on;
+            const char* off;
+        } kStates[] = {{0x8000, "goes into first person", "leaves first person"},
+                       {0x40000, "is taken over by a scripted moment", "is his own again after a scripted moment"},
+                       {0x200000, "uses something (a door, ladder, switch or the like)", "is done using it"},
+                       {0x400000, "looks at a security monitor", "leaves the security monitor"}};
+        const uint32_t players[2] = {g_player, g_second};
+        for (int i = 0; i < 2; i++) {
+            if (!players[i] || !mem::IsCommitted(players[i] + 0xBC)) {
+                before[i] = 0;
+                continue;
+            }
+            uint32_t now = kernel::R32(players[i] + 0xBC);
+            for (const auto& st : kStates)
+                if ((now ^ before[i]) & st.bit) LOGI("coop: Player %d %s (state %08X)", i + 1, (now & st.bit) ? st.on : st.off, now);
+            before[i] = now;
+        }
+    }
+    if (g_frames % 60 == 0 && !g_second_object && g_player_object && g_player && InLevel()) {  // (alone: one line a second too)
+        LOGI("coop: player 1 at %.2f %.2f %.2f facing %.0f health %.0f, alone", ReadF(g_player_object + kPosition), ReadF(g_player_object + kPosition + 4),
+             ReadF(g_player_object + kPosition + 8), std::atan2(ReadF(g_player_object + kMatrix + 0x20), ReadF(g_player_object + kMatrix + 0x28)) * 57.29578f,
+             ReadF(g_player + 0x16));
+    }
     if (g_frames % 60 == 0 && g_second_object && g_player_object) {
         auto yaw = [](uint32_t object) { return std::atan2(ReadF(object + kMatrix + 0x20), ReadF(object + kMatrix + 0x28)) * 57.29578f; };
         {

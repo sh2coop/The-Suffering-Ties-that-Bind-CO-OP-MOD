@@ -221,6 +221,42 @@ std::string IpText(uint32_t ip_be) {
 }
 
 // the last thing that happened, for the menu's status line ("CONNECTION TO X LOST" ...)
+// The record of the connection (asked for 2026-11-26), both sides, every five seconds while two are connected.
+// The joiner asks for an answer to every thirtieth controller packet (the host sends its number back, packet type
+// 9): the time there and back. A copy from before this neither asks nor answers, and nothing is lost by that.
+struct NetRecord {
+    std::atomic<uint32_t> pads{0}, pads_missing{0}, pads_late{0}, pad_gap_ms{0};         // host: controller packets in
+    std::atomic<uint32_t> pictures{0}, picture_bytes{0}, encode_us{0}, encode_worst_us{0};  // host: pictures out
+    std::atomic<uint32_t> sounds{0};                                                      // sound packets out (host) or in (joiner)
+    std::atomic<uint32_t> pads_out{0}, bytes_in{0};                                       // joiner
+    std::atomic<uint32_t> trip_us{0}, trip_worst_us{0}, trips{0};                         // joiner: there and back
+    std::atomic<uint32_t> asked_seq{0};
+    std::atomic<int64_t> asked_at{0};  // (microseconds on the steady clock)
+} g_rec;
+int64_t MicrosNow() { return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+void Most(std::atomic<uint32_t>& a, uint32_t v) {
+    uint32_t was = a.load();
+    while (v > was && !a.compare_exchange_weak(was, v)) {}
+}
+// what a controller packet holds, when it changes: the joined player's buttons as the host got them
+void RemoteInput(uint16_t buttons, const uint8_t analog[8]) {
+    static uint16_t before = 0;
+    static bool held[8] = {};
+    static const struct {
+        uint16_t bit;
+        const char* name;
+    } kButtons[] = {{0x01, "D-pad up"}, {0x02, "D-pad down"}, {0x04, "D-pad left"}, {0x08, "D-pad right"},
+                    {0x10, "START"},    {0x20, "BACK"},       {0x40, "left stick click"}, {0x80, "right stick click"}};
+    static const char* const kAnalog[8] = {"A", "B", "X", "Y", "black", "white", "left trigger", "right trigger"};
+    for (const auto& b : kButtons)
+        if ((buttons ^ before) & b.bit) LOGI("input: the joined player: %s %s", b.name, (buttons & b.bit) ? "down" : "up");
+    before = buttons;
+    for (int i = 0; i < 8; i++) {
+        bool now = analog[i] > (held[i] ? 30 : 60);
+        if (now != held[i]) LOGI("input: the joined player: %s %s", kAnalog[i], now ? "down" : "up");
+        held[i] = now;
+    }
+}
 constexpr int kJoiningMs = 2000;  // the joiner's "joining" screen before the host's picture is shown
 std::atomic<Clock::time_point> g_host_waits{};  // when the host last said "not in a level yet"
 std::mutex g_note_lock;
@@ -621,9 +657,25 @@ void HostListen() {
             g_host.have_client = true;
             g_host.seq = 0;
         }
+        {   // the record: how the controller packets come
+            static Clock::time_point last{};
+            Clock::time_point t = Clock::now();
+            if (g_host.connected && same && last != Clock::time_point{})
+                Most(g_rec.pad_gap_ms, uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(t - last).count()));
+            last = t;
+            g_rec.pads++;
+            if (g_host.seq && int32_t(seq - g_host.seq) > 1) g_rec.pads_missing += seq - g_host.seq - 1;
+            if (g_host.seq && int32_t(seq - g_host.seq) <= 0) g_rec.pads_late++;
+            if (seq % 30 == 0) {  // the joiner times the way there and back with this
+                uint8_t echo[9] = {'S', '2', 'C', '1', 9};
+                std::memcpy(echo + 5, &seq, 4);
+                sendto(g_host.sock, reinterpret_cast<const char*>(echo), sizeof echo, 0, reinterpret_cast<const sockaddr*>(&from), sizeof from);
+            }
+        }
         if (int32_t(seq - g_host.seq) > 0 || !g_host.seq) {
             g_host.seq = seq;
             g_host.pad = p;
+            if (g_host.connected) RemoteInput(p.buttons, p.analog);
         }
         g_host.last_input = Clock::now();
         if (!g_host.connected) {
@@ -666,7 +718,27 @@ void HostEncode() {
             auto* v = static_cast<std::vector<uint8_t>*>(ctx);
             v->insert(v->end(), static_cast<uint8_t*>(data), static_cast<uint8_t*>(data) + size);
         };
+        int64_t encode_from = MicrosNow();
         if (!stbi_write_jpg_to_func(put, &jpeg, int(w), int(h), 3, rgb.data(), kJpegQuality)) continue;
+        {   // the record
+            uint32_t us = uint32_t(MicrosNow() - encode_from);
+            g_rec.encode_us += us;
+            Most(g_rec.encode_worst_us, us);
+            g_rec.pictures++;
+            g_rec.picture_bytes += uint32_t(jpeg.size());
+            static Clock::time_point since = Clock::now();
+            Clock::time_point t = Clock::now();
+            if (t - since >= std::chrono::seconds(5)) {
+                double span = std::chrono::duration<double>(t - since).count();
+                uint32_t pictures = g_rec.pictures.exchange(0), pads = g_rec.pads.exchange(0);
+                LOGI("net: host, last %.0f s: %u pictures sent (%.0f kB a second, %.1f ms to pack one, %.1f at worst), %u sound packets; "
+                     "%u controller packets came (%u missing, %u out of order, longest gap %u ms)",
+                     span, pictures, g_rec.picture_bytes.exchange(0) / 1024.0 / span, pictures ? g_rec.encode_us.exchange(0) / 1000.0 / pictures : 0.0,
+                     g_rec.encode_worst_us.exchange(0) / 1000.0, g_rec.sounds.exchange(0), pads, g_rec.pads_missing.exchange(0),
+                     g_rec.pads_late.exchange(0), g_rec.pad_gap_ms.exchange(0));
+                since = t;
+            }
+        }
         frame++;
         if (frame == 1 || frame % 300 == 0) LOGI("coop: picture %u to the remote player: %u x %u, %zu bytes", frame, w, h, jpeg.size());
         uint16_t parts = uint16_t((jpeg.size() + kChunk - 1) / kChunk);
@@ -1045,6 +1117,18 @@ void ClientRecv() {
         if (n > 0 && ++packets == 1) LOGI("coop: first packet from the host (%d bytes, type %d)", n, n > 4 ? buf[4] : -1);
         if (StunAnswer(buf.data(), n)) continue;                                        // (how the joiner looks from outside)
         if (n >= 5 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 6) continue;  // (the host's hole-punching hello)
+        if (n > 0) g_rec.bytes_in += uint32_t(n);
+        if (n >= 9 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 9) {          // the answer to a timed controller packet
+            uint32_t seq;
+            std::memcpy(&seq, &buf[5], 4);
+            if (seq == g_rec.asked_seq.load() && g_rec.asked_at.load()) {
+                uint32_t us = uint32_t(std::min<int64_t>(MicrosNow() - g_rec.asked_at.load(), 4000000));
+                g_rec.trip_us += us;
+                g_rec.trips++;
+                Most(g_rec.trip_worst_us, us);
+            }
+            continue;
+        }
         if (n >= 5 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 8) {          // the host is there, not in a level yet
             std::lock_guard l(g_client.lock);
             g_client.last_frame = Clock::now();  // (he answers: the wait for a first picture starts again)
@@ -1064,6 +1148,7 @@ void ClientRecv() {
             continue;
         }
         if (n >= 11 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 4) {
+            g_rec.sounds++;
             SoundIn(buf.data(), n);
             continue;
         }
@@ -1089,6 +1174,13 @@ void ClientRecv() {
             if (now - stats_at > std::chrono::seconds(5)) {
                 if (stat_shown || stat_lost)
                     LOGI("coop: stream: %u pictures shown in 5 s, %u lost, %u repaired, longest wait between two %d ms", stat_shown, stat_lost, stat_repaired, stat_gap);
+                {   // the record of the connection, the joiner's side
+                    uint32_t trips = g_rec.trips.exchange(0), trip = g_rec.trip_us.exchange(0), worst = g_rec.trip_worst_us.exchange(0);
+                    char there[96] = "the host does not answer timing packets (an older copy)";
+                    if (trips) std::snprintf(there, sizeof there, "to the host and back %.1f ms (%.1f at worst)", trip / 1000.0 / trips, worst / 1000.0);
+                    LOGI("net: joined, last 5 s: %.0f kB a second came in, %u sound packets, %u controller packets sent; %s", g_rec.bytes_in.exchange(0) / 1024.0 / 5.0,
+                         g_rec.sounds.exchange(0), g_rec.pads_out.exchange(0), there);
+                }
                 stats_at = now, stat_shown = stat_lost = stat_repaired = 0, stat_gap = 0;
             }
         }
@@ -1252,6 +1344,7 @@ void SoundTap(float* out, uint32_t frames) {
             std::memcpy(pkt + 5, &seq, 4);
             std::memcpy(pkt + 9, &n, 2);
             std::memcpy(pkt + 11, p.data(), kAudioFrames * 4);
+            g_rec.sounds++;
             HostSend(pkt, sizeof pkt);
             p.erase(p.begin(), p.begin() + 2 * kAudioFrames);
         }
@@ -1630,6 +1723,8 @@ void ClientPad(const input::Pad& p) {
     // the keyboard's teleport: T held is A+B+X+Y held (coop.cpp counts the five seconds)
     if (GetForegroundWindow() == static_cast<HWND>(app::Window()) && (GetAsyncKeyState('T') & 0x8000)) analog[0] = analog[1] = analog[2] = analog[3] = 255;
 #endif
+    g_rec.pads_out++;
+    if (seq % 30 == 0) g_rec.asked_seq = seq, g_rec.asked_at = MicrosNow();
     std::memcpy(pkt + 5, &seq, 4);
     std::memcpy(pkt + 9, &p.buttons, 2);
     std::memcpy(pkt + 11, analog, 8);

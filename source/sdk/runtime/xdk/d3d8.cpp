@@ -1456,6 +1456,8 @@ void FramePresented() {
         worst = std::max(worst, ms);
         if (ms > 25.0) slow++;
         if (ms > 50.0) very_slow++;
+        // (each long one by itself too, at the moment it happens: what else the log says around it is the cause)
+        if (ms > 50.0 && very_slow <= 20 && g_frames_shown > 30) LOGI("pace: a frame took %.0f ms", ms);
         double span = std::chrono::duration<double>(now - since).count();
         if (span >= 10.0) {
             LOGI("pace: %u frames in %.1f s (%.1f a second), slowest %.0f ms, %u over 25 ms, %u over 50 ms", frames, span,
