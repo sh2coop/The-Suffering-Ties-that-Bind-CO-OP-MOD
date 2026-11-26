@@ -2619,6 +2619,59 @@ void TestGoto(X86Context& ctx) {
 }
 }  // namespace game_coop
 
+// The story changes "the player's" form by itself at some moments (the end of the prison riot, before the dock: the
+// meter is filled and he becomes the creature; later he is turned back). Three script functions do it, each for the
+// first Player of the object manager's list alone:
+//   0x100930  the insanity meter is filled (0x2A490 gives the most, 0x2ADD0 sets it)
+//   0x100840  into the creature form, unless he is in it (0x2B230)
+//   0x1008B0  out of it, when he is in it (0x2B230, then the meter to 0)
+// Player 2 stayed human there, with enemies around that only the creature can hurt (Skylar, 2026-11-26: "when player
+// 2 played, he didn't transform when player 1 transform"). The same is now done for Player 2 right after.
+// S2_TEST_STORY_FORM=<frame>: the fill and the change at that frame, the change back 600 frames later (tests).
+namespace game_coop {
+void StoryForm(X86Context& ctx, int what) {
+    uint32_t p2 = g_second;
+    if (!p2 || !mem::IsCommitted(p2 + 0x490)) return;
+    bool creature = (kernel::R32(p2 + 0xBC) & 0x80000) != 0;
+    uint32_t ecx = ctx.ecx;
+    ctx.ecx = p2;
+    if (what == 0) {
+        kernel::CallGuest(ctx, 0x2ADD0, {0x461C4000});  // (10000.0: the function keeps it to the most)
+        LOGI("coop: the story fills the insanity meter: Player 2's too (%.1f)", ReadF(p2 + 0x48A));
+    } else if (what == 1 && !creature) {
+        kernel::CallGuest(ctx, 0x2B230, {});
+        LOGI("coop: the story turns the player into the creature: Player 2 too");
+    } else if (what == 2 && creature) {
+        kernel::CallGuest(ctx, 0x2B230, {});
+        ctx.ecx = p2;
+        kernel::CallGuest(ctx, 0x2ADD0, {0});
+        LOGI("coop: the story turns the player back: Player 2 too");
+    }
+    ctx.ecx = ecx;
+}
+void TestStoryForm(X86Context& ctx) {
+    static const uint64_t at = std::getenv("S2_TEST_STORY_FORM") ? uint64_t(std::atoll(std::getenv("S2_TEST_STORY_FORM"))) : 0;
+    if (!at || !g_player) return;
+    if (g_frames == at) LOGR("test: the story's fill and change of form"), kernel::CallGuest(ctx, 0x100930, {0}), kernel::CallGuest(ctx, 0x100840, {0});
+    if (g_frames == at + 600) LOGR("test: the story's change back"), kernel::CallGuest(ctx, 0x1008B0, {0});
+}
+}  // namespace game_coop
+X86_EXTERN_FUNC(__imp__sub_00100930);
+X86_FUNC(sub_00100930) {
+    __imp__sub_00100930(ctx, base);
+    game_coop::StoryForm(ctx, 0);
+}
+X86_EXTERN_FUNC(__imp__sub_00100840);
+X86_FUNC(sub_00100840) {
+    __imp__sub_00100840(ctx, base);
+    game_coop::StoryForm(ctx, 1);
+}
+X86_EXTERN_FUNC(__imp__sub_001008B0);
+X86_FUNC(sub_001008B0) {
+    __imp__sub_001008B0(ctx, base);
+    game_coop::StoryForm(ctx, 2);
+}
+
 // S2_TEST_METER=<frame>[,<player>]: that player's insanity meter is filled (0x2ADD0, this = Player; the most is
 // 0x2A490), so a script can press the transform button. And always: a line when a player changes form (Player
 // +0xBC bit 0x80000 is the creature form) or the meter's fill changes by a tenth.
@@ -2635,6 +2688,7 @@ void TestMeter(X86Context& ctx) {
             LOGR("test: Player %d's insanity meter is filled: %.1f", who == g_second ? 2 : 1, ReadF(who + 0x48A));
         }
     }
+    TestStoryForm(ctx);
     static uint32_t form[2] = {0, 0};
     uint32_t players[2] = {g_player, g_second};
     for (int i = 0; i < 2; i++) {

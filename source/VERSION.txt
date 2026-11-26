@@ -1,1 +1,1 @@
-43 2026-11-25 Co-op is on the main menu now: Invite a friend or Join a friend with one short code.
+44 2026-11-25 When the story turns Player 1 into the creature, Player 2 now transforms too.
