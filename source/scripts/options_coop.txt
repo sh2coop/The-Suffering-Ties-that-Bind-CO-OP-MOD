@@ -1,0 +1,11 @@
+# main menu to Options, Display and Co-op, the Co-op section, down to Invite a friend
+28 RIGHT
+29.5 RIGHT
+31 A
+35 RIGHT
+36.5 RIGHT
+38 A
+42 DOWN
+43 RIGHT
+44 DOWN
+45 DOWN

@@ -1,4 +1,9 @@
-# the host waits in its main menu, then starts a new game
+# the host: main menu, left to Co-op, A, A on Invite a friend, B back to the main menu, right to New Game, then a new game from 62 s
+28 LEFT
+31 A
+36 A
+42 B
+46 RIGHT
 62 A
 66 A
 70 A

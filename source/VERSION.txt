@@ -1,1 +1,1 @@
-42 2026-11-25 A friend who joins while you are still in the menus now sees your menu, and drops in as Player 2 when the game starts.
+43 2026-11-25 Co-op is on the main menu now: Invite a friend or Join a friend with one short code.

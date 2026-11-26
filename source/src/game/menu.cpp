@@ -113,7 +113,8 @@ constexpr uint32_t kHidden = 2, kIdle = 4, kHighlighted = 5;
 // The rows. The page shows one section at a time (the first row chooses it: Display, or Co-op), so that it is
 // never crowded: a section has at most five rows under its heading, 20 apart. Player 2's own page (he opened it
 // from his pause menu) has his two rows and nothing else.
-enum Row { kSection, kResolution, kWindow, kShape, kRate, kVsync, kCoop, kOnline, kLook, kSpeed, kVolume, kRows };
+// (kInvite, kOnline and kStop are the rows of "Play with a Friend": invite, join, stop inviting)
+enum Row { kSection, kResolution, kWindow, kShape, kRate, kVsync, kCoop, kInvite, kOnline, kStop, kLook, kSpeed, kVolume, kRows };
 int g_section = 0;  // 0 Display, 1 Co-op
 enum Coop { kOff, kSplit, kHost, kJoin, kCoops };
 
@@ -133,6 +134,7 @@ struct Page {
     uint32_t prompt = 0;       // the button line ("A Accept, B Cancel"): not on the waiting screen, where neither does anything
     bool no_prompt = false;
     bool plain = false;        // the waiting screen is up: no slider, no rows but this player's code
+    bool friends = false;      // opened from the main menu's "Play with a Friend": invite and join, nothing else
     std::string help;          // what the instructions say now (empty: the game's own text)
     int focus = 0;  // 0 the slider, 1.. the rows
 };
@@ -236,7 +238,7 @@ constexpr const char* kShapeNames[] = {"Automatic", "4:3", "16:10", "16:9", "21:
 constexpr uint32_t kRates[] = {60, 120, app::kFpsCapRefresh, 0};
 constexpr const char* kRateNames[] = {"60", "120", "Monitor's", "No limit"};
 constexpr const char* kWindowNames[] = {"Full screen", "Borderless", "Windowed"};
-constexpr const char* kCoopNames[kCoops] = {"Off", "Split screen", "Host online", "Join online"};
+constexpr const char* kCoopNames[kCoops] = {"Off", "Split screen", "Online, inviting", "Online, joining"};
 
 template <typename T, size_t N>
 int IndexOf(const T (&list)[N], T value) {
@@ -602,8 +604,10 @@ void JoinNow();
 // host name is taken too.
 void Paste() {
     std::string text = Clipboard();
-    if (std::string code = FindFriendly(text); !code.empty() && game_meet::Available() && CoopChoice() == kJoin && (!g_typing || g_friendly)) {
+    bool join_side = CoopChoice() == kJoin || g_page.focus == kOnline + 1;
+    if (std::string code = FindFriendly(text); !code.empty() && game_meet::Available() && join_side && (!g_typing || g_friendly)) {
         if (g_typing) g_typing = false, g_friendly = false, g_after_entry = 2;
+        if (CoopChoice() != kJoin) SetCoop(kJoin);
         LOGI("menu: a short code was pasted");
         if (!game_net::JoinState()) JoinByCode(code);
         return;
@@ -618,11 +622,12 @@ void Paste() {
             std::copy(f, f + kFields, g_entry.field);
             g_entry.caret = kDigits - 1;
             g_entry.typed = 0;
-        } else if (CoopChoice() == kHost) {
+        } else if (CoopChoice() == kHost && g_page.focus != kOnline + 1) {
             g_friend = CodeText(f);
             ExpectNow();
         } else {
-            g_address = CodeText(f);
+            if (CoopChoice() != kJoin) SetCoop(kJoin);
+            Address() = CodeText(f);
             g_by_code = false;
             game_net::ClearNote();
             if (!game_net::JoinState()) JoinNow();  // (a pasted code is whole: the join starts at once)
@@ -630,7 +635,7 @@ void Paste() {
         LOGI("menu: a code was pasted");
         return;
     }
-    if (g_typing || CoopChoice() == kHost) return;
+    if (g_typing || (CoopChoice() == kHost && g_page.focus != kOnline + 1)) return;
     size_t a = text.find_first_not_of(" \t\r\n"), b = text.find_last_not_of(" \t\r\n");
     if (a == std::string::npos) return;
     std::string name = text.substr(a, b - a + 1);
@@ -665,7 +670,7 @@ void Keys(bool entry) {
     if (!TestKeys().empty()) letter = 0;
     if (paste) Paste();
     if (!front || (GetAsyncKeyState(VK_SHIFT) & 0x8000 && !letter)) return;
-    bool friendly_row = CoopChoice() == kJoin && game_meet::Available();
+    bool friendly_row = g_page.focus == kOnline + 1 && game_meet::Available();
     if (entry && g_friendly) {  // the short code: letters and digits
         if (letter) FriendlyKey(letter);
         if (digit >= 0) FriendlyKey(char('0' + digit));
@@ -675,13 +680,15 @@ void Keys(bool entry) {
     }
     if (!entry && friendly_row) {  // a letter typed on the row starts a new code
         if (!letter) return;
+        if (CoopChoice() != kJoin) SetCoop(kJoin);
         FriendlyStart(true);
         FriendlyKey(letter);
         return;
     }
     if (!entry) {  // a digit typed on the row starts a new address
         if (digit < 0) return;
-        EntryStart(CoopChoice() == kHost);
+        if (g_page.focus == kOnline + 1 && CoopChoice() != kJoin) SetCoop(kJoin);
+        EntryStart(g_page.focus == kInvite + 1);
         std::fill(g_entry.field, g_entry.field + kFields, 0);
     }
     if (digit >= 0) EntryDigit(digit);
@@ -730,7 +737,7 @@ std::string Value(int row) {
     return "";
 }
 
-constexpr const char* kLabels[kRows] = {"Settings", "Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "Co-op", "Online", "Player 2 look", "Player 2 look speed", "Player 2 volume"};
+constexpr const char* kLabels[kRows] = {"Settings", "Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "Co-op", "Invite", "Online", "Stop inviting", "Player 2 look", "Player 2 look speed", "Player 2 volume"};
 
 // What is on the page now. Player 2's own page: his two rows. Otherwise the section's rows under the row that
 // chooses the section. Player 2's look rows are his alone: on Player 1's page they only show for a player who is
@@ -744,22 +751,26 @@ bool Visible(int row) {
     if (Waiting()) return row == kOnline && game_net::JoinPhase() == 1 && !g_typing && !g_by_code;
     // (his volume is for a player on another PC: in split screen both players have one sound)
     if (SecondsPage()) return row == kLook || row == kSpeed || (row == kVolume && game_net::HostHasPlayer());
+    // "Play with a Friend" (from the main menu): invite, join, and stop inviting while this game invites
+    if (g_page.friends) return row == kInvite || row == kOnline || (row == kStop && CoopChoice() == kHost);
     switch (row) {
         case kSection: return true;
         case kResolution: case kWindow: case kShape: case kRate: case kVsync: return g_section == 0;
-        case kCoop: return g_section == 1;
-        case kOnline: return g_section == 1 && (CoopChoice() == kHost || CoopChoice() == kJoin);
+        case kCoop: case kInvite: return g_section == 1;  // (Invite a friend: here too, so that the pause menu has it)
+        case kStop: return g_section == 1 && CoopChoice() == kHost;
+        case kOnline: return false;                       // (joining is on the main menu's Play with a Friend)
         case kLook: case kSpeed: case kVolume: return g_section == 1 && CoopChoice() == kJoin;
     }
     return false;
 }
-bool Focusable(int row) { return row != kOnline || CoopChoice() == kJoin || CoopChoice() == kHost; }
+bool Focusable(int) { return true; }
 
 // The row under Co-op. Hosting: this PC's code (its game port as seen from outside), or its address when no code
 // is known; while the host enters the joiner's code, that. Joining: the host's code; once the join is on its way,
 // this PC's own code, which the host needs.
-std::string OnlineText(bool focused) {
-    if (CoopChoice() == kHost) {
+std::string InviteText(bool focused) {
+    if (CoopChoice() != kHost) return "Invite a friend";
+    {
         if (g_typing) return "Friend's code:  " + EntryText();
         if (!game_coop::g_host_failed && game_meet::Available()) {  // the short code a friend types
             std::string invite = game_meet::HostCode();
@@ -783,25 +794,31 @@ std::string OnlineText(bool focused) {
         }
         return "Your address:  " + address;
     }
+}
+// The Join row: the friend's code while it is entered and looked up; once the join is on its way with an address
+// code, this PC's own code, which the host needs.
+std::string OnlineText(bool focused) {
     if (g_typing && g_friendly) return "Friend's code:  " + FriendlyText();
-    if (g_typing) return "Host's code:  " + EntryText();
+    if (g_typing && !g_entry.for_friend) return "Host's code:  " + EntryText();
     if (game_meet::Available() && !game_net::JoinState()) {
         if (game_meet::JoinLookup() == 1) return "Friend's code:  " + g_code_typed + "  (looking it up)";
-        std::string last = g_code_typed.empty() ? "not entered" : g_code_typed;
-        return focused ? "Friend's code:  [ " + last + " ]" : "Friend's code:  " + last;
+        if (g_code_typed.empty()) return "Join a friend";
+        return focused ? "Join a friend:  [ " + g_code_typed + " ]" : "Join a friend:  " + g_code_typed;
     }
     if (game_net::JoinState() && g_by_code) return "Friend's code:  " + g_code_typed + (game_net::JoinState() == 2 ? "  (joined)" : "");
     if (game_net::JoinState() == 1) {
         std::string mine = game_net::OutsideAddress();
         return "Your code:  " + (mine.empty() ? std::string("looking it up") : mine);
     }
-    std::string address = Address().empty() ? "not set" : Address();
-    if (game_net::JoinState()) return "Host's code:  " + address + "  (joined)";
-    return focused ? "Host's code:  [ " + address + " ]" : "Host's code:  " + address;
+    if (game_net::JoinState()) return "Host's code:  " + Address() + "  (joined)";
+    if (Address().empty()) return "Join a friend";
+    return focused ? "Join a friend:  [ " + Address() + " ]" : "Join a friend:  " + Address();
 }
 
 std::string RowText(int row, bool focused) {
     if (row == kOnline) return OnlineText(focused);
+    if (row == kInvite) return InviteText(focused);
+    if (row == kStop) return "Stop inviting";
     std::string v = Value(row);
     std::string label = kLabels[row];
     if (!SecondsPage() && row == kLook) label = "My look";  // (the one who joins is Player 2: his own PC's settings)
@@ -826,8 +843,13 @@ std::string Help() {
     if (row == kLook)
         return "Player 2's own up and down. It only changes Player 2. Try both: one of them will feel right.";
     if (row == kSpeed) return "How fast Player 2 turns, as a share of the game's own look speed. It only changes Player 2.";
-    if (row != kCoop && row != kOnline) return "";
-    switch (CoopChoice()) {
+    if (row == kStop) return "Stop inviting: the code stops working, and a friend who is in your game leaves it.";
+    if (row == kCoop && CoopChoice() >= kHost)
+        return "Online play is on. Left or right ends it and goes back to Off or Split screen.";
+    if (row == kInvite && CoopChoice() != kHost)
+        return "You host the game and your friend joins it. Press A: a short code appears here for you to send to your friend.";
+    if (row != kCoop && row != kOnline && row != kInvite) return "";
+    switch (row == kInvite ? int(kHost) : row == kOnline ? int(kJoin) : CoopChoice()) {
         case kSplit:
             return "Two players on this PC, side by side. Player 2 uses the second controller and comes in once a level is in play.";
         case kHost: {
@@ -838,7 +860,7 @@ std::string Help() {
             if (JustCopied()) return "Copied. Paste it into a message to your friend.";
             if (game_net::HostExpecting()) return "Your friend is connecting. This can take half a minute.";
             if (!game_coop::g_host_failed && game_meet::Available() && !game_meet::HostCode().empty())
-                return "Send this code to your friend: X (Ctrl+C) copies it. Your friend picks Join online and enters it. You can just play meanwhile.";
+                return "Send this code to your friend: A or X copies it. Your friend picks Co-op on the main menu, then Join a friend. Just play meanwhile.";
             if (game_net::OutsideKind() == 2)
                 return "Your router gives every connection a new port, so a code cannot work. Forward UDP port 27025 to this PC instead.";
             if (!game_net::OutsideAddress().empty())
@@ -855,10 +877,10 @@ std::string Help() {
             return "Starting to host...";
         }
         case kJoin: {
-            if (g_typing)
-                return "Up and down change the digit, left and right move. A joins, B cancels. A keyboard can type the code, or paste it with Ctrl+V.";
             if (g_typing && g_friendly)
                 return "Up and down change the letter or digit, left and right move. A joins, B cancels. A keyboard can type the code, or paste it with Ctrl+V.";
+            if (g_typing)
+                return "Up and down change the digit, left and right move. A joins, B cancels. A keyboard can type the code, or paste it with Ctrl+V.";
             if (game_meet::JoinLookup() == 1) return "Looking the code up...";
             if (!game_net::JoinState() && !game_meet::Note().empty()) return game_meet::Note();
             if (game_net::JoinPhase() == 3 && game_net::HostNotStarted()) return "You are connected. Your friend's screen comes up now.";
@@ -881,9 +903,8 @@ std::string Help() {
                 if (note.rfind("No answer", 0) == 0) note += " Check the code, and that the host entered yours.";
                 return note;
             }
-            if (row == kCoop) return "Join a friend's game: go down to Host's code. To leave a game later, hold BACK (Backspace) for two seconds.";
-            if (game_meet::Available()) return "Press A and enter your friend's code, like WOLF-4271. Y (Ctrl+V) pastes it. Your friend sees it under Host online.";
-            return "Y (Ctrl+V) pastes the host's code and joins. Or press A, enter the code he sees under Host online, and press A.";
+            if (game_meet::Available()) return "Press A and enter the code your friend sent you, like WOLF-4271. Y (Ctrl+V) pastes it. To leave a game later, hold BACK.";
+            return "Y (Ctrl+V) pastes the host's code and joins. Or press A, enter the code your friend's screen shows, and press A.";
         }
     }
     return "Play with a friend: Split screen on this PC, or Host online and Join online over the internet.";
@@ -918,7 +939,7 @@ void Step(int row, int dir) {
         // Off; two players on this PC (the second Torque on controller 2, the two views side by side); or online,
         // as the host or as the one who joins. Split screen takes effect at once (coop.cpp: Player 2 comes in when
         // a level is in play, and is taken out when it is switched off).
-        case kCoop: SetCoop(wrap(CoopChoice(), kCoops)); break;
+        case kCoop: SetCoop(CoopChoice() == kOff ? kSplit : kOff); break;  // (online: Play with a Friend, Invite a friend)
         case kSection: g_section = g_section ? 0 : 1; break;
         case kLook:
             LookInvert() = LookInvert() ? 0 : 1;
@@ -960,7 +981,7 @@ void Refresh(X86Context& ctx) {
     // the title: the page's name, or what a joining player is waiting for
     static const char* const kWaitTitles[] = {"", "WAITING FOR HOST", "CONNECTED", "JOINING GAME"};
     int phase = waiting ? std::clamp(game_net::JoinPhase(), 1, 3) : 0;
-    std::string title = phase ? kWaitTitles[phase] : seconds ? "PLAYER 2 SETTINGS" : "DISPLAY AND CO-OP";
+    std::string title = phase ? kWaitTitles[phase] : seconds ? "PLAYER 2 SETTINGS" : g_page.friends ? "PLAY WITH A FRIEND" : "DISPLAY AND CO-OP";
     if (phase == 1 && g_by_code) title = "CONNECTING";
     if (phase == 3 && game_net::HostNotStarted()) title = "CONNECTED";
     if (g_page.title && title != g_page.title_text) {
@@ -968,7 +989,8 @@ void Refresh(X86Context& ctx) {
         if (phase) LOGR("menu: the joining player's screen says %s", title.c_str());
         g_page.title_text = title;
     }
-    bool plain = seconds || waiting;  // (no brightness on Player 2's page or the waiting screen)
+    bool plain = seconds || waiting || g_page.friends;  // (no brightness on Player 2's page, the waiting screen, Play with a Friend)
+    if (g_page.friends && !waiting && (g_page.focus == 0 || !Visible(g_page.focus - 1))) MoveFocusTo(kInvite + 1);
     if (plain != g_page.plain) {
         g_page.plain = plain;
         if (g_page.slider) Method(ctx, g_page.slider, kSetState, {plain ? kHidden : kIdle});
@@ -983,7 +1005,7 @@ void Refresh(X86Context& ctx) {
         if (!g_page.rows[r]) continue;
         bool focused = g_page.focus == r + 1, visible = Visible(r);
         if (visible) {  // the next free line (Player 2's page starts higher: there is no slider on it)
-            float y = (seconds ? g_page.slot_top - 36.0f : g_page.slot_top) + g_page.slot_step * float(slot++) - g_page.margin;
+            float y = (seconds || g_page.friends ? g_page.slot_top - 36.0f : g_page.slot_top) + g_page.slot_step * float(slot++) - g_page.margin;
             if (std::fabs(y - g_page.row_y[r]) > 0.01f) WriteF(g_page.rows[r] + kY, y), g_page.row_y[r] = y;
         }
         state(g_page.rows[r], !visible ? kHidden : focused ? kHighlighted : kIdle);
@@ -1013,7 +1035,7 @@ void MoveFocus(int dir) {
     int f = g_page.focus;
     for (int tries = 0; tries <= kRows + 1; tries++) {
         f = (f + dir + kRows + 1) % (kRows + 1);
-        if (f == 0 ? !SecondsPage() && !Waiting() : (Visible(f - 1) && Focusable(f - 1))) break;  // (0 is the brightness: not on Player 2's page)
+        if (f == 0 ? !SecondsPage() && !Waiting() && !g_page.friends : (Visible(f - 1) && Focusable(f - 1))) break;  // (0 is the brightness: not on Player 2's page)
     }
     g_page.focus = f;
 }
@@ -1023,8 +1045,9 @@ void Tick(X86Context& ctx) {
     if (g_after_entry > 0) g_after_entry--;
     SettleHost(false);
 #ifdef _WIN32
-    bool code_row = g_page.focus == kOnline + 1 && (CoopChoice() == kJoin || CoopChoice() == kHost);
-    bool takes_code = code_row && ((CoopChoice() == kJoin && !game_net::JoinState()) || CoopChoice() == kHost);
+    bool invite_row = g_page.focus == kInvite + 1 && CoopChoice() == kHost, join_row = g_page.focus == kOnline + 1;
+    bool code_row = invite_row || (join_row && CoopChoice() == kJoin);  // (a code of this PC's own to copy)
+    bool takes_code = (join_row && !game_net::JoinState()) || (invite_row && (g_typing || game_meet::HostCode().empty()));
     {   // copy and paste on the code row: Ctrl+C and Ctrl+V, or a controller's X and Y
         static uint16_t held = 0;
         uint16_t now = input::HeldOnAnyController(), pressed = uint16_t(now & ~held);
@@ -1045,8 +1068,10 @@ void Tick(X86Context& ctx) {
     Refresh(ctx);
 }
 
+bool g_open_friends = false;  // the page being made is the main menu's "Play with a Friend"
 void Build(X86Context& ctx, uint32_t screen) {
     g_page = {};
+    g_page.friends = g_open_friends;
     g_after_entry = 0;
     uint32_t children = kernel::R32(screen + kChildren), count = kernel::R32(screen + kCount);
     uint32_t slider = kernel::R32(screen + kSlider);
@@ -1286,12 +1311,90 @@ X86_EXTERN_FUNC(__imp__sub_0014BDA0);
 X86_EXTERN_FUNC(__imp__sub_0014C340);
 X86_EXTERN_FUNC(__imp__sub_0014E980);
 X86_EXTERN_FUNC(__imp__sub_0014AE60);
+X86_EXTERN_FUNC(__imp__sub_00157A60);
+X86_EXTERN_FUNC(__imp__sub_00154550);
 
 // the Brightness screen's constructor (this, template): the page as the game makes it, then the display rows
 X86_FUNC(sub_0014BF00) {
     uint32_t screen = ctx.ecx;
     __imp__sub_0014BF00(ctx, base);
     game_menu::Build(ctx, screen);
+}
+
+// ---- the main menu's "Play with a Friend" ----------------------------------------------------------------------------
+// The main menu (its work each frame 0x157A60, this = the menu) has eleven entries (their text widgets at +0xC4)
+// and does the chosen one's action when its way out has played: the action's number at +0x6C (0xF none), through
+// the jump table at 0x1582C8. Action 6 is "Friends", the console's online friends list (0x154550, then 0x1CC250),
+// done only while the online service's switch ([0x384B58] + 0xBC) is on: on this port it never is, and the entry
+// did nothing. It is now "Play with a Friend": the entry says so, the switch reads as on for that one action, and
+// the action opens the Display and Co-op page laid out for inviting and joining (g_page.friends). The page is made
+// as the Options menu makes it (0x14B8D0): its template is property 0x22 of the Options menu's template, which is
+// property 0x0D of the main menu's own resource (0x154570; the resource's handle at [0x376B98], 0x15E310 loads it).
+namespace game_menu {
+constexpr char kFriendsName[] = "Co-op";  // (the place holds a word as long as "Friends": "Play with a Friend" ran into "Archives")
+void FriendsEntry(X86Context& ctx, uint32_t menu) {
+    static uint32_t named = 0;
+    if (named == menu) return;
+    // (the entries' words are text widgets among the menu's children; they get their strings some frames after the
+    // menu is made)
+    // candidates: the menu's children, and what its eleven entry widgets (+0xC4) point at
+    std::vector<uint32_t> found;
+    uint32_t children = kernel::R32(menu + kChildren), count = kernel::R32(menu + kCount);
+    for (uint32_t i = 0; children && i < count && i < 64; i++) found.push_back(kernel::R32(children + i * 4));
+    for (uint32_t i = 0; i < 11; i++) {
+        uint32_t e = kernel::R32(menu + 0xC4 + i * 4);
+        if (!e || !mem::IsCommitted(e + 0x100)) continue;
+        found.push_back(e);
+        for (uint32_t off = 0x10; off < 0x100; off += 4) found.push_back(kernel::R32(e + off));
+        uint32_t inner = kernel::R32(e + kChildren), n = kernel::R32(e + kCount);
+        for (uint32_t k = 0; inner && n < 16 && k < n && mem::IsCommitted(inner + k * 4 + 4); k++) found.push_back(kernel::R32(inner + k * 4));
+    }
+    for (uint32_t w : found) {
+        if (w < 0x10000 || !mem::IsCommitted(w) || !mem::IsCommitted(w + kTextId + 4)) continue;
+        uint32_t at = kernel::R32(w + kString), size = kernel::R32(w + kStringSize);
+        if (!at || size < 8 || size > 16 || !mem::IsCommitted(at + size * 2)) continue;
+        static const char kWas[] = "friends";
+        bool same = true;
+        for (uint32_t k = 0; k < 7 && same; k++) same = std::tolower(int(kernel::R16(at + k * 2) & 0xFF)) == kWas[k];
+        if (!same) continue;
+        LOGI("menu: the main menu's Friends entry is now %s (its box: %.0f %.0f, %.0f x %.0f)", kFriendsName, ReadF(w + kX), ReadF(w + kY), ReadF(w + kW), ReadF(w + kH));
+        SetText(ctx, w, kFriendsName);
+        named = menu;
+        return;
+    }
+}
+void OpenFriends(X86Context& ctx, uint32_t menu) {
+    kernel::CallGuest(ctx, 0x15E310, {});
+    uint32_t options = Property(ctx, kernel::R32(0x376B98), 0x0D);
+    uint32_t options_tmpl = options ? kernel::R32(options) : 0;
+    uint32_t page_at = options_tmpl ? Property(ctx, options_tmpl, 0x22) : 0;
+    uint32_t page_tmpl = page_at ? kernel::R32(page_at) : 0, manager = kernel::R32(0x391D64);
+    LOGR("menu: Play with a Friend: the Options template is %08X, the page's %08X", options_tmpl, page_tmpl);
+    if (!page_tmpl || !manager) return;
+    Method(ctx, menu, kSetState, {2});
+    uint32_t page = kernel::CallGuest(ctx, kAlloc, {0, 0xD4});
+    if (!page) return;
+    g_open_friends = true;
+    ThisCall(ctx, 0x14BF00, page, {page_tmpl});
+    g_open_friends = false;
+    Method(ctx, manager, 8, {page});
+}
+}  // namespace game_menu
+
+X86_FUNC(sub_00157A60) {
+    uint32_t menu = ctx.ecx;
+    game_menu::FriendsEntry(ctx, menu);
+    uint32_t action = kernel::R32(menu + 0x6C);
+    uint32_t live = kernel::R32(0x384B58), before = 0;
+    bool mine = action == 6 && live && mem::IsCommitted(live + 0xBC);
+    if (mine) before = kernel::R32(live + 0xBC), kernel::W32(live + 0xBC, 1);
+    __imp__sub_00157A60(ctx, base);
+    if (mine && kernel::R32(0x384B58) == live) kernel::W32(live + 0xBC, before);
+}
+// the main menu's action 6 (this = the menu): was the online friends list
+X86_FUNC(sub_00154550) {
+    game_menu::OpenFriends(ctx, ctx.ecx);
+    kernel::Return(ctx, 0, 0);
 }
 
 // its destructor: the rows go with the screen's other children
@@ -1362,10 +1465,20 @@ X86_FUNC(sub_0014BDA0) {
     }
     if (g_page.focus > 0 && (event == kLeft || event == kRight || event == kAccept)) {
         int row = g_page.focus - 1;
-        if (row != kOnline) Step(row, event == kLeft ? -1 : 1);
-        else if (CoopChoice() == kHost && !game_meet::HostCode().empty()) CopyMine();  // (the short code: nothing to enter, A copies it)
-        else if (CoopChoice() == kHost) EntryStart(true);  // the joiner's code
+        if (row == kStop) {
+            if (event == kAccept) SetCoop(kOff), MoveFocusTo(kInvite + 1), LOGI("menu: inviting was stopped");
+        } else if (row == kInvite) {
+            if (CoopChoice() != kHost) {  // start inviting: this game hosts from now on
+                if (event == kAccept) SetCoop(kHost), SettleHost(true), LOGI("menu: inviting a friend");
+            } else if (!game_meet::HostCode().empty()) {
+                CopyMine();  // (the short code: nothing to enter, A copies it)
+            } else if (event == kAccept && (!game_meet::Available() || game_meet::HostState() == 3)) {
+                EntryStart(true);  // without a meeting point: the friend's address code
+            }
+        } else if (row != kOnline) Step(row, event == kLeft ? -1 : 1);
         else if (game_net::JoinState()) {}                 // (joining or joined: nothing to enter)
+        else if (event != kAccept) {}
+        else if (CoopChoice() != kJoin && (SetCoop(kJoin), false)) {}
         else if (game_meet::Available()) FriendlyStart(false);
         else if (int f[kFields]; event == kAccept && !Address().empty() && !Code(g_address.c_str(), f, true)) JoinNow();  // a host name
         else EntryStart(false);
