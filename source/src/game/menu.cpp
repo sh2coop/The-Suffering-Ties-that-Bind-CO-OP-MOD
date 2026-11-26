@@ -861,6 +861,7 @@ std::string Help() {
                 return "Up and down change the letter or digit, left and right move. A joins, B cancels. A keyboard can type the code, or paste it with Ctrl+V.";
             if (game_meet::JoinLookup() == 1) return "Looking the code up...";
             if (!game_net::JoinState() && !game_meet::Note().empty()) return game_meet::Note();
+            if (game_net::JoinPhase() == 3 && game_net::HostNotStarted()) return "You are connected. Your friend's screen comes up now.";
             if (game_net::JoinPhase() == 3) return "The host is in the game. You are coming in as Player 2 now.";
             if (game_net::JoinPhase() == 1 && g_by_code)
                 return "The code is right. Connecting to your friend's game now. This can take half a minute. Hold BACK to stop.";
@@ -961,6 +962,7 @@ void Refresh(X86Context& ctx) {
     int phase = waiting ? std::clamp(game_net::JoinPhase(), 1, 3) : 0;
     std::string title = phase ? kWaitTitles[phase] : seconds ? "PLAYER 2 SETTINGS" : "DISPLAY AND CO-OP";
     if (phase == 1 && g_by_code) title = "CONNECTING";
+    if (phase == 3 && game_net::HostNotStarted()) title = "CONNECTED";
     if (g_page.title && title != g_page.title_text) {
         SetText(ctx, g_page.title, title);
         if (phase) LOGR("menu: the joining player's screen says %s", title.c_str());

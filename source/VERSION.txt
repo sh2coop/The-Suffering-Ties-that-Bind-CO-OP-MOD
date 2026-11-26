@@ -1,1 +1,1 @@
-41 2026-11-25 Joining online now takes one short code like WOLF-4271: the host sends it, the friend types it under Join online.
+42 2026-11-25 A friend who joins while you are still in the menus now sees your menu, and drops in as Player 2 when the game starts.

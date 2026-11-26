@@ -638,17 +638,19 @@ void HostListen() {
         std::lock_guard l(g_host.lock);
         bool same = g_host.have_client && from.sin_addr.s_addr == g_host.client.sin_addr.s_addr &&
                     from.sin_port == g_host.client.sin_port;
-        // A player comes in once the host is in a level (asked for after the first online session, 2026-11-25).
-        // Until then his PC is told so once a second (packet type 8) and goes on waiting; he is not let in.
-        if (!g_host.connected && !game_coop::InLevel()) {
+        // A friend who comes while the host is still in its menus is let in and watches them, as if on the same
+        // couch (the study "Co-op joining: the easy way", 2026-11-26; from 2026-11-25 until then he was kept
+        // waiting outside). His PC is told once a second that no level is in play here (packet type 8): it writes
+        // that over the picture, and his controller does nothing here until a level is (RemotePad).
+        if (!game_coop::InLevel()) {
             static Clock::time_point told{};
             if (Clock::now() - told > std::chrono::milliseconds(1000)) {
                 told = Clock::now();
                 const uint8_t wait[5] = {'S', '2', 'C', '1', 8};
                 sendto(g_host.sock, reinterpret_cast<const char*>(wait), sizeof wait, 0, reinterpret_cast<const sockaddr*>(&from), sizeof from);
-                LOGI("coop: a player is waiting to come in (the game has not been started here yet)");
+                static bool said = false;
+                if (!g_host.connected || !said) said = true, LOGI("coop: a friend is watching this game's menus (no level is in play here yet)");
             }
-            continue;
         }
         if (!same) {
             if (g_host.have_client && Clock::now() - g_host.last_input < std::chrono::milliseconds(kClientTimeout))
@@ -1244,6 +1246,64 @@ void ClientRecv() {
     }
 }
 
+// Words over the host's picture on the joiner's PC, in a strip at the top: capital letters of 5 x 7 dots, drawn twice
+// their size. The game's own font cannot be used here: the picture goes over the joiner's whole frame after his
+// game has drawn. (640 x 480 BGRA)
+void Strip(std::vector<uint8_t>& px, const char* line1, const char* line2) {
+    static const struct {
+        char c;
+        uint8_t rows[7];
+    } kGlyphs[] = {
+        {'A', {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}}, {'B', {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E}}, {'C', {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E}},
+        {'D', {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E}}, {'E', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}}, {'F', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}},
+        {'G', {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F}}, {'H', {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}}, {'I', {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E}},
+        {'J', {0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C}}, {'K', {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11}}, {'L', {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F}},
+        {'M', {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}}, {'N', {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11}}, {'O', {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+        {'P', {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10}}, {'Q', {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D}}, {'R', {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}},
+        {'S', {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}}, {'T', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}}, {'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+        {'V', {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04}}, {'W', {0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11}}, {'X', {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11}},
+        {'Y', {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04}}, {'Z', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F}}, {'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}},
+        {'1', {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}}, {'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}}, {'3', {0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E}},
+        {'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}}, {'5', {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}}, {'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}},
+        {'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}}, {'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}}, {'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}},
+        {'.', {0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x06}}, {':', {0x00, 0x06, 0x06, 0x00, 0x06, 0x06, 0x00}}, {'-', {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}},
+        {'\'', {0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00}}, {',', {0x00, 0x00, 0x00, 0x00, 0x06, 0x06, 0x0C}},
+    };
+    constexpr int W = 640, H = 480, kBand = 46, kScale = 2, kStep = 6 * kScale;
+    if (px.size() < size_t(W) * H * 4) return;
+    for (int y = 0; y < kBand; y++)  // a dark band, fading out at its lower edge
+        for (int x = 0; x < W; x++) {
+            uint8_t* p = &px[(size_t(y) * W + x) * 4];
+            int keep = y < kBand - 10 ? 70 : 70 + (y - (kBand - 10)) * 18;  // of 256
+            p[0] = uint8_t(p[0] * keep / 256), p[1] = uint8_t(p[1] * keep / 256), p[2] = uint8_t(p[2] * keep / 256);
+        }
+    auto dot = [&](int x, int y, uint8_t b, uint8_t g, uint8_t r) {
+        if (x < 0 || y < 0 || x >= W || y >= H) return;
+        uint8_t* p = &px[(size_t(y) * W + x) * 4];
+        p[0] = b, p[1] = g, p[2] = r;
+    };
+    auto line = [&](const char* text, int top, uint8_t b, uint8_t g, uint8_t r) {
+        int x0 = (W - int(std::strlen(text)) * kStep) / 2;
+        for (const char* c = text; *c; c++, x0 += kStep)
+            for (const auto& gl : kGlyphs) {
+                if (gl.c != *c) continue;
+                for (int pass = 0; pass < 2; pass++)  // a shadow first, then the letter
+                    for (int ry = 0; ry < 7; ry++)
+                        for (int rx = 0; rx < 5; rx++)
+                            if (gl.rows[ry] & (0x10 >> rx))
+                                for (int sy = 0; sy < kScale; sy++)
+                                    for (int sx = 0; sx < kScale; sx++) {
+                                        int x = x0 + rx * kScale + sx, y = top + ry * kScale + sy;
+                                        if (pass == 0) dot(x + 1, y + 1, 0, 0, 0);
+                                        else dot(x, y, b, g, r);
+                                    }
+                break;
+            }
+    };
+    line(line1, 6, 0xC8, 0xE6, 0xF0);   // (the menus' pale yellow)
+    line(line2, 24, 0xB0, 0xB0, 0xB0);
+}
+
 // the renderer, each present while joined: the host's picture over the joiner's own (BGRA, 640 x 480)
 const uint8_t* Present(uint32_t& w, uint32_t& h) {
     if (!g_client.run) return nullptr;
@@ -1251,8 +1311,12 @@ const uint8_t* Present(uint32_t& w, uint32_t& h) {
     if (!g_client.have_frame) return nullptr;
     // (the joiner's own screen says "joining" for a moment first: cut straight from his menu to the middle of the
     // host's game, he could not tell what had happened; Skylar's first online session, 2026-11-25)
-    if (Clock::now() - g_client.first_frame < std::chrono::milliseconds(kJoiningMs)) return nullptr;
+    bool menus = Clock::now() - g_host_waits.load() < std::chrono::milliseconds(3000);
+    if (Clock::now() - g_client.first_frame < std::chrono::milliseconds(menus ? kJoiningMs / 3 : kJoiningMs)) return nullptr;
     g_client.present = g_client.shown;
+    // the host is still in his menus: the friend watches them, and is told so
+    if (Clock::now() - g_host_waits.load() < std::chrono::milliseconds(3000))
+        Strip(g_client.present, "CONNECTED TO YOUR FRIEND'S GAME", "YOU PLAY WHEN THE GAME STARTS. HOLD BACK TO LEAVE.");
     static uint32_t calls = 0;
     if (++calls % 300 == 1) {  // (a check now and then: is there a picture in it)
         uint64_t sum = 0;
@@ -1743,7 +1807,7 @@ void ClientPad(const input::Pad& p) {
 
 // the host's remote player's pad, when one is connected
 bool RemotePad(input::Pad& p) {
-    if (!HostHasPlayer()) return false;
+    if (!HostHasPlayer() || !game_coop::InLevel()) return false;  // (in the host's menus only the host steers)
     std::lock_guard l(g_host.lock);
     p.connected = true;
     p.buttons = g_host.pad.buttons;
