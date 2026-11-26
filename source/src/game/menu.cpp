@@ -1225,8 +1225,39 @@ void TraceTop() {
     }
 }
 
+// The game's own "Invert Pitch Axis" (Options, Controller Settings) is kept between runs, and is off until the player
+// turns it on (Skylar, 2026-11-26: "keeps getting reset every time I launch the game again, it should be off by
+// default"). The game keeps its options in an object at 0x392158 (methods 0x347C44; the switches in the word at
+// +0x50, bit 0x10 = inverted) and starts every run with them at their defaults, inverted among them: they only
+// come from Suffering2.cfg through the Options menu's "Save Settings" and "Load Settings". Here the port's own
+// settings file holds the choice (invert_pitch). A change made on the Controller Settings screen (methods
+// 0x3414D0, or within a moment of it closing) is the player's and is kept; any other change is the game putting its
+// own value back, and is undone.
+uint32_t g_invert_pitch = 0;
+void KeepInvert() {
+    constexpr uint32_t kOptions = 0x392158, kSwitches = kOptions + 0x50, kInverted = 0x10, kControllerScreen = 0x3414D0;
+    if (!mem::IsCommitted(kSwitches) || kernel::R32(kOptions) != 0x347C44) return;
+    static Clock::time_point on_screen{};
+    uint32_t manager = kernel::R32(0x391D64);
+    uint32_t screens = manager ? kernel::R32(manager + kChildren) : 0, count = manager ? kernel::R32(manager + kCount) : 0;
+    uint32_t top = screens && count && count <= 64 ? kernel::R32(screens + (count - 1) * 4) : 0;
+    if (top && mem::IsCommitted(top) && kernel::R32(top) == kControllerScreen) on_screen = Clock::now();
+    uint32_t switches = kernel::R32(kSwitches);
+    bool now = (switches & kInverted) != 0, want = g_invert_pitch != 0;
+    if (now == want) return;
+    if (Clock::now() - on_screen < std::chrono::milliseconds(1500)) {
+        g_invert_pitch = now ? 1 : 0;
+        app::Save();
+        LOGR("menu: Invert Pitch Axis is now %s, kept for the next runs", now ? "Yes" : "No");
+    } else {
+        kernel::W32(kSwitches, switches ^ kInverted);
+        LOGI("menu: the game had Invert Pitch Axis at %s; it is put back to the player's %s", now ? "Yes" : "No", want ? "Yes" : "No");
+    }
+}
+
 void PauseTitle(X86Context& ctx, int pauser) {
     TraceTop();
+    KeepInvert();
     static uint32_t titled = 0;  // the widget that was changed
     static int shown = 0;
     if (!pauser) {

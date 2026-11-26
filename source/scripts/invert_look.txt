@@ -1,0 +1,5 @@
+# main menu, Options, Controller Settings: only look
+28 RIGHT
+29.5 RIGHT
+31 A
+36 A

@@ -3152,6 +3152,7 @@ X86_FUNC(sub_00191070) {
         static std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
         uint32_t package = sound >> 16;
         if (ctx.eax) started++;
+        else if (!sound) {}  // (a call with no sound named: nothing was asked for)
         else if (++refused, said < 6 && ++said) LOGI("sound: the sound %08X was asked for and not played (place %08X, flags %X, asked from %08X)", sound, place, flags, from);
         bool known = false;
         for (uint32_t i = 0; i < kinds; i++) known |= packages[i] == package;

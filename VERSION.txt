@@ -1,1 +1,1 @@
-45 2026-11-25 Session logs record more again: story events, both players' state, sounds, levels and menu screens.
+46 2026-11-25 Invert Pitch Axis is now off by default and stays the way you set it between launches.

@@ -19,6 +19,7 @@ extern uint32_t g_p2_invert, g_p2_speed;  // Player 2's own look
 extern uint32_t g_p2_volume;             // the host's sound on this PC when it joins a game, per cent
 extern uint32_t g_mode_setting;  // coop.cpp: 0 off, 1 split screen
 }
+namespace game_menu { extern uint32_t g_invert_pitch; }  // the game's own Invert Pitch Axis, kept between runs (menu.cpp)
 namespace game_view { extern uint32_t g_shape_setting; }  // Display Settings: picture shape (src/game/view.cpp)
 
 // after the settings load, before the window and boot
@@ -42,7 +43,7 @@ const app::GameInfo app::kGame = {
     .images = {{"default.xbe", "Suffering2"}},  // each recompiled xbe and its exe, for title launches
     .options = {{"picture_shape", nullptr, &game_view::g_shape_setting}, {"coop", nullptr, &game_coop::g_mode_setting},
                 {"p2_invert_look", nullptr, &game_coop::g_p2_invert}, {"p2_look_speed", nullptr, &game_coop::g_p2_speed},
-                {"join_volume", nullptr, &game_coop::g_p2_volume}},  // game settings kept in the settings file
+                {"join_volume", nullptr, &game_coop::g_p2_volume}, {"invert_pitch", nullptr, &game_menu::g_invert_pitch}},  // game settings kept in the settings file
     .load = nullptr,                      // reads more from the settings file's toml::table
     .save = nullptr,                      // writes more into it
     .init = GameInit,                      // after the settings load, before the window and boot
