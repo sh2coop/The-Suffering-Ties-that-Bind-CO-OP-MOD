@@ -82,11 +82,20 @@ inline std::atomic<StreamSink> g_stream{nullptr};
 // present hands the sink the newest finished snapshot and the finished frame is not read back.
 inline std::atomic<bool> g_stream_snapshot{false};
 void SnapshotForStream();  // the render target bound now (xdk/d3d8.cpp); the title's thread
+// [local change, The Suffering: Ties That Bind] How many rows a snapshot has: 0 the console frame's own (480), else
+// that many, never more than the host's target has; the width follows the target's shape. (The joined player's
+// picture was the console's 640 x 480 whatever the size of his window: "he should be playing at the resolution he
+// has the window at", 2026-11-26.)
+inline std::atomic<uint32_t> g_stream_snapshot_rows{0};
 
 // a picture shown in place of the title's frame (an online co-op joiner sees the host's game): BGRA, rows w * 4
 // bytes apart, valid until the next call; null to show the title's own frame
 using PresentOverride = const uint8_t* (*)(uint32_t& w, uint32_t& h);
 inline std::atomic<PresentOverride> g_present_override{nullptr};
+// [local change, The Suffering: Ties That Bind] The override's picture has changed only when this number has: the
+// backend keeps its texture of it meanwhile. 0: a new texture at every present (as it was, and fine for a small
+// picture; one of 1920 x 1440 is 11 MB to copy and upload).
+inline std::atomic<uint32_t> g_present_override_serial{0};
 
 // the finished picture's brightness, 1 as drawn, 0 black: a title fades the screen with it (skipping a cut-scene)
 inline std::atomic<float> g_fade{1.0f};

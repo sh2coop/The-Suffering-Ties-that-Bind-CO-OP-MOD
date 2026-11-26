@@ -100,6 +100,7 @@ void Line(const char* fmt, ...);
 }
 
 namespace game_net {
+uint32_t g_picture_rows = 1080;  // the setting friend_picture_rows: the most rows of the joined player's picture
 namespace {
 #ifdef _WIN32
 using Sock = SOCKET;
@@ -118,6 +119,14 @@ constexpr uint16_t kGamePort = 27025, kBeaconPort = 27026;
 // of up to 74 ms on one PC). With 28 it is every second frame, evenly, 30 a second (every fourth at 120).
 constexpr int kFrameInterval = 28;
 constexpr int kJpegQuality = 70;
+// The joined player's picture at the size of his window ("he should be playing at the resolution he has the window
+// at", 2026-11-26; until then it was the console's 640 x 480, made larger on his PC). Player 2's view is taken from
+// the host's render target at up to as many rows as the joined player's window has, the host's target has, and the
+// setting allows (friend_picture_rows in the settings file, 1080 unless set; 480 is the old picture). A picture of
+// 1920 x 1440 is about 100 kB, 25 to 50 Mbit a second: the joined game tells the host how many pictures it lost,
+// and the host goes down a size when pictures get lost and up again when none are.
+constexpr uint32_t kRowSteps[] = {480, 600, 720, 900, 1080, 1200, 1440, 1600, 2160};
+constexpr int kRepairGroup = 12;  // parts of a large picture that share one repair packet (packet type 11)
 constexpr size_t kChunk = 1200;
 constexpr size_t kFrameHead = 23;         // a frame packet's bytes before the JPEG chunk
 constexpr int kClientTimeout = 3000;   // ms without pad packets: the remote player left
@@ -534,14 +543,50 @@ struct HostState {
     // the newest frame from the renderer, for the encoder
     std::mutex frame_lock;
     std::condition_variable frame_cv;
-    std::vector<uint8_t> frame;  // RGB
-    uint32_t frame_w = 0, frame_h = 0;
+    std::vector<uint8_t> raw;    // BGRA as the renderer handed it over, rows raw_w * 4 apart
+    uint32_t raw_w = 0, raw_h = 0;
     std::atomic<float> frame_aspect{0};  // the shape that picture is shown in on the host (width / height)
     bool frame_new = false;
     Clock::time_point last_sent;
     sockaddr_in punch{};  // a visitor's outside address, sent to until punch_until (HostBeacon)
     Clock::time_point punch_until{};
+    // the joined game: its window's picture area, the share of pictures it lost in its last two seconds (per cent),
+    // whether it knows large pictures at all (a copy from before 2026-11-26 sends none of this)
+    std::atomic<uint32_t> client_w{0}, client_h{0}, client_lost{0};
+    std::atomic<bool> client_large{false};
+    std::atomic<uint32_t> rows{480};  // the rows of the picture being sent now
 } g_host;
+
+// The rows of Player 2's picture: up when no picture was lost for a while, down when they are. Called with every
+// controller packet of the joined game (about 120 a second).
+void PictureRows() {
+    static Clock::time_point changed{}, said{};
+    static uint32_t before = 0;
+    uint32_t most = std::min<uint32_t>(std::max<uint32_t>(g_picture_rows, 480), std::max<uint32_t>(g_host.client_h.load(), 480));
+    if (!g_host.client_large.load()) most = 480;
+    uint32_t rows = std::clamp<uint32_t>(g_host.rows.load(), 480, most), lost = g_host.client_lost.load();
+    Clock::time_point now = Clock::now();
+    static bool large_before = false;
+    bool large = g_host.client_large.load();
+    if (large && !large_before) rows = std::min<uint32_t>(most, 720), changed = now;  // (he has just come in: not from 480 up)
+    large_before = large;
+    auto step = [&](int dir) {
+        int at = 0;
+        for (int i = 0; i < int(std::size(kRowSteps)); i++)
+            if (kRowSteps[i] <= rows) at = i;
+        at = std::clamp(at + dir, 0, int(std::size(kRowSteps)) - 1);
+        return std::min(kRowSteps[at], most);
+    };
+    if (lost >= 4 && now - changed > std::chrono::seconds(3)) rows = step(-1), changed = now;
+    else if (lost == 0 && rows < most && now - changed > std::chrono::seconds(4)) rows = step(+1) > rows ? step(+1) : most, changed = now;
+    g_host.rows = rows;
+    gpu::g_stream_snapshot_rows = rows > 480 ? rows : 0;
+    if (rows != before && now - said > std::chrono::milliseconds(500)) {
+        LOGR("net: the joined player's picture is now %u rows (his window %u x %u, the setting allows %u; he lost %u%% of the last pictures)", rows,
+             g_host.client_w.load(), g_host.client_h.load(), g_picture_rows, lost);
+        before = rows, said = now;
+    }
+}
 
 bool ClientConnected() {
     std::lock_guard l(g_host.lock);
@@ -652,6 +697,7 @@ void HostListen() {
             if (g_host.connected && from.sin_addr.s_addr == g_host.client.sin_addr.s_addr && from.sin_port == g_host.client.sin_port) {
                 g_host.connected = false;
                 g_host.have_client = false;
+                g_host.client_large = false;
                 LOGR("coop: the remote player left (he said so)");
                 game_coop::RemotePlayer(false);
             }
@@ -669,6 +715,14 @@ void HostListen() {
         std::memcpy(&p.ry, buf + 25, 2);
         if (n >= 29) game_coop::RemoteLookFrom(buf[27], buf[28]);  // (an older copy sends 27 bytes: as the game has it)
         if (n >= 30) game_coop::RemoteVolumeFrom(buf[29]);
+        if (n >= 36) {  // (since 2026-11-26: his window, and how many pictures he lost)
+            uint16_t cw, ch;
+            std::memcpy(&cw, buf + 30, 2), std::memcpy(&ch, buf + 32, 2);
+            g_host.client_w = cw, g_host.client_h = ch, g_host.client_lost = buf[34], g_host.client_large = buf[35] >= 1;
+        } else {
+            g_host.client_large = false;
+        }
+        PictureRows();
         std::lock_guard l(g_host.lock);
         bool same = g_host.have_client && from.sin_addr.s_addr == g_host.client.sin_addr.s_addr &&
                     from.sin_port == g_host.client.sin_port;
@@ -743,20 +797,117 @@ void HostSend(const void* data, size_t n) {
     sendto(g_host.sock, static_cast<const char*>(data), int(n), 0, reinterpret_cast<const sockaddr*>(&to), sizeof to);
 }
 
+struct Outgoing {
+    std::mutex lock;
+    std::condition_variable cv;
+    std::vector<uint8_t> jpeg;
+    uint32_t frame = 0, w = 0, h = 0, dropped = 0;
+    float shape = 0;
+    bool fresh = false;
+} g_out;
+
+// One picture to the joined player, in packets. On a thread of its own since 2026-11-26 (HostSend below): a large
+// picture is a hundred packets with breaths between them, and the packing thread was held up by it: 24 pictures a
+// second went out where 30 were made.
+void SendPicture(const std::vector<uint8_t>& jpeg, uint32_t frame, uint32_t w, uint32_t h, float shape) {
+    uint16_t parts = uint16_t((jpeg.size() + kChunk - 1) / kChunk);
+    std::vector<uint8_t> pkt(kFrameHead + kChunk);
+
+    std::vector<uint8_t> repair(kChunk, 0);
+    for (uint16_t i = 0; i < parts; i++) {
+        size_t at = size_t(i) * kChunk, n = std::min(kChunk, jpeg.size() - at);
+        uint16_t w16 = uint16_t(w), h16 = uint16_t(h), n16 = uint16_t(n);
+        std::memcpy(pkt.data(), "S2C1", 4);
+        pkt[4] = 2;
+        std::memcpy(pkt.data() + 5, &frame, 4);
+        std::memcpy(pkt.data() + 9, &w16, 2);
+        std::memcpy(pkt.data() + 11, &h16, 2);
+        std::memcpy(pkt.data() + 13, &parts, 2);
+        std::memcpy(pkt.data() + 15, &i, 2);
+        std::memcpy(pkt.data() + 17, &n16, 2);
+        std::memcpy(pkt.data() + 19, &shape, 4);  // the shape the picture is shown in (width / height)
+        std::memcpy(pkt.data() + kFrameHead, jpeg.data() + at, n);
+        HostSend(pkt.data(), kFrameHead + n);
+        for (size_t k = 0; k < n; k++) repair[k] ^= jpeg[at + k];
+        // (a picture is twenty to a hundred packets: sent in one burst they overran a home router's queue now and
+        // then, and one lost packet was a lost picture. A short breath every eight.)
+        if (i % 8 == 7) std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+    // A large picture is many parts (a hundred for 1920 x 1440), and one repair packet for all of them mends
+    // one loss only: every twelve parts get a repair packet of their own (packet type 11: the picture, how many
+    // parts it has, the group's first part, how many are in the group, the last part's length). A copy of the
+    // game from before 2026-11-26 drops these and keeps the one below.
+    if (parts > kRepairGroup) {
+        uint16_t last_len = uint16_t(jpeg.size() - size_t(parts - 1) * kChunk);
+        std::vector<uint8_t> grp(17 + kChunk);
+        for (uint16_t first = 0; first < parts; first = uint16_t(first + kRepairGroup)) {
+            uint16_t count = uint16_t(std::min<int>(kRepairGroup, parts - first));
+            std::fill(grp.begin(), grp.end(), uint8_t(0));
+            std::memcpy(grp.data(), "S2C1", 4);
+            grp[4] = 11;
+            std::memcpy(grp.data() + 5, &frame, 4);
+            std::memcpy(grp.data() + 9, &parts, 2);
+            std::memcpy(grp.data() + 11, &first, 2);
+            std::memcpy(grp.data() + 13, &count, 2);
+            std::memcpy(grp.data() + 15, &last_len, 2);
+            for (uint16_t k = first; k < first + count; k++) {
+                size_t at = size_t(k) * kChunk, len = std::min(kChunk, jpeg.size() - at);
+                for (size_t b = 0; b < len; b++) grp[17 + b] ^= jpeg[at + b];
+            }
+            HostSend(grp.data(), grp.size());
+            if ((first / kRepairGroup) % 8 == 7) std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+    }
+    // The repair packet: part number = the number of parts (a copy of the game from before 2026-11-25 drops such
+    // a packet), the width field holds the last part's length, the height field 0xFFFF. With it the joiner
+    // rebuilds any one part of the picture that did not arrive.
+    if (parts > 1) {
+        uint16_t last = uint16_t(jpeg.size() - size_t(parts - 1) * kChunk), mark = 0xFFFF, n16 = uint16_t(kChunk);
+        std::memcpy(pkt.data(), "S2C1", 4);
+        pkt[4] = 2;
+        std::memcpy(pkt.data() + 5, &frame, 4);
+        std::memcpy(pkt.data() + 9, &last, 2);
+        std::memcpy(pkt.data() + 11, &mark, 2);
+        std::memcpy(pkt.data() + 13, &parts, 2);
+        std::memcpy(pkt.data() + 15, &parts, 2);
+        std::memcpy(pkt.data() + 17, &n16, 2);
+        std::memcpy(pkt.data() + 19, &shape, 4);
+        std::memcpy(pkt.data() + kFrameHead, repair.data(), kChunk);
+        HostSend(pkt.data(), kFrameHead + kChunk);
+    }
+}
+
+void Compose(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch, std::vector<uint8_t>& out, uint32_t& out_w, uint32_t& out_h);
 void HostEncode() {
-    std::vector<uint8_t> rgb, jpeg;
-    uint32_t frame = 0, w = 0, h = 0;
+    std::vector<uint8_t> rgb, jpeg, raw;
+    uint32_t frame = 0, w = 0, h = 0, rw = 0, rh = 0;
+    std::thread sender([] {
+        std::vector<uint8_t> mine;
+        while (g_host.run) {
+            uint32_t frame_ = 0, w_ = 0, h_ = 0;
+            float shape_ = 0;
+            {
+                std::unique_lock o(g_out.lock);
+                g_out.cv.wait_for(o, std::chrono::milliseconds(100), [] { return g_out.fresh || !g_host.run; });
+                if (!g_out.fresh) continue;
+                g_out.fresh = false;
+                mine.swap(g_out.jpeg);
+                frame_ = g_out.frame, w_ = g_out.w, h_ = g_out.h, shape_ = g_out.shape;
+            }
+            SendPicture(mine, frame_, w_, h_, shape_);
+        }
+    });
     while (g_host.run) {
         {
             std::unique_lock l(g_host.frame_lock);
             g_host.frame_cv.wait_for(l, std::chrono::milliseconds(100), [] { return g_host.frame_new || !g_host.run; });
             if (!g_host.frame_new) continue;
             g_host.frame_new = false;
-            rgb = g_host.frame;
-            w = g_host.frame_w;
-            h = g_host.frame_h;
+            raw.swap(g_host.raw);
+            rw = g_host.raw_w, rh = g_host.raw_h;
         }
-        if (!ClientConnected()) continue;
+        if (!ClientConnected() || raw.size() < size_t(rw) * rh * 4 || !rw || !rh) continue;
+        Compose(raw.data(), rw, rh, rw * 4, rgb, w, h);
         jpeg.clear();
         auto put = [](void* ctx, void* data, int size) {
             auto* v = static_cast<std::vector<uint8_t>*>(ctx);
@@ -801,47 +952,15 @@ void HostEncode() {
                 }
             }
         }
-        uint16_t parts = uint16_t((jpeg.size() + kChunk - 1) / kChunk);
-        std::vector<uint8_t> pkt(kFrameHead + kChunk);
-        float shape = g_host.frame_aspect.load();
-        std::vector<uint8_t> repair(kChunk, 0);
-        for (uint16_t i = 0; i < parts; i++) {
-            size_t at = size_t(i) * kChunk, n = std::min(kChunk, jpeg.size() - at);
-            uint16_t w16 = uint16_t(w), h16 = uint16_t(h), n16 = uint16_t(n);
-            std::memcpy(pkt.data(), "S2C1", 4);
-            pkt[4] = 2;
-            std::memcpy(pkt.data() + 5, &frame, 4);
-            std::memcpy(pkt.data() + 9, &w16, 2);
-            std::memcpy(pkt.data() + 11, &h16, 2);
-            std::memcpy(pkt.data() + 13, &parts, 2);
-            std::memcpy(pkt.data() + 15, &i, 2);
-            std::memcpy(pkt.data() + 17, &n16, 2);
-            std::memcpy(pkt.data() + 19, &shape, 4);  // the shape the picture is shown in (width / height)
-            std::memcpy(pkt.data() + kFrameHead, jpeg.data() + at, n);
-            HostSend(pkt.data(), kFrameHead + n);
-            for (size_t k = 0; k < n; k++) repair[k] ^= jpeg[at + k];
-            // (a picture is some twenty packets: sent in one burst they overran a home router's queue now and then,
-            // and one lost packet was a lost picture. A short breath every six.)
-            if (i % 6 == 5) std::this_thread::sleep_for(std::chrono::microseconds(700));
+        {   // to the sending thread: the newest picture waits there, an older one that has not gone yet is dropped
+            std::lock_guard o(g_out.lock);
+            if (g_out.fresh) g_out.dropped++;
+            g_out.jpeg = jpeg, g_out.frame = frame, g_out.w = w, g_out.h = h, g_out.shape = g_host.frame_aspect.load(), g_out.fresh = true;
         }
-        // The repair packet: part number = the number of parts (a copy of the game from before 2026-11-25 drops such
-        // a packet), the width field holds the last part's length, the height field 0xFFFF. With it the joiner
-        // rebuilds any one part of the picture that did not arrive.
-        if (parts > 1) {
-            uint16_t last = uint16_t(jpeg.size() - size_t(parts - 1) * kChunk), mark = 0xFFFF, n16 = uint16_t(kChunk);
-            std::memcpy(pkt.data(), "S2C1", 4);
-            pkt[4] = 2;
-            std::memcpy(pkt.data() + 5, &frame, 4);
-            std::memcpy(pkt.data() + 9, &last, 2);
-            std::memcpy(pkt.data() + 11, &mark, 2);
-            std::memcpy(pkt.data() + 13, &parts, 2);
-            std::memcpy(pkt.data() + 15, &parts, 2);
-            std::memcpy(pkt.data() + 17, &n16, 2);
-            std::memcpy(pkt.data() + 19, &shape, 4);
-            std::memcpy(pkt.data() + kFrameHead, repair.data(), kChunk);
-            HostSend(pkt.data(), kFrameHead + kChunk);
-        }
+        g_out.cv.notify_one();
     }
+    g_out.cv.notify_all();
+    if (sender.joinable()) sender.join();
 }
 
 void HostBeacon() {
@@ -908,16 +1027,31 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
     int least = game_coop::StreamView() ? kFrameInterval / 2 : kFrameInterval;
     if (now - g_host.last_sent < std::chrono::milliseconds(least) || !ClientConnected()) return;
     g_host.last_sent = now;
+    // (Only the copy is made here, on the renderer's thread: the picture for the joined player is put together on
+    // the packing thread, see Compose. At 640 x 480 the difference was nothing; a picture of 1920 x 1440 is nine
+    // times the pixels.)
+    std::lock_guard l(g_host.frame_lock);
+    g_host.raw.resize(size_t(w) * h * 4);
+    for (uint32_t y = 0; y < h; y++) std::memcpy(g_host.raw.data() + size_t(y) * w * 4, bgra + size_t(y) * pitch, size_t(w) * 4);
+    g_host.raw_w = w, g_host.raw_h = h;
+    g_host.frame_new = true;
+    g_host.frame_cv.notify_one();
+}
+
+// the renderer's pixels as the picture the joined player gets: RGB, with what the host's runtime draws over its own
+// screen and is not in these pixels (his health and ammunition, his partner's health, the arrow, a crosshair)
+void Compose(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch, std::vector<uint8_t>& out, uint32_t& out_w, uint32_t& out_h) {
     bool half = game_coop::SplitActive();
     // the right half (and not the divider's own columns), halved again in size when it is large: the picture is
     // JPEG in UDP packets, 30 a second
     uint32_t x0 = half ? w / 2 + std::max<uint32_t>(2, w / 320) : 0, ww = w - x0;
-    uint32_t step = ww > 1100 || h > 1100 ? 2 : 1, ow = ww / step, oh = h / step;
-    std::lock_guard l(g_host.frame_lock);
-    g_host.frame.resize(size_t(ow) * oh * 3);
+    // (it was halved when larger than 1100 either way, from the days the whole render target came here; now the
+    // renderer hands over the size asked for, see PictureRows)
+    uint32_t step = 1, ow = ww / step, oh = h / step;
+    out.resize(size_t(ow) * oh * 3);
     for (uint32_t y = 0; y < oh; y++) {
         const uint8_t* s = bgra + size_t(y * step) * pitch + size_t(x0) * 4;
-        uint8_t* d = g_host.frame.data() + size_t(y) * ow * 3;
+        uint8_t* d = out.data() + size_t(y) * ow * 3;
         for (uint32_t x = 0; x < ow; x++) {
             const uint8_t* p = s + size_t(x * step) * 4;
             d[3 * x] = p[2];
@@ -932,7 +1066,7 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
     auto rect = [&](int l, int t, int r, int b, uint8_t red, uint8_t green, uint8_t blue) {
         for (int y = std::max(t, 0); y < std::min(b, int(oh)); y++)
             for (int x = std::max(l, 0); x < std::min(r, int(ow)); x++) {
-                uint8_t* d = g_host.frame.data() + (size_t(y) * ow + size_t(x)) * 3;
+                uint8_t* d = out.data() + (size_t(y) * ow + size_t(x)) * 3;
                 d[0] = red, d[1] = green, d[2] = blue;
             }
     };
@@ -960,7 +1094,7 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
                     for (int i = 0; i < 4; i++) c[i] += float(texel[i]) * wgt;
                 }
                 float alpha = c[3] / 255.0f;
-                uint8_t* d = g_host.frame.data() + (size_t(y) * ow + size_t(x)) * 3;
+                uint8_t* d = out.data() + (size_t(y) * ow + size_t(x)) * 3;
                 d[0] = uint8_t(float(d[0]) * (1 - alpha) + c[2] * alpha);  // (the art is B G R A, the frame R G B)
                 d[1] = uint8_t(float(d[1]) * (1 - alpha) + c[1] * alpha);
                 d[2] = uint8_t(float(d[2]) * (1 - alpha) + c[0] * alpha);
@@ -1020,7 +1154,7 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
                             }
                             inside -= std::min(inside, inner);
                             if (!inside) continue;
-                            uint8_t* d = g_host.frame.data() + (size_t(y) * ow + size_t(x)) * 3;
+                            uint8_t* d = out.data() + (size_t(y) * ow + size_t(x)) * 3;
                             for (int c = 0; c < 3; c++) d[c] = uint8_t((d[c] * (80 - inside * 3) + colour[c] * inside * 3) / 80);  // (see-through at 60%)
                         }
                 }
@@ -1073,10 +1207,8 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
         }
     }
     g_host.frame_aspect = half ? app::g_frame_aspect.load() * float(ww) / float(w) : app::g_frame_aspect.load();
-    g_host.frame_w = ow;
-    g_host.frame_h = oh;
-    g_host.frame_new = true;
-    g_host.frame_cv.notify_one();
+    out_w = ow;
+    out_h = oh;
 }
 
 // ---- discovery --------------------------------------------------------------------------------------------------
@@ -1172,25 +1304,34 @@ struct ClientState {
     Clock::time_point joined, last_frame, back_since;
     Clock::time_point first_frame;  // when the host's first picture came: it is shown a moment later (kJoiningMs)
     bool back = false;
-    // frames: assembling, and the newest decoded one (BGRA, 640 x 480 letterboxed), handed to the renderer
+    // frames: assembling, and the newest decoded one (BGRA, at its own size, with bars where this window's shape
+    // differs from the picture's), handed to the renderer
     std::mutex lock;
     std::vector<uint8_t> shown;
+    int shown_w = 0, shown_h = 0;
+    uint32_t shown_serial = 0;      // goes up with every new picture
     bool have_frame = false;
     std::vector<uint8_t> present;  // the renderer's copy
+    int present_w = 0, present_h = 0;
+    std::atomic<uint32_t> lost_percent{0};  // of the pictures of the last two seconds (told to the host)
 } g_client;
 
 // a decoded frame into the 640 x 480 BGRA frame this game shows: the picture keeps the shape it has on the host
 // (shape, width / height), centred, with bars where this game's own picture (app::g_frame_aspect) is wider or taller
-void Letterbox(const uint8_t* rgba, int w, int h, float shape, std::vector<uint8_t>& out) {
-    constexpr int W = 640, H = 480;
-    out.assign(size_t(W) * H * 4, 0);
-    for (size_t i = 3; i < out.size(); i += 4) out[i] = 255;
+// (Since 2026-11-26 the frame is as large as the picture: W x H is the picture's own size, made wider or taller only
+// by the bars. It was 640 x 480 whatever came.)
+void Letterbox(const uint8_t* rgba, int w, int h, float shape, std::vector<uint8_t>& out, int& W, int& H) {
     float mine = app::g_frame_aspect.load();
     if (mine <= 0) mine = 4.0f / 3.0f;
     if (shape <= 0) shape = float(w) / float(h);
-    int dw = W, dh = H;  // the part of the 640 x 480 frame the picture fills
-    if (shape < mine) dw = std::max(1, int(W * shape / mine + 0.5f));
-    else dh = std::max(1, int(H * mine / shape + 0.5f));
+    // this game's frame is drawn 4:3 and shown in the window's shape, as the host's is: a picture of the same shape
+    // fills it pixel for pixel
+    W = w, H = h;
+    int dw = W, dh = H;  // the part of the frame the picture fills
+    if (shape < mine * 0.995f) W = std::max(w, int(float(w) * mine / shape + 0.5f)) & ~1;
+    else if (shape > mine * 1.005f) H = std::max(h, int(float(h) * shape / mine + 0.5f)) & ~1;
+    out.assign(size_t(W) * H * 4, 0);
+    for (size_t i = 3; i < out.size(); i += 4) out[i] = 255;
     int ox = (W - dw) / 2, oy = (H - dh) / 2;
     for (int y = 0; y < dh; y++) {
         int sy2 = std::min(h - 1, y * h / dh);
@@ -1230,6 +1371,13 @@ void ClientRecv() {
     std::map<uint32_t, std::vector<std::vector<uint8_t>>> parts;
     std::map<uint32_t, uint16_t> have, last_len, size_w, size_h;
     std::map<uint32_t, std::vector<uint8_t>> repairs;  // a picture's repair packet
+    struct Group {
+        uint16_t first = 0, count = 0, last_len = 0;
+        std::vector<uint8_t> x;
+    };
+    std::map<uint32_t, std::vector<Group>> groups;     // a large picture's repair packets, one for every twelve parts
+    std::map<uint32_t, float> shapes;                  // each picture's shape, from its parts (a group packet has none)
+    std::vector<std::pair<Clock::time_point, uint32_t>> window;  // pictures shown, and lost before each, in the last 2 s
     Clock::time_point stats_at = Clock::now(), last_shown = Clock::now();
     uint32_t stat_shown = 0, stat_lost = 0, stat_repaired = 0;
     int stat_gap = 0;
@@ -1306,21 +1454,36 @@ void ClientRecv() {
             SoundIn(buf.data(), n);
             continue;
         }
-        if (n < int(kFrameHead) || std::memcmp(buf.data(), "S2C1", 4) != 0 || buf[4] != 2) continue;
         // (tests: S2_NET_DROP=<per cent> loses that share of the picture packets on the way in)
         static const int drop = std::getenv("S2_NET_DROP") ? std::atoi(std::getenv("S2_NET_DROP")) : 0;
-        if (drop && std::rand() % 100 < drop) continue;
+        bool group_packet = n >= 17 + int(kChunk) && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 11;  // a group's repair packet
         uint32_t id;
         float shape;
-        std::memcpy(&shape, &buf[19], 4);
-        uint16_t w, h, count, part, bytes;
-        std::memcpy(&id, &buf[5], 4);
-        std::memcpy(&w, &buf[9], 2);
-        std::memcpy(&h, &buf[11], 2);
-        std::memcpy(&count, &buf[13], 2);
-        std::memcpy(&part, &buf[15], 2);
-        std::memcpy(&bytes, &buf[17], 2);
-        if ((id <= shown && shown - id < 1000) || part > count || int(kFrameHead) + bytes > n) continue;
+        uint16_t w = 0, h = 0, count = 0, part = 0, bytes = 0;
+        if (group_packet) {
+            if (drop && std::rand() % 100 < drop) continue;
+            Group g;
+            std::memcpy(&id, &buf[5], 4);
+            std::memcpy(&count, &buf[9], 2);
+            std::memcpy(&g.first, &buf[11], 2), std::memcpy(&g.count, &buf[13], 2), std::memcpy(&g.last_len, &buf[15], 2);
+            if ((id <= shown && shown - id < 1000) || !count || !shapes.count(id)) continue;  // (a picture none of whose parts came)
+            g.x.assign(&buf[17], &buf[17] + kChunk);
+            auto& list = groups[id];
+            if (list.size() < 64) list.push_back(std::move(g));
+            shape = shapes[id];
+        } else {
+            if (n < int(kFrameHead) || std::memcmp(buf.data(), "S2C1", 4) != 0 || buf[4] != 2) continue;
+            if (drop && std::rand() % 100 < drop) continue;
+            std::memcpy(&shape, &buf[19], 4);
+            std::memcpy(&id, &buf[5], 4);
+            std::memcpy(&w, &buf[9], 2);
+            std::memcpy(&h, &buf[11], 2);
+            std::memcpy(&count, &buf[13], 2);
+            std::memcpy(&part, &buf[15], 2);
+            std::memcpy(&bytes, &buf[17], 2);
+            if ((id <= shown && shown - id < 1000) || part > count || int(kFrameHead) + bytes > n) continue;
+            shapes[id] = shape;
+        }
         // how the stream is doing, into the log every five seconds (the first online session, 2026-11-25, stuttered
         // for the joined player and his log could not say why)
         {
@@ -1340,7 +1503,10 @@ void ClientRecv() {
         }
         auto& p = parts[id];
         if (p.empty()) p.resize(count);
-        if (part == count) {  // the repair packet (see HostEncode)
+        if (p.size() != count) continue;
+        if (group_packet) {
+            // (stored above: what follows may complete the picture with it)
+        } else if (part == count) {  // the repair packet (see HostEncode)
             if (h != 0xFFFF || bytes != kChunk) continue;
             auto& r = repairs[id];
             r.assign(&buf[kFrameHead], &buf[kFrameHead] + bytes);
@@ -1350,6 +1516,25 @@ void ClientRecv() {
             p[part].assign(&buf[kFrameHead], &buf[kFrameHead] + bytes);
             ++have[id];
             if (w != 0 && h != 0xFFFF) size_w[id] = w, size_h[id] = h;
+        }
+        // a large picture: every group that misses one part and has its repair packet gets that part back
+        if (have[id] < count && groups.count(id)) {
+            for (const Group& g : groups[id]) {
+                if (g.first + g.count > count || g.x.size() != kChunk) continue;
+                int missing = -1, n_missing = 0;
+                for (uint16_t k = g.first; k < g.first + g.count; k++)
+                    if (p[k].empty()) missing = k, n_missing++;
+                if (n_missing != 1) continue;
+                std::vector<uint8_t> fix = g.x;
+                for (uint16_t k = g.first; k < g.first + g.count; k++) {
+                    if (k == missing) continue;
+                    for (size_t b = 0; b < p[k].size() && b < fix.size(); b++) fix[b] ^= p[k][b];
+                }
+                fix.resize(missing + 1 == count ? std::min<size_t>(g.last_len, kChunk) : kChunk);
+                p[size_t(missing)] = std::move(fix);
+                ++have[id];
+                ++stat_repaired;
+            }
         }
         if (have[id] + 1 == count && repairs.count(id)) {  // one part is missing and the repair packet is here
             std::vector<uint8_t> fix = repairs[id];
@@ -1367,7 +1552,16 @@ void ClientRecv() {
             ++stat_repaired;
         }
         if (have[id] < count) continue;
-        if (id > shown + 1 && shown) stat_lost += std::min<uint32_t>(id - shown - 1, 1000);
+        uint32_t lost_now = id > shown + 1 && shown ? std::min<uint32_t>(id - shown - 1, 1000) : 0;
+        stat_lost += lost_now;
+        {   // the share of pictures lost in the last two seconds, for the host (it makes the picture smaller)
+            Clock::time_point t = Clock::now();
+            window.push_back({t, lost_now});
+            while (!window.empty() && t - window.front().first > std::chrono::seconds(2)) window.erase(window.begin());
+            uint32_t lost_sum = 0;
+            for (const auto& w2 : window) lost_sum += w2.second;
+            g_client.lost_percent = uint32_t(std::min<size_t>(100, lost_sum * 100 / (lost_sum + window.size())));
+        }
         {
             auto now = Clock::now();
             int gap = int(std::chrono::duration_cast<std::chrono::milliseconds>(now - last_shown).count());
@@ -1379,21 +1573,39 @@ void ClientRecv() {
         for (auto& c : p) frame.insert(frame.end(), c.begin(), c.end());
         if (game_detail::On()) game_detail::Line("got %u %ux%u %zu bytes in %u parts", id, unsigned(size_w.count(id) ? size_w[id] : 0), unsigned(size_h.count(id) ? size_h[id] : 0), frame.size(), unsigned(count));
         int iw, ih, comp;
+        int64_t unpack_from = MicrosNow();
         uint8_t* px = stbi_load_from_memory(frame.data(), int(frame.size()), &iw, &ih, &comp, 4);
+        {   // the record: how long a picture takes to unpack (a large one is ten times the old one's work)
+            static uint32_t count_ = 0, worst = 0;
+            static uint64_t sum = 0;
+            static Clock::time_point said = Clock::now();
+            uint32_t us = uint32_t(MicrosNow() - unpack_from);
+            count_++, sum += us, worst = std::max(worst, us);
+            if (Clock::now() - said >= std::chrono::seconds(5)) {
+                LOGI("net: joined: the pictures are %d x %d, %zu kB each, %.1f ms to unpack (%.1f at worst); lost %u%% of the last two seconds' pictures", iw, ih,
+                     frame.size() / 1024, sum / 1000.0 / count_, worst / 1000.0, g_client.lost_percent.load());
+                said = Clock::now(), count_ = 0, sum = 0, worst = 0;
+            }
+        }
         for (auto it = parts.begin(); it != parts.end();) it = it->first <= id ? parts.erase(it) : std::next(it);
         for (auto it = have.begin(); it != have.end();) it = it->first <= id ? have.erase(it) : std::next(it);
         for (auto it = repairs.begin(); it != repairs.end();) it = it->first <= id ? repairs.erase(it) : std::next(it);
+        for (auto it = groups.begin(); it != groups.end();) it = it->first <= id ? groups.erase(it) : std::next(it);
+        for (auto it = shapes.begin(); it != shapes.end();) it = it->first <= id ? shapes.erase(it) : std::next(it);
         for (auto it = last_len.begin(); it != last_len.end();) it = it->first <= id ? last_len.erase(it) : std::next(it);
         size_w.clear(), size_h.clear();
         shown = id;
         if (!px) continue;
         std::vector<uint8_t> boxed;
-        Letterbox(px, iw, ih, shape, boxed);
+        int bw = 0, bh = 0;
+        Letterbox(px, iw, ih, shape, boxed, bw, bh);
         stbi_image_free(px);
         std::lock_guard l(g_client.lock);
         if (!g_client.have_frame) LOGR("coop: joined %s, first picture in", g_client.name.c_str());
         if (!g_client.have_frame) g_client.first_frame = Clock::now();
         g_client.shown.swap(boxed);
+        g_client.shown_w = bw, g_client.shown_h = bh;
+        g_client.shown_serial++;
         g_client.have_frame = true;
         g_client.last_frame = Clock::now();
     }
@@ -1402,7 +1614,7 @@ void ClientRecv() {
 // Words over the host's picture on the joiner's PC, in a strip at the top: capital letters of 5 x 7 dots, drawn twice
 // their size. The game's own font cannot be used here: the picture goes over the joiner's whole frame after his
 // game has drawn. (640 x 480 BGRA)
-void Strip(std::vector<uint8_t>& px, const char* line1, const char* line2) {
+void Strip(std::vector<uint8_t>& px, int W, int H, const char* line1, const char* line2) {
     static const struct {
         char c;
         uint8_t rows[7];
@@ -1422,12 +1634,13 @@ void Strip(std::vector<uint8_t>& px, const char* line1, const char* line2) {
         {'.', {0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x06}}, {':', {0x00, 0x06, 0x06, 0x00, 0x06, 0x06, 0x00}}, {'-', {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}},
         {'\'', {0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00}}, {',', {0x00, 0x00, 0x00, 0x00, 0x06, 0x06, 0x0C}},
     };
-    constexpr int W = 640, H = 480, kBand = 46, kScale = 2, kStep = 6 * kScale;
-    if (px.size() < size_t(W) * H * 4) return;
+    // (laid out for 480 rows and made larger with the picture)
+    if (W < 320 || H < 240 || px.size() < size_t(W) * H * 4) return;
+    const int unit = std::max(1, (H + 240) / 480), kBand = 46 * unit, kScale = 2 * unit, kStep = 6 * kScale;
     for (int y = 0; y < kBand; y++)  // a dark band, fading out at its lower edge
         for (int x = 0; x < W; x++) {
             uint8_t* p = &px[(size_t(y) * W + x) * 4];
-            int keep = y < kBand - 10 ? 70 : 70 + (y - (kBand - 10)) * 18;  // of 256
+            int keep = y < kBand - 10 * unit ? 70 : 70 + (y - (kBand - 10 * unit)) * 18 / unit;  // of 256
             p[0] = uint8_t(p[0] * keep / 256), p[1] = uint8_t(p[1] * keep / 256), p[2] = uint8_t(p[2] * keep / 256);
         }
     auto dot = [&](int x, int y, uint8_t b, uint8_t g, uint8_t r) {
@@ -1447,51 +1660,66 @@ void Strip(std::vector<uint8_t>& px, const char* line1, const char* line2) {
                                 for (int sy = 0; sy < kScale; sy++)
                                     for (int sx = 0; sx < kScale; sx++) {
                                         int x = x0 + rx * kScale + sx, y = top + ry * kScale + sy;
-                                        if (pass == 0) dot(x + 1, y + 1, 0, 0, 0);
+                                        if (pass == 0) dot(x + unit, y + unit, 0, 0, 0);
                                         else dot(x, y, b, g, r);
                                     }
                 break;
             }
     };
-    line(line1, 6, 0xC8, 0xE6, 0xF0);   // (the menus' pale yellow)
-    line(line2, 24, 0xB0, 0xB0, 0xB0);
+    line(line1, 6 * unit, 0xC8, 0xE6, 0xF0);   // (the menus' pale yellow)
+    line(line2, 24 * unit, 0xB0, 0xB0, 0xB0);
 }
 
-// the renderer, each present while joined: the host's picture over the joiner's own (BGRA, 640 x 480)
+// the renderer, each present while joined: the host's picture over the joiner's own (BGRA, at the picture's size).
+// The renderer keeps its texture of it while gpu::g_present_override_serial stays: the copy is made, and the number
+// moved, only when a new picture came or the words over it change.
 const uint8_t* Present(uint32_t& w, uint32_t& h) {
     if (!g_client.run) return nullptr;
     std::lock_guard l(g_client.lock);
     if (!g_client.have_frame) return nullptr;
     // (the joiner's own screen says "joining" for a moment first: cut straight from his menu to the middle of the
     // host's game, he could not tell what had happened; the owner's first online session, 2026-11-25)
-    bool menus = Clock::now() - g_host_waits.load() < std::chrono::milliseconds(3000);
-    if (Clock::now() - g_client.first_frame < std::chrono::milliseconds(menus ? kJoiningMs / 3 : kJoiningMs)) return nullptr;
-    g_client.present = g_client.shown;
-    // the host is still in his menus: the friend watches them, and is told so
-    if (Clock::now() - g_host_waits.load() < std::chrono::milliseconds(3000))
-        Strip(g_client.present, "CONNECTED TO YOUR FRIEND'S GAME", "YOU PLAY WHEN THE GAME STARTS. HOLD BACK TO LEAVE.");
-    else if (Clock::now() - g_host_scene.load() < std::chrono::milliseconds(2500) && Clock::now() - g_host_scene_since.load() < std::chrono::seconds(6))
-        Strip(g_client.present, "A SCENE IS PLAYING. THIS IS PLAYER 1'S VIEW.", "YOU PLAY AGAIN WHEN IT ENDS.");
+    Clock::time_point now = Clock::now();
+    bool menus = now - g_host_waits.load() < std::chrono::milliseconds(3000);
+    if (now - g_client.first_frame < std::chrono::milliseconds(menus ? kJoiningMs / 3 : kJoiningMs)) return nullptr;
+    // which words go over it: 1 the host is still in his menus, 2 a scene shows Player 1's view (its first seconds)
+    int words = menus ? 1 : now - g_host_scene.load() < std::chrono::milliseconds(2500) && now - g_host_scene_since.load() < std::chrono::seconds(6) ? 2 : 0;
+    static uint32_t made_serial = 0, serial = 0;
+    static int made_words = -1;
+    if (g_client.shown_serial != made_serial || words != made_words || g_client.present.empty()) {
+        made_serial = g_client.shown_serial, made_words = words;
+        g_client.present = g_client.shown;
+        g_client.present_w = g_client.shown_w, g_client.present_h = g_client.shown_h;
+        if (words == 1) Strip(g_client.present, g_client.present_w, g_client.present_h, "CONNECTED TO YOUR FRIEND'S GAME", "YOU PLAY WHEN THE GAME STARTS. HOLD BACK TO LEAVE.");
+        if (words == 2) Strip(g_client.present, g_client.present_w, g_client.present_h, "A SCENE IS PLAYING. THIS IS PLAYER 1'S VIEW.", "YOU PLAY AGAIN WHEN IT ENDS.");
+        gpu::g_present_override_serial = ++serial ? serial : ++serial;
+    }
+    int pw = g_client.present_w, ph = g_client.present_h;
+    if (pw <= 0 || ph <= 0 || g_client.present.size() < size_t(pw) * ph * 4) return nullptr;
     static uint32_t calls = 0;
     if (++calls % 300 == 1) {  // (a check now and then: is there a picture in it)
         uint64_t sum = 0;
-        for (size_t i = 0; i < g_client.present.size(); i += 4 * 37) sum += g_client.present[i] + g_client.present[i + 1] + g_client.present[i + 2];
-        LOGI("coop: showing the host's picture (present %u, average level %.1f of 255)", calls,
+        for (size_t i = 0; i + 2 < g_client.present.size(); i += 4 * 37) sum += g_client.present[i] + g_client.present[i + 1] + g_client.present[i + 2];
+        LOGI("coop: showing the host's picture (present %u, %d x %d, average level %.1f of 255)", calls, pw, ph,
              double(sum) / double(g_client.present.size() / (4 * 37) * 3 + 1));
     }
+    auto dump = [&](const std::string& path) {
+        if (FILE* f = std::fopen(path.c_str(), "wb")) {
+            uint32_t bytes = uint32_t(pw) * uint32_t(ph) * 4u;
+            uint32_t head[13] = {bytes + 54u, 0, 54, 40, uint32_t(pw), uint32_t(-ph), 1u | (32u << 16), 0, bytes, 2835, 2835, 0, 0};
+            std::fwrite("BM", 1, 2, f);
+            std::fwrite(head, 4, 13, f);
+            std::fwrite(g_client.present.data(), 1, bytes, f);
+            std::fclose(f);
+            return true;
+        }
+        return false;
+    };
     // S2_JOIN_DUMP=<file>: the picture handed to the renderer 20 seconds after joining, as a .bmp (tests: the
     // joiner's own frame capture is taken before this picture goes over it)
     if (calls == 1200) {
-        if (const char* path = std::getenv("S2_JOIN_DUMP")) {
-            if (FILE* f = std::fopen(path, "wb")) {
-                uint32_t head[13] = {640u * 480u * 4u + 54u, 0, 54, 40, 640, uint32_t(-480), 1u | (32u << 16), 0, 640u * 480u * 4u, 2835, 2835, 0, 0};
-                std::fwrite("BM", 1, 2, f);
-                std::fwrite(head, 4, 13, f);
-                std::fwrite(g_client.present.data(), 1, g_client.present.size(), f);
-                std::fclose(f);
-                LOGI("coop: the picture shown was written to %s", path);
-            }
-        }
+        if (const char* path = std::getenv("S2_JOIN_DUMP"))
+            if (dump(path)) LOGI("coop: the picture shown was written to %s", path);
     }
     // S2_JOIN_DUMPS=<seconds,seconds,...> (with S2_JOIN_DUMP): the picture shown at those seconds after the first
     // one, as <file>_<seconds>.bmp (tests: what the joined player sees through a scene, a pause, a level change)
@@ -1513,18 +1741,12 @@ const uint8_t* Present(uint32_t& w, uint32_t& h) {
             std::string name = std::string(path);
             if (name.size() > 4) name = name.substr(0, name.size() - 4);
             name += "_" + std::to_string(times[next]) + ".bmp";
-            if (FILE* f = std::fopen(name.c_str(), "wb")) {
-                uint32_t head[13] = {640u * 480u * 4u + 54u, 0, 54, 40, 640, uint32_t(-480), 1u | (32u << 16), 0, 640u * 480u * 4u, 2835, 2835, 0, 0};
-                std::fwrite("BM", 1, 2, f);
-                std::fwrite(head, 4, 13, f);
-                std::fwrite(g_client.present.data(), 1, g_client.present.size(), f);
-                std::fclose(f);
-            }
+            dump(name);
             next++;
         }
     }
-    w = 640;
-    h = 480;
+    w = uint32_t(pw);
+    h = uint32_t(ph);
     return g_client.present.data();
 }
 
@@ -1950,7 +2172,10 @@ void ClientPad(const input::Pad& p) {
         StopClient();
         return;
     }
-    uint8_t pkt[30];  // (byte 29: this player's volume for the host's sound, for the host's menu to show)
+    // (byte 29: this player's volume for the host's sound, for the host's menu to show. Since 2026-11-26, bytes 30
+    // to 35: this window's picture area, the share of pictures lost in the last two seconds, and 1 for "this copy
+    // takes large pictures": the host makes Player 2's picture as large as this window, see PictureRows)
+    uint8_t pkt[36];
     std::memcpy(pkt, "S2C1", 4);
     pkt[4] = 1;
     uint32_t seq = ++g_client.seq;
@@ -1974,6 +2199,24 @@ void ClientPad(const input::Pad& p) {
     pkt[27] = uint8_t(game_coop::g_p2_invert ? 1 : 0);
     pkt[28] = uint8_t(std::clamp<uint32_t>(game_coop::g_p2_speed, 40, 100));
     pkt[29] = uint8_t(std::min<uint32_t>(game_coop::g_p2_volume, 100));
+    {
+        static uint16_t cw = 0, ch = 0;
+        static Clock::time_point read{};
+#ifdef _WIN32
+        if (now - read > std::chrono::milliseconds(500)) {
+            read = now;
+            RECT rc{};
+            if (GetClientRect(static_cast<HWND>(app::Window()), &rc) && rc.right > 0 && rc.bottom > 0) cw = uint16_t(std::min<LONG>(rc.right, 65535)), ch = uint16_t(std::min<LONG>(rc.bottom, 65535));
+        }
+#endif
+        // (tests: S2_TEST_WINDOW_ROWS=<n> says the window has that many rows, whatever it has)
+        static const int rows = std::getenv("S2_TEST_WINDOW_ROWS") ? std::atoi(std::getenv("S2_TEST_WINDOW_ROWS")) : 0;
+        uint16_t sw = cw, sh = rows > 0 ? uint16_t(rows) : ch;
+        std::memcpy(pkt + 30, &sw, 2);
+        std::memcpy(pkt + 32, &sh, 2);
+        pkt[34] = uint8_t(std::min<uint32_t>(g_client.lost_percent.load(), 100));
+        pkt[35] = 1;
+    }
     sockaddr_in to;
     {
         std::lock_guard l(g_client.lock);  // (Retarget changes it from other threads)

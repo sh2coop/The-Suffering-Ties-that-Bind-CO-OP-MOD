@@ -800,6 +800,11 @@ private:
     // [local change, The Suffering: Ties That Bind] the stream's snapshots: a ring of their own, read into snap_px_
     Late snap_;
     std::vector<uint8_t> snap_px_;              // the newest finished one, BGRA, rows gw * 4 apart
+    // [local change, The Suffering: Ties That Bind] the present override's picture as a texture, kept while its
+    // serial (g_present_override_serial) stays
+    ComPtr<ID3D12Resource> ov_tex_;
+    uint32_t ov_serial_ = 0, ov_w_ = 0, ov_h_ = 0;
+    uint32_t snap_misses_ = 0;  // presents in a row without a fresh snapshot while the stream wants snapshots
     bool DeliverSnapshot();
     std::atomic<uint64_t> presents_seen_{0};    // presents_ for DeliverLate
     std::atomic<uint64_t> present_fence_[kFrames + 1] = {};  // by presents_, for WaitGpuFrame
@@ -3638,13 +3643,21 @@ void D3D12Backend::Present(const Surface& front) {
     if (PresentOverride ov = g_present_override.load(); ov && t) {
         uint32_t ow = 0, oh = 0;
         if (const uint8_t* px = ov(ow, oh)) {
-            std::vector<uint8_t> copy(px, px + size_t(ow) * oh * 4);
-            ComPtr<ID3D12Resource> tex = CreatePixelTexture(copy, ow * 4, ow, oh);
+            // [local change, The Suffering: Ties That Bind] the texture is kept while the picture's serial stays
+            uint32_t serial = g_present_override_serial.load();
+            if (!serial || serial != ov_serial_ || !ov_tex_ || ow != ov_w_ || oh != ov_h_) {
+                std::vector<uint8_t> copy(px, px + size_t(ow) * oh * 4);
+                if (ov_tex_) CurrentFrame().garbage.push_back(ov_tex_);
+                ov_tex_ = CreatePixelTexture(copy, ow * 4, ow, oh);
+                ov_serial_ = serial, ov_w_ = ow, ov_h_ = oh;
+            }
             Transition(t->res.Get(), t->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
             SetBlitTarget(Cpu(rtv_heap_.Get(), t->view, rtv_inc_), t->w, t->h);
             float uv[4] = {0, 0, 1, 1};
-            Blit(tex.Get(), kBgra, uv, {.alpha = true, .mul = 1 / t->range, .rtv = t->fmt});
-            CurrentFrame().garbage.push_back(tex);
+            Blit(ov_tex_.Get(), kBgra, uv, {.alpha = true, .mul = 1 / t->range, .rtv = t->fmt});
+        } else if (ov_tex_) {
+            CurrentFrame().garbage.push_back(ov_tex_);
+            ov_tex_ = nullptr;
         }
     }
     if (t) Resolve(*t);
@@ -3654,9 +3667,11 @@ void D3D12Backend::Present(const Surface& front) {
         // the late ring are keyed by the virtual one (FindTargetSlot). With the field used as it is, a title whose
         // frame buffers sit at a physical address (this one: 0x03C6C000) never had a frame handed to the sink.
         uint32_t data = mem::VirtualFromPhysical(front.data);
-        if (g_stream_snapshot.load()) {
-            // [local change, The Suffering: Ties That Bind] the picture is one taken inside the frame (StreamSnapshot)
-            if (DeliverSnapshot()) sink(snap_px_.data(), snap_.gw, snap_.gh, snap_.gw * 4);
+        if (g_stream_snapshot.load() && (DeliverSnapshot() ? (snap_misses_ = 0, true) : ++snap_misses_ <= 30)) {
+            // [local change, The Suffering: Ties That Bind] the picture is one taken inside the frame (StreamSnapshot).
+            // (When none has been taken for thirty presents, the title is drawing some other way, a film for one:
+            // the finished frame goes to the sink meanwhile, as it does without snapshots.)
+            if (!snap_misses_) sink(snap_px_.data(), snap_.gw, snap_.gh, snap_.gw * 4);
         } else {
             if (DeliverLate(data)) sink(static_cast<const uint8_t*>(kernel::HostPtr(data)), t->gw, t->gh, GuestPitch(t->gw));
             RecordLate(data);
@@ -3928,10 +3943,32 @@ void D3D12Backend::StreamSnapshot(uint32_t data) {
     Target& t = it->second;
     std::lock_guard lock(late_lock_);
     Late& l = snap_;
-    if (l.gw != t.gw || l.gh != t.gh) ResetLate(l, t);
+    // [local change, The Suffering: Ties That Bind] at the rows asked for (g_stream_snapshot_rows), when the host's
+    // target has more than the console frame: the copy is filtered to that size and not to the console's
+    uint32_t rows = g_stream_snapshot_rows.load(), sw = t.gw, sh = t.gh;
+    if (rows > t.gh && t.h > t.gh) {
+        sh = std::min(rows, t.h) & ~1u;
+        sw = std::max(2u, uint32_t(uint64_t(t.w) * sh / t.h)) & ~1u;
+    }
+    if (l.gw != sw || l.gh != sh) {
+        ResetLate(l, t);
+        l.gw = sw, l.gh = sh;
+    }
     uint32_t slot = l.next;
     if (l.fence[slot] > fence_->GetCompletedValue()) return;  // the GPU is a whole ring behind
-    ID3D12Resource* src = PrepareLateSource(t, l);
+    ID3D12Resource* src = nullptr;
+    if (sw == t.gw && sh == t.gh) {
+        src = PrepareLateSource(t, l);
+    } else {
+        Resolve(t);
+        ShrinkOptions reuse{.taps = uint32_t(std::ceil(float(t.h) / float(sh) - 0.01f)), .into = l.down.Get(), .into_state = l.down_state};
+        ComPtr<ID3D12Resource> down = Shrink(t.res.Get(), t.state, t.fmt, sw, sh, reuse);
+        if (down) {
+            l.down = down;
+            l.down_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            src = down.Get();
+        }
+    }
     if (!src) return;
     RecordLateCopy(l, slot, src);
 }

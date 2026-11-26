@@ -1669,6 +1669,22 @@ void Frame(X86Context& ctx) {
     static const bool forced = std::getenv("S2_COOP") != nullptr;
     ++g_frames;
     DetailFrame(ctx);
+    {   // tests: S2_FP_PROBE=<frame>: Player 1's model, its resource and his skeleton at that frame and 180 frames later
+        // (a script goes into first person in between): what the first-person model shares with the body
+        static const uint64_t probe = std::getenv("S2_FP_PROBE") ? uint64_t(std::atoll(std::getenv("S2_FP_PROBE"))) : 0;
+        if (probe && (g_frames == probe || g_frames == probe + 180) && g_player && g_player_object) {
+            uint32_t o = g_player_object, res = kernel::R32(o + 0x68), sk = kernel::R32(o + 0xE8);
+            LOGR("fp probe: frame %llu: object %08X model id %08X resource %08X skeleton %08X; Player +760 %08X +764 %08X +768 %08X +76C %08X; state %08X",
+                 (unsigned long long)g_frames, o, kernel::R32(o + 0x64), res, sk, kernel::R32(g_player + 0x760), kernel::R32(g_player + 0x764),
+                 kernel::R32(g_player + 0x768), kernel::R32(g_player + 0x76C), kernel::R32(g_player + 0xBC));
+            if (res && mem::IsCommitted(res + 0x80)) Dump("fp probe resource", res, 0x80);
+            if (sk && mem::IsCommitted(sk + 0xC0)) Dump("fp probe skeleton", sk, 0xC0);
+            for (uint32_t at : {0x760u, 0x764u}) {
+                uint32_t r = kernel::R32(g_player + at);
+                if (r && mem::IsCommitted(r + 0x80)) Dump(at == 0x760 ? "fp probe +760" : "fp probe +764", r, 0x80);
+            }
+        }
+    }
     {   // tests: S2_TEST_MARK=<frame> asks for a mark at that frame, as F9 does
         static const uint64_t mark_at = std::getenv("S2_TEST_MARK") ? uint64_t(std::atoll(std::getenv("S2_TEST_MARK"))) : 0;
         if (mark_at && g_frames == mark_at) game_record::Mark("a test asked");
@@ -1808,6 +1824,10 @@ void Frame(X86Context& ctx) {
             g_paused_now = paused;
             if (g_stream_view) gpu::g_stream_snapshot = !paused && !g_one_view && ViewCamera2();
         }
+        // In a scene the joined player's picture is this PC's finished frame. The renderer's read-back of a finished
+        // frame is the console's 640 x 480; when his picture is a large one (gpu::g_stream_snapshot_rows, net.cpp) it
+        // is taken at that size instead, at the end of the camera loop (0x1B83E0, below).
+        if (g_stream_view && ViewCamera2() && !paused) gpu::g_stream_snapshot = !g_one_view || gpu::g_stream_snapshot_rows.load() > 0;
         int before = g_pauser.load();
         if (paused && !before) {
             bool second = std::chrono::steady_clock::now() - g_start2_at < std::chrono::milliseconds(700);
@@ -2342,6 +2362,17 @@ X86_FUNC(sub_001B83E0) {
         if (++drew % 600 == 1) LOGI("coop: Player 2's view for the stream: drawn %u times, left out of %u frames", drew, skipped);
     }
     __imp__sub_001B83E0(ctx, base);
+    // a scene online with a large picture for the joined player: this frame, finished, about thirty times a second
+    if (g_stream_view && g_one_view && !g_paused_now && ViewCamera2() && gpu::g_stream_snapshot.load() && gpu::g_stream_snapshot_rows.load() > 0) {
+        static std::chrono::steady_clock::time_point taken{};
+        static uint32_t count = 0;
+        auto now = std::chrono::steady_clock::now();
+        if (now - taken >= std::chrono::milliseconds(30)) {
+            taken = now;
+            gpu::SnapshotForStream();
+            if (++count % 900 == 1) LOGI("coop: a scene: the joined player's picture is this PC's finished frame, taken at his picture's size (%u so far)", count);
+        }
+    }
 }
 
 // A view camera ends (this = view camera): it releases its texture. Player 2's has none to release.

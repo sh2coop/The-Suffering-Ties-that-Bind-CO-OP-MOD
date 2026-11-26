@@ -17,15 +17,21 @@ GOOD TO KNOW
 
 CO-OP
 
-  In the game: Options, then "Display and Co-op".
+  On the main menu: "Co-op" opens "Play with a Friend". (In a game: Options, "Display and Co-op".)
   - Split screen: two controllers on one PC. Controller 1 is Player 1.
   - Online, no port forwarding needed:
-      1. The host picks "Host online". His screen shows "Your code". He sends it to his friend.
-      2. The friend picks "Join online", presses A on "Host's code" and enters it (Ctrl+V pastes).
-         His screen then shows his own code. He sends that back.
-      3. The host presses A on "Your code" and enters the friend's code. The friend comes in.
-    If a screen says the router gives every connection a new port, forward UDP port 27025 on
-    the host's router instead and enter the plain address.
+      1. The host picks "Invite a friend". His screen shows a short code such as WOLF-4271.
+         He sends it to his friend (X or Ctrl+C copies it).
+      2. The friend picks "Join a friend" and enters the code (Y or Ctrl+V pastes it).
+         He is in. While the host is still in his menus the friend watches them.
+    The host's PC runs the game and sends the friend his picture and sound. The picture is as
+    sharp as the friend's window, up to 1080 rows, and gets smaller by itself when the connection
+    loses pictures. The limit is "friend_picture_rows" in Game Files\settings.toml on the host's
+    PC (480 to 2160). A picture of 1080 rows needs about 20 to 40 Mbit/s of the host's upload.
+    The short code comes from a small meeting point on the internet. When it cannot be reached
+    the screens offer address codes instead: each player sends the other his code. If a screen
+    says the router gives every connection a new port, forward UDP port 27025 on the host's
+    router and enter the plain address.
 
   - Player 2 stuck or left behind? Hold A+B+X+Y for five seconds (keyboard: T) and he is beside Player 1.
   - Either player can pause. Leaving an online game: hold BACK (keyboard: Backspace) for two seconds.
