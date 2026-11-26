@@ -350,8 +350,19 @@ struct Return {
     bool valid = false;
     uint8_t matrix[64] = {};
     float health = 0;
+    float most = 0;       // ... of this most: he comes back with the same share of his new most
+    float meter = 0;      // his insanity meter
+    bool beside = false;  // a scene was on when the game saved: he comes back beside Player 1, not where he stood
 };
 Return g_return;
+// What Player 2 takes into the next level (a level exit ends him and the next level makes him anew): the share of
+// his health and his insanity meter. Until 2026-11-26 he came into every level with full health and an empty meter.
+struct Carry {
+    bool valid = false;
+    float share = 1.0f, meter = 0;
+    std::chrono::steady_clock::time_point at{};
+};
+Carry g_carry;
 
 void SpawnSecond(X86Context& ctx) {
     static uint32_t matrix = mem::AllocSystem(64);
@@ -360,7 +371,10 @@ void SpawnSecond(X86Context& ctx) {
     for (int i = 0; i < 3; i++) pos[i] = ReadF(g_player_object + kPosition + i * 4) + ReadF(g_player_object + kMatrix + i * 4);  // + right
     std::memcpy(kernel::HostPtr(matrix + 0x30), pos, 12);
     bool back = g_return.valid;
-    if (back) {  // back where he stood when the game saved
+    // back where he stood when the game saved. (Not when a scene was on at that moment: in suffering2_011.log the
+    // harbor's ride carried Player 1 55 m, the game saved at its end, and Player 2 was made again at the level's
+    // start, 60 m behind, with nothing left to bring him over.)
+    if (back && !g_return.beside) {
         std::memcpy(kernel::HostPtr(matrix), g_return.matrix, 64);
         std::memcpy(pos, g_return.matrix + 0x30, 12);
     }
@@ -378,7 +392,25 @@ void SpawnSecond(X86Context& ctx) {
         std::memset(g_stick2 + 0x18, 0, kMoveStickBytes - 0x18);
         uint32_t one = 1;
         std::memcpy(g_stick2 + 4, &one, 4);
-        if (back && g_return.health > 0) std::memcpy(kernel::HostPtr(g_second + 0x16), &g_return.health, 4);
+        // His health as the same share of the new Player's most. (Until 2026-11-26 the number itself was written:
+        // the new Player's most is the game's 200 until it is set to Player 1's / 1.3 a frame later, "the same
+        // share of it", so 154 of 154 came back as 154 of 200 = 118 of 154. A quarter of his health went at every
+        // save: four times in suffering2_011.log.)
+        float most = ReadF(g_second + 0x1A);
+        bool carried = !back && g_carry.valid && std::chrono::steady_clock::now() - g_carry.at < std::chrono::seconds(120);
+        if (back && g_return.health > 0 && g_return.most > 0 && most > 0) {
+            float health = std::min(most, g_return.health * most / g_return.most);
+            std::memcpy(kernel::HostPtr(g_second + 0x16), &health, 4);
+            std::memcpy(kernel::HostPtr(g_second + 0x48A), &g_return.meter, 4);
+            LOGI("coop: Player 2 is back after the save with the health he had (%.0f of %.0f) and his meter (%.0f)%s", g_return.health, g_return.most,
+                 g_return.meter, g_return.beside ? ", beside Player 1: a scene was on" : "");
+        } else if (carried && most > 0) {
+            float health = std::clamp(g_carry.share, 0.05f, 1.0f) * most;
+            std::memcpy(kernel::HostPtr(g_second + 0x16), &health, 4);
+            std::memcpy(kernel::HostPtr(g_second + 0x48A), &g_carry.meter, 4);
+            LOGI("coop: Player 2 comes into the level with what he left the last one with: %.0f%% of his health, meter %.0f", g_carry.share * 100.0f, g_carry.meter);
+        }
+        g_carry.valid = false;
     }
     g_return.valid = false;
     logx::Flush();
@@ -506,6 +538,9 @@ void BeforeSave(X86Context& ctx) {
     g_return.valid = true;
     std::memcpy(g_return.matrix, kernel::HostPtr(g_second_object + kMatrix), 64);
     g_return.health = g_down_until ? 0.0f : ReadF(g_second + 0x16);
+    g_return.most = ReadF(g_second + 0x1A);
+    g_return.meter = ReadF(g_second + 0x48A);
+    g_return.beside = g_one_view;
     EndSecond(ctx, "the game is saving: he is not saved");
 }
 
@@ -617,7 +652,10 @@ bool InScene() {
     // (Bit 0x80000 is not a sequence: it is the creature form, 0x2B230 sets it. Until 2026-11-25 it counted too, and
     // Player 2 lost his view and his controls for as long as Player 1 was transformed: run form1, 20 s. Bit 0x40000
     // is set while he changes into it and back, about half a second and three seconds.)
-    if (g_player && (kernel::R32(g_player + 0xBC) & 0x40000)) return g_scene_why = "Player 1 is in a scripted sequence (or changing form)", true;
+    // (Since 2026-11-26 bit 0x40000 is not a scene either. It is the Player's state 18, entered with 0x25CD0(0x12)
+    // from two places only, both changes of form: 0x2B230 (the story's, and the change back) and 0x1C21E. Counted as
+    // a scene, every change of Player 1's form took Player 2's view for up to three seconds and, when he was more
+    // than 12 m away, put him beside Player 1: the same fault as the doors. Real scenes are found by the rules above.)
     // ... or Player 1 is carried off on something he is mounted on (bit 0x200000 of the same flags is set from the
     // moment he is on the truck's gun in chapter 10; run truck1: the truck drove him 250 m away and Player 2 stood
     // where the level began). A mount that stays where it is leaves Player 2 free: it only counts once he is more
@@ -1319,7 +1357,11 @@ void Frame(X86Context& ctx) {
     }
     {   // the pause menu came up or went: timer flag bit 0 is "the game's time is stopped"
         uint32_t timer = kernel::R32(0x384B78);
-        bool paused = timer && (kernel::R32(timer + 0xA0) & 1) && g_second_object;
+        // (for more than a moment: the game also stops its time for a frame or two at a security monitor and when
+        // a level starts, which read as "Player 1 paused the game" for 10 to 30 ms in suffering2_011.log)
+        static int stopped = 0;
+        stopped = timer && (kernel::R32(timer + 0xA0) & 1) && g_second_object ? stopped + 1 : 0;
+        bool paused = stopped >= 6;
         if (paused != g_paused_now) {
             g_paused_now = paused;
             if (g_stream_view) gpu::g_stream_snapshot = !paused && !g_one_view && ViewCamera2();
@@ -1442,7 +1484,7 @@ void Frame(X86Context& ctx) {
             const char* on;
             const char* off;
         } kStates[] = {{0x8000, "goes into first person", "leaves first person"},
-                       {0x40000, "is taken over by a scripted moment", "is his own again after a scripted moment"},
+                       {0x40000, "begins to change form", "has changed form"},
                        {0x200000, "uses something (a door, ladder, switch or the like)", "is done using it"},
                        {0x400000, "looks at a security monitor", "leaves the security monitor"}};
         const uint32_t players[2] = {g_player, g_second};
@@ -2492,6 +2534,12 @@ X86_FUNC(sub_00160D20) {
     if (game_coop::g_second_object) {
         uint32_t ecx = ctx.ecx;
         game_coop::g_return.valid = false;
+        if (game_coop::g_second && mem::IsCommitted(game_coop::g_second + 0x490) && game_coop::ReadF(game_coop::g_second + 0x1A) > 0) {
+            game_coop::g_carry.valid = true;
+            game_coop::g_carry.share = game_coop::ReadF(game_coop::g_second + 0x16) / game_coop::ReadF(game_coop::g_second + 0x1A);
+            game_coop::g_carry.meter = game_coop::ReadF(game_coop::g_second + 0x48A);
+            game_coop::g_carry.at = std::chrono::steady_clock::now();
+        }
         game_coop::EndSecond(ctx, "a level exit: the exit is the one-player exit");
         ctx.ecx = game_coop::kObjectManager;  // the ended objects are freed now (what the game's save does first)
         kernel::CallGuest(ctx, 0x18DDB0, {});
@@ -2769,6 +2817,17 @@ void TestMeter(X86Context& ctx) {
     }
     TestStoryForm(ctx);
     StoryHold(ctx);
+    {   // S2_TEST_SAVEOUT=<frame>: Player 2's health to 60% and his meter to 40 at that frame; 60 frames later he is
+        // taken out as for a save (BeforeSave) and comes back by himself: with what he had?
+        static const uint64_t at = std::getenv("S2_TEST_SAVEOUT") ? uint64_t(std::atoll(std::getenv("S2_TEST_SAVEOUT"))) : 0;
+        if (at && g_second && g_frames == at) {
+            float health = ReadF(g_second + 0x1A) * 0.6f, meter = 40.0f;
+            std::memcpy(kernel::HostPtr(g_second + 0x16), &health, 4);
+            std::memcpy(kernel::HostPtr(g_second + 0x48A), &meter, 4);
+            LOGR("test: Player 2's health set to %.0f of %.0f, his meter to 40", health, ReadF(g_second + 0x1A));
+        }
+        if (at && g_second && g_frames == at + 60) LOGR("test: Player 2 is taken out as for a save"), BeforeSave(ctx);
+    }
     static uint32_t form[2] = {0, 0};
     uint32_t players[2] = {g_player, g_second};
     for (int i = 0; i < 2; i++) {

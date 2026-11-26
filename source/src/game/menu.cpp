@@ -1366,7 +1366,26 @@ X86_FUNC(sub_0014BF00) {
 // property 0x0D of the main menu's own resource (0x154570; the resource's handle at [0x376B98], 0x15E310 loads it).
 namespace game_menu {
 constexpr char kFriendsName[] = "Co-op";  // (the place holds a word as long as "Friends": "Play with a Friend" ran into "Archives")
+// The main menu writes "Sign-in failed" in its corner: the console's online service, which is not there. The
+// line's widget is hidden while it says so (seen in every picture of the main menu, 2026-11-26).
+void HideSignIn(X86Context& ctx, uint32_t menu) {
+    uint32_t children = kernel::R32(menu + kChildren), count = kernel::R32(menu + kCount);
+    for (uint32_t i = 0; children && i < count && i < 64; i++) {
+        uint32_t w = kernel::R32(children + i * 4);
+        if (!w || !mem::IsCommitted(w + kTextId + 4) || kernel::R32(w) != kTextMethods || kernel::R32(w + kState) == kHidden) continue;
+        uint32_t at = kernel::R32(w + kString), size = kernel::R32(w + kStringSize);
+        if (!at || size < 8 || size > 40 || !mem::IsCommitted(at + size * 2)) continue;
+        static const char kSays[] = "sign-in";
+        bool same = true;
+        for (uint32_t k = 0; k < 7 && same; k++) same = std::tolower(int(kernel::R16(at + k * 2) & 0xFF)) == kSays[k];
+        if (!same) continue;
+        Method(ctx, w, kSetState, {kHidden});
+        static bool said = false;
+        if (!said) said = true, LOGI("menu: the main menu's sign-in line (the console's online service) is hidden");
+    }
+}
 void FriendsEntry(X86Context& ctx, uint32_t menu) {
+    HideSignIn(ctx, menu);
     static uint32_t named = 0;
     if (named == menu) return;
     // (the entries' words are text widgets among the menu's children; they get their strings some frames after the

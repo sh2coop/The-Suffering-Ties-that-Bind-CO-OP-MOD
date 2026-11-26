@@ -1,1 +1,1 @@
-48 2026-11-25 Any button now skips the logo films and the title screen when the game starts.
+49 2026-11-25 Review fixes: Player 2 keeps his health and meter over saves and level changes, is not left behind after a ride, and keeps his view when Player 1 transforms.
