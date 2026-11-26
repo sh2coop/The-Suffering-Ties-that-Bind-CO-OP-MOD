@@ -50,6 +50,7 @@ void Init(const std::string& dir, const std::string& prefix, bool append) {
 }
 
 const std::string& Path() { return g_path; }
+double Seconds() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_start).count(); }
 
 void Write(Level lv, const char* fmt, ...) {
     if (!kVerbose && lv < Level::Error) return;

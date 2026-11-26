@@ -815,6 +815,23 @@ std::string OnlineText(bool focused) {
     return focused ? "Join a friend:  [ " + Address() + " ]" : "Join a friend:  " + Address();
 }
 
+// A row that shows an internet address (this PC's code, or the one being typed): the session's pictures are not
+// taken while one is on the screen (record.cpp), so that a pictures folder sent to someone holds nobody's address.
+std::atomic<std::chrono::steady_clock::time_point> g_address_shown{};
+bool HasAddress(const std::string& text) {
+    for (size_t i = 0; i < text.size(); i++) {  // four numbers of up to three digits with dots between them
+        size_t k = i;
+        for (int groups = 0;;) {
+            size_t from = k;
+            while (k < text.size() && text[k] >= '0' && text[k] <= '9') k++;
+            if (k == from || k - from > 3) break;
+            if (++groups == 4) return true;
+            if (k >= text.size() || text[k] != '.') break;
+            k++;
+        }
+    }
+    return false;
+}
 std::string RowText(int row, bool focused) {
     if (row == kOnline) return OnlineText(focused);
     if (row == kInvite) return InviteText(focused);
@@ -1010,6 +1027,7 @@ void Refresh(X86Context& ctx) {
         }
         state(g_page.rows[r], !visible ? kHidden : focused ? kHighlighted : kIdle);
         std::string text = visible ? RowText(r, focused) : std::string();
+        if (visible && HasAddress(text)) g_address_shown = std::chrono::steady_clock::now();
         if (text != g_page.shown[r]) {
             SetText(ctx, g_page.rows[r], text);
             g_page.shown[r] = text;
@@ -1055,7 +1073,10 @@ void Tick(X86Context& ctx) {
         bool front = GetForegroundWindow() == static_cast<HWND>(app::Window());
         bool copy_key = Pressed('C') && (GetAsyncKeyState(VK_CONTROL) & 0x8000);
         constexpr uint16_t kPadX = 0x4000, kPadY = 0x8000;
-        if (code_row && front && (copy_key || (pressed & kPadX))) CopyMine();
+        // (not once the host has answered: the page stays up under the host's picture while the friend plays, and
+        // every press of his X, the game's "use", copied his code over whatever he had on the clipboard: 213 times in
+        // the friend's log of 2026-11-26)
+        if (code_row && front && game_net::JoinPhase() <= 1 && (copy_key || (pressed & kPadX))) CopyMine();
         if (takes_code && front && !g_typing && (pressed & kPadY)) Paste();
     }
     if (takes_code) Keys(g_typing);
@@ -1187,6 +1208,7 @@ bool BackCloses(X86Context& ctx) {
 }  // namespace
 
 bool Typing() { return g_typing; }
+bool AddressOnScreen() { return std::chrono::steady_clock::now() - g_address_shown.load() < std::chrono::milliseconds(700); }
 
 std::vector<uint32_t> g_p1_only;  // the pause screen's items that are Player 1's alone
 std::atomic<bool> g_p1_item{false};
@@ -1226,7 +1248,7 @@ void TraceTop() {
 }
 
 // The game's own "Invert Pitch Axis" (Options, Controller Settings) is kept between runs, and is off until the player
-// turns it on (Skylar, 2026-11-26: "keeps getting reset every time I launch the game again, it should be off by
+// turns it on (the owner, 2026-11-26: "keeps getting reset every time I launch the game again, it should be off by
 // default"). The game keeps its options in an object at 0x392158 (methods 0x347C44; the switches in the word at
 // +0x50, bit 0x10 = inverted) and starts every run with them at their defaults, inverted among them: they only
 // come from Suffering2.cfg through the Options menu's "Save Settings" and "Load Settings". Here the port's own
@@ -1451,7 +1473,7 @@ X86_FUNC(sub_00154550) {
 }
 
 // ---- the screens before the main menu, skipped with any button ---------------------------------------------------------
-// (Skylar, 2026-11-26.) Two screens come up when the game starts:
+// (The owner, 2026-11-26.) Two screens come up when the game starts:
 //   - the publisher's and the developer's logos, films of fifteen seconds together (screen methods 0x341B70, once
 //     a frame 0x14DA30). Its input handler 0x14D690 only answers event 0x420 (the A button).
 //   - the title with the legal lines (methods 0x3419E8, once a frame 0x14C590), which loads the menu's resources and

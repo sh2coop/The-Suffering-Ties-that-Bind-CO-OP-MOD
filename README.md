@@ -27,8 +27,12 @@ This is a test build. Things will be rough in places.
 `Update` fetches the newest version when there is one. Every update is signed, and one that is not signed by this
 project's release key is thrown away.
 
-If something goes wrong, zip the `Logs` folder and send it. It has one file for every time the game was started, and
-the crash reports.
+If something goes wrong, zip the `Logs` folder and send it. For every time the game was started it has a log file,
+and for the three newest starts also a packed record of every frame (`..._detail.log.gz`) and a folder of small
+pictures of the game's window, one every three seconds (`..._pictures`): about 60 to 100 MB for an hour of play.
+Press **F9** when something looks wrong on the screen: the game saves a full picture and what it was doing at that
+moment. Only the game's own window is ever pictured, and the keyboard is not recorded. The crash reports are in the
+same folder.
 
 ## Co-op
 

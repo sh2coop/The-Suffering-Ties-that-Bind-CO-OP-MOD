@@ -46,6 +46,15 @@ namespace game_net {  // net.cpp
 bool Host(bool on);
 bool Hosting();
 bool HostHasPlayer();
+int JoinState();
+}
+namespace game_detail {  // detail.cpp: the record of every frame and object
+bool On();
+void Line(const char* fmt, ...);
+}
+namespace game_record {  // record.cpp: pictures of the window
+void Mark(const std::string& why);
+uint32_t Marks(std::string* why);
 }
 
 namespace game_coop {
@@ -198,6 +207,7 @@ bool g_one_view = false;        // a scene: the picture is one view, Player 1's 
 // view is drawn over it. The host plays on a whole screen and the joiner gets a whole picture.
 bool g_stream_view = false;
 extern uint64_t g_down_until;
+extern uint64_t g_spare_at;  // (Spare, below)
 extern bool g_paused_now;
 extern std::map<uint32_t, int> g_hurt_us;
 void Downs(X86Context& ctx);
@@ -314,12 +324,15 @@ struct AsSecond {
         static const bool noswap = std::getenv("S2_COOP_NOCAMSWAP") != nullptr;  // bisecting
         if (!mine || !g_camera2_object || noswap) return;
         // "the game's camera" is his Camera meanwhile: the Player switches it off and on and points it at things
+        // (tests: S2_COOP_SWAP_PARTS=<bits> leaves parts of it out: 1 the game's camera, 2 the current view camera,
+        // 4 the view matrix)
+        static const int parts = std::getenv("S2_COOP_SWAP_PARTS") ? std::atoi(std::getenv("S2_COOP_SWAP_PARTS")) : 7;
         camera = kernel::R32(kGameCamera);
-        kernel::W32(kGameCamera, g_camera2_object);
+        if (parts & 1) kernel::W32(kGameCamera, g_camera2_object);
         current = kernel::R32(view + kViewCurrent);
         matrix = kernel::R32(kViewMatrixPointer);
-        kernel::W32(view + kViewCurrent, (mine - kernel::R32(view + kViewCameras)) / kViewCameraBytes);
-        kernel::W32(kViewMatrixPointer, mine + 8);
+        if (parts & 2) kernel::W32(view + kViewCurrent, (mine - kernel::R32(view + kViewCameras)) / kViewCameraBytes);
+        if (parts & 4) kernel::W32(kViewMatrixPointer, mine + 8);
     }
     ~AsSecond() {
         if (!on || --g_stick2_in) return;
@@ -476,6 +489,7 @@ bool g_host_failed = false;  // hosting could not start (the port is taken): not
 bool InLevel() { return g_player_object != 0 && g_player != 0; }  // a level is in play on this PC (it has its Player)
 void RemotePlayer(bool connected) { LOGI("coop: the remote player %s", connected ? "is in" : "is gone"); }
 bool SplitActive() { return g_second_object && ViewCamera2() && !g_one_view && !g_stream_view; }
+bool SceneNow() { return g_second_object && g_one_view; }  // (net.cpp tells a joined player)
 // While the game is paused the joined player is sent the finished frame, the host's whole screen with the pause
 // menu on it, and not his own view: until 2026-11-25 he was sent his view all the time and never saw a pause
 // menu (run pause_join), so he could neither see who had paused nor use the menu when the pause was his.
@@ -501,6 +515,7 @@ void SecondGone(X86Context& ctx, const char* why) {
         ctx.ecx = ecx;
     }
     g_second = g_second_object = g_camera2_object = 0;
+    g_spare_at = 0;
     g_down_until = 0;
     g_one_view = false;
     game_view::SetSplit(false);
@@ -521,13 +536,30 @@ void SplitOn(X86Context& ctx);
 // His Camera and he are ended the engine's way (0x1849B0, this = engine object: marks it ended, frees its place in
 // the object table and queues it; the object manager frees it after the objects' run, or the game's save does
 // before it writes, which ends its class object too and takes a Player off the list).
+// What he holds is ended with him. The weapon in each hand is an object of its own (the handles at +0x3AC and +0x3AE
+// of the Player) and not one of his object's children, which 0x1849B0 ends with it: every time he was taken out
+// for a save, the gun he held stayed where his hand had been ("there were floating guns around the place",
+// 2026-11-26: nine saves in that session; run guns1 shows one).
+uint32_t Named(uint32_t player, uint32_t at);
 void EndSecond(X86Context& ctx, const char* why) {
     uint32_t ecx = ctx.ecx;
+    static const bool leave = std::getenv("S2_COOP_LEAVE_GUNS") != nullptr;  // tests: as before 2026-11-26
+    uint32_t held[2] = {leave ? 0 : Named(g_second, 0x3AC), leave ? 0 : Named(g_second, 0x3AE)};
     for (uint32_t object : {g_camera2_object, g_second_object}) {
         if (!object || int32_t(kernel::R32(object + 8)) < 0) continue;
         ctx.ecx = object;
         kernel::CallGuest(ctx, kObjectEnd, {});
     }
+    int ended = 0;
+    for (uint32_t object : held) {
+        if (!object || object == g_second_object || object == g_player_object || int32_t(kernel::R32(object + 8)) < 0) continue;
+        // (never what Player 1 holds: the two never share a weapon's object, but a wrong handle must not cost him his gun)
+        if (g_player && (Named(g_player, 0x3AC) == object || Named(g_player, 0x3AE) == object)) continue;
+        ctx.ecx = object;
+        kernel::CallGuest(ctx, kObjectEnd, {});
+        ended++;
+    }
+    if (ended) LOGI("coop: what Player 2 held goes with him (%d object%s)", ended, ended == 1 ? "" : "s");
     ctx.ecx = ecx;
     SecondGone(ctx, why);
 }
@@ -553,8 +585,18 @@ void BeforeSave(X86Context& ctx) {
 constexpr uint32_t kInventory = 0x128, kInventoryCopy = 0x11380;
 constexpr uint32_t kEquip = 0x14F30, kEquipped = 0x16320;  // (this = Player, weapon's template, slot): as 0x171F0 calls them
 uint64_t g_arm_at = 0;
+// Player 2's weapon loads itself from what he carries, within a second of being put in his hands: the ammunition he
+// had just been given went into the empty gun and he was left with one clip and nothing to reload with, where Player
+// 1 has a loaded gun AND the same spare (found 2026-11-26: after eight shots Player 2's pistol stayed empty, run
+// ammo2). Once his weapon is loaded, what the loading took is given again.
+std::vector<std::pair<uint32_t, uint32_t>> g_spare;  // item, how many: what Player 1 carried when Player 2 was armed
+uint64_t g_spare_at = 0;
 uint32_t ClassOfTemplate(uint32_t index);
+uint32_t ClassOf(uint32_t object);
+const char* KindName(uint32_t cls);            // what the players use, by its class: "a ladder", "a ledge" (nullptr: none of them)
+uint32_t Named(uint32_t player, uint32_t at);  // the object a Player's handle names (+0x33E: what he is using, +0x340: what he could use)
 bool ForBoth(uint32_t cls);
+void Spare(X86Context& ctx);
 void Arm(X86Context& ctx) {
     uint32_t ecx = ctx.ecx;
     // Each thing Player 1 carries that is for both (weapons, ammunition, grenades, health: ForBoth) is GIVEN to Player
@@ -562,8 +604,8 @@ void Arm(X86Context& ctx) {
     // Until 2026-11-25 the list was copied as bytes (0x11380): he had the numbers but nothing on him showed them
     // (no grenade on his belt, empty hands), and he got Player 1's keys and notes as well, against the rule that
     // those are Player 1's alone.
+    std::vector<std::pair<uint32_t, uint32_t>> items;
     {
-        std::vector<std::pair<uint32_t, uint32_t>> items;
         uint32_t list = kernel::R32(g_player + kInventory), n = kernel::R32(g_player + kInventory + 8);
         for (uint32_t i = 0; list && i < n && i < 256; i++) {
             uint32_t item = kernel::R32(list + i * 12 + 4), count = kernel::R32(list + i * 12 + 8);
@@ -593,6 +635,9 @@ void Arm(X86Context& ctx) {
             kernel::CallGuest(ctx, kEquipped, {weapon, 1});
         }
     }
+    // (what he was given, for Spare below: his weapon loads itself from it a moment later)
+    g_spare = items;
+    g_spare_at = g_frames + 90;
     // what "next weapon" would pick for each (0x17050: this = Player, template out, slot out)
     static uint32_t out = mem::AllocSystem(16);
     for (uint32_t player : {g_player, g_second}) {
@@ -618,12 +663,49 @@ void Arm(X86Context& ctx) {
     LOGI("coop: Player 2 has a copy of Player 1's inventory (%u entries)", kernel::R32(g_second + kInventory + 8));
 }
 
+void Spare(X86Context& ctx) {
+    if (!g_spare_at || g_frames < g_spare_at) return;
+    if (!g_second || !mem::IsCommitted(g_second + 0x490)) {
+        g_spare_at = 0;
+        return;
+    }
+    // (not before the weapon is loaded; and not for ever: he may have none that loads)
+    if (int32_t(kernel::R32(g_second + 0x140)) <= 0 && g_frames < g_spare_at + 300) return;
+    g_spare_at = 0;
+    uint32_t ecx = ctx.ecx;
+    AsSecond as(g_second);
+    int again = 0;
+    for (const auto& [item, count] : g_spare) {
+        ctx.ecx = g_second + kInventory;
+        uint32_t have = kernel::CallGuest(ctx, 0x110A0, {item});
+        if (have >= count) continue;
+        ctx.ecx = g_second;
+        kernel::CallGuest(ctx, 0x153A0, {item, count - have});
+        again += int(count - have);
+    }
+    ctx.ecx = ecx;
+    if (again) LOGI("coop: Player 2's weapon loaded itself from what he was given: the %d it took are given again (he has Player 1's spare ammunition too)", again);
+}
+
 // A scene: the game's Camera is not following Player 1 (the top of its mode stack is not 3: a script or a cut-scene
 // has pushed a mode of its own; or it follows someone else). The picture is one view then, Player 1's, as in the Silent Hill 2 co-op mod; the two
 // views come back when the Camera follows again. Player 2's view camera stays in the list and is skipped by the
 // engine (its stand-in texture reads as shown by nothing).
 const char* g_scene_why = "";  // which sign of a scene InScene saw last (for the log)
 bool InScene() {
+    // The story holds Player 1: he sits at the chess table the game opens at, is walked along the dock, stands
+    // through the moment in the apartment. The camera stays the following one and no sequence moves it, so none of
+    // the signs below shows it, and in the online session of 2026-11-26 Player 2 walked about through all three
+    // ("Player 2 was still able to walk around while I was sitting", "the same issue happened at the dock"). The mark
+    // is in Player 1's flags at +0xB0: bit 0x02000000 set with bit 0 (his controls) clear. In the once-a-second
+    // state lines of that session's log and the one before (3,500 lines) it is set through all five holds, 367.8 to
+    // 413.1 s, 873.0 to 972.6 s, 1581.2 to 1600.1 s and 123.4 to 138.4 s, 531.8 to 562.8 s, and never outside one:
+    // not on any of the 287 lines where he was on a door, ladder, switch or ledge (those keep bit 0 set).
+    static uint32_t held = 0;
+    {
+        uint32_t b0 = g_player && mem::IsCommitted(g_player + 0xC0) ? kernel::R32(g_player + 0xB0) : 0;
+        held = (b0 & 0x02000000) && !(b0 & 1) ? held + 1 : 0;
+    }
     uint32_t object = kernel::R32(kGameCamera);
     uint32_t camera = object && mem::IsCommitted(object + 0x110) ? kernel::R32(object + kClassObject) : 0;
     if (!camera || !mem::IsCommitted(camera + 0x40)) return g_scene_why = "no game camera", true;
@@ -638,6 +720,8 @@ bool InScene() {
     // Player 1 at a security monitor (bit 0x400000 of his flags at +0xBC) is not a scene: the camera shows the
     // monitor's picture in his view, and Player 2 keeps his own view and his controls. (In the first online session,
     // 2026-11-25, a monitor took Player 2's view away and put him beside Player 1 afterwards.)
+    static const bool nohold = std::getenv("S2_TEST_NO_HOLD") != nullptr;  // tests: as before 2026-11-26
+    if (held > 12 && !nohold) return g_scene_why = "the story holds Player 1 (he sits, or is walked along)", true;
     if (g_player && (kernel::R32(g_player + 0xBC) & 0x400000)) return false;
     if (mode != 3 && mode != 0) return g_scene_why = "the camera is neither following nor the Player's own", true;
     // ... or a sequence moves it: bit 1 of its flags at +0x2C (its own once-a-frame method does nothing then)
@@ -926,6 +1010,23 @@ void Session(X86Context& ctx, bool wanted) {
         before = now;
     }
     if (g_second_object) Downs(ctx);
+    {   // the record: Player 2's own Camera, when its mode, its flags or what it follows changes (the game's camera has
+        // its line in InScene). Asked for on 2026-11-26: "there was a bug where his camera became fixed", and the
+        // log of that session had nothing about his camera.
+        static uint64_t before = ~0ull;
+        uint32_t camera = g_camera2_object && mem::IsCommitted(g_camera2_object + 0x110) ? kernel::R32(g_camera2_object + kClassObject) : 0;
+        if (camera && mem::IsCommitted(camera + 0x40)) {
+            uint32_t stack = kernel::R32(camera + 0x20), n = kernel::R32(camera + 0x28);
+            uint32_t mode = stack && n && n <= 64 ? kernel::R32(stack + n * 8 - 4) : 99, cflags = kernel::R32(camera + 0x2C);
+            uint32_t table = kernel::R32(kObjectManager + 0x0C), handle = kernel::R32(camera + 0x38) & 0xFFFF;
+            uint32_t tracked = table && handle ? kernel::R32(table + handle * 6) : 0;
+            uint64_t now = (uint64_t(mode) << 56) ^ (uint64_t(n) << 48) ^ (uint64_t(cflags) << 16) ^ tracked;
+            if (now != before)
+                LOGI("coop: Player 2's camera: mode %u (%u on its stack), flags %08X, follows %s", mode, n, cflags,
+                     tracked == g_second_object ? "Player 2" : tracked == g_player_object ? "Player 1" : tracked ? "something else" : "nothing");
+            before = now;
+        } else before = ~0ull;
+    }
     if (g_second_object) {
         // one view at once; two views again only after a quarter of a second without a scene (between two scenes
         // there can be a frame that is neither)
@@ -936,6 +1037,11 @@ void Session(X86Context& ctx, bool wanted) {
         clear = InScene() || (fake && g_frames >= fake && g_frames < fake + fake_long) ? 0 : clear + 1;
         if (!clear) Views(ctx, true);
         else if (clear > 15) Views(ctx, false);
+        // (the record: one scene's sign gives way to another's while the picture stays one view, as when the
+        // opening's sequence ends and Player 1 is left sitting at the chess table)
+        static const char* why_said = "";
+        if (g_one_view && !clear && g_scene_why != why_said && *why_said) LOGI("coop: still one view, now because: %s", g_scene_why);
+        why_said = g_one_view && !clear ? g_scene_why : g_one_view ? why_said : "";
     }
     if (!wanted && g_second_object) {  // switched off while he is in
         EndSecond(ctx, "co-op switched off");
@@ -968,6 +1074,7 @@ void Session(X86Context& ctx, bool wanted) {
         g_arm_at = 0;
         Arm(ctx);
     }
+    Spare(ctx);
 }
 
 // The teleport: Player 2 holds A, B, X and Y together for five seconds and is put beside Player 1 (never the other
@@ -1021,6 +1128,8 @@ void Controller2(input::Pad& p) {
 uint32_t ClassOfTemplate(uint32_t index);
 uint32_t g_test_enemy = 0;  // its engine object
 void TestLineup(X86Context& ctx);
+void TestPut(X86Context& ctx);
+void TestSpot(X86Context& ctx);
 void TestEnemy(X86Context& ctx) {
     static const char* v = std::getenv("S2_COOP_ENEMY");
     if (!v || !g_player_object || g_frames != uint64_t(std::atoll(v))) return;
@@ -1226,6 +1335,332 @@ void TestClasses(X86Context& ctx) {
 }
 
 // once a frame (hooks.cpp, before the frame is shown)
+// Player 2's Camera made anew: his view camera and his Camera object are ended the way they are when he leaves, and
+// made again the way they are when he comes in (SplitOn). For a Camera that no longer follows him ("there was a bug
+// where his camera became fixed", 2026-11-26; not reproduced, so the cause is not known: the check in DetailFrame
+// records the Camera's state first). Player 2 can ask for it himself: the teleport (A+B+X+Y held five seconds).
+void RemakeCamera2(X86Context& ctx, const char* why) {
+    uint32_t view = kernel::R32(kViewPointer);
+    if (!view || !g_second_object || !ViewCamera2() || !g_camera2_object) return;
+    LOGR("coop: Player 2's camera is made anew (%s)", why);
+    uint32_t ecx = ctx.ecx, old = g_camera2_object;
+    ctx.ecx = view;
+    kernel::CallGuest(ctx, 0x1A6E10, {old});  // (the engine's own way out for a view camera, by its object)
+    if (int32_t(kernel::R32(old + 8)) >= 0) {
+        ctx.ecx = old;
+        kernel::CallGuest(ctx, kObjectEnd, {});
+    }
+    ctx.ecx = ecx;
+    g_camera2_object = 0;
+    bool one = g_one_view;
+    SplitOn(ctx);
+    if (one) Views(ctx, true);
+    LOGR("coop: Player 2's camera: %s", g_camera2_object && ViewCamera2() ? "a new one follows him" : "COULD NOT BE MADE AGAIN");
+}
+
+// ---- the detail record ----------------------------------------------------------------------------------------------
+// (2026-11-26: "The logs need to be extremely detailed, to catch graphics etc." Frame rate is not the limit, the
+// folder's size is: detail.cpp packs the lines.) One line for every frame of a level, with both players, both
+// cameras and what each view drew; once a second every object that appeared, moved, changed or ended.
+struct PassStats {
+    uint32_t draws = 0, fogged = 0;
+    bool have = false, fog_on = false;
+    uint32_t fog_color = 0, fog_start = 0, fog_end = 0, ambient = 0, lights = 0, vw = 0, vh = 0, rt = 0;
+    float proj[4] = {0, 0, 0, 0}, eye[3] = {0, 0, 0};
+    uint64_t hash = 0;
+};
+PassStats g_pass[2];       // [0] Player 1's view and all else, [1] Player 2's view (filled by DrawVariant)
+PassStats g_pass_last[2];  // ... of the frame before (for the marks)
+std::atomic<int> g_ammo2_rounds{-1}, g_ammo2_clip{0}, g_ammo2_more{0};  // Player 2's ammunition, for his picture (net.cpp)
+
+struct CameraNow {
+    float eye[3] = {0, 0, 0}, way[3] = {0, 0, 0};
+    uint32_t mode = 99, depth = 0, flags = 0;
+    bool there = false;
+};
+CameraNow CameraOf(uint32_t object) {
+    CameraNow c;
+    if (!object || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) return c;
+    uint32_t camera = kernel::R32(object + kClassObject);
+    if (!camera || !mem::IsCommitted(camera + 0x40)) return c;
+    c.there = true;
+    for (int i = 0; i < 3; i++) c.eye[i] = ReadF(object + kPosition + i * 4), c.way[i] = ReadF(object + kMatrix + 0x20 + i * 4);
+    uint32_t stack = kernel::R32(camera + 0x20);
+    c.depth = kernel::R32(camera + 0x28);
+    c.mode = stack && c.depth && c.depth <= 64 ? kernel::R32(stack + c.depth * 8 - 4) : 99;
+    c.flags = kernel::R32(camera + 0x2C);
+    return c;
+}
+float Facing(uint32_t object) {  // the "facing" of the position lines
+    return std::atan2(ReadF(object + kMatrix + 0x20), ReadF(object + kMatrix + 0x28)) * 57.29578f;
+}
+
+void DetailFrame(X86Context& ctx) {
+    PassStats pass[2] = {g_pass[0], g_pass[1]};
+    g_pass[0] = g_pass[1] = PassStats{};
+    static bool was_in = false;
+    bool in = InLevel() && mem::IsCommitted(g_player + 0x490) && mem::IsCommitted(g_player_object + 0x110);
+    static std::chrono::steady_clock::time_point before = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    float ms = std::chrono::duration<float, std::milli>(now - before).count();
+    before = now;
+    bool second = g_second && g_second_object && mem::IsCommitted(g_second + 0x490) && mem::IsCommitted(g_second_object + 0x110);
+    CameraNow c1 = CameraOf(kernel::R32(kGameCamera)), c2 = second ? CameraOf(g_camera2_object) : CameraNow{};
+    // ---- Player 2's ammunition, for the display in his picture: what is in the weapon in his hand (Player +0x140),
+    // what its clip holds (0x17400) and what he carries for it (0x174A0). The game's own HUD number is the sum of the
+    // first and the last (0x181B0), its row of marks the first.
+    if (second && g_frames % 6 == 0) {
+        uint32_t ecx = ctx.ecx;
+        ctx.ecx = g_second;
+        int clip = int(kernel::CallGuest(ctx, 0x17400, {}));
+        ctx.ecx = g_second;
+        int more = int(kernel::CallGuest(ctx, 0x174A0, {}));
+        int rounds = int(kernel::R32(g_second + 0x140));
+        ctx.ecx = ecx;
+        bool creature = (kernel::R32(g_second + 0xBC) & 0xC0000) != 0;
+        g_ammo2_clip = clip, g_ammo2_more = more, g_ammo2_rounds = clip > 0 && !creature && !Down() ? rounds : -1;
+        static int said[3] = {-9, -9, -9};
+        static uint64_t said_at = 0;
+        if ((rounds != said[0] || clip != said[1] || more != said[2]) && g_frames - said_at > 120) {
+            LOGI("ammo: Player 2 has %d in his weapon (a clip of %d) and carries %d more", rounds, clip, more);
+            said[0] = rounds, said[1] = clip, said[2] = more, said_at = g_frames;
+        }
+    } else if (!second) g_ammo2_rounds = -1;
+    {   // S2_AMMO_TRACE=1: both players' ammunition getters once a second
+        static const bool trace = std::getenv("S2_AMMO_TRACE") != nullptr;
+        if (trace && in && g_frames % 60 == 11) {
+            const uint32_t players[2] = {g_player, second ? g_second : 0};
+            for (int i = 0; i < 2; i++) {
+                if (!players[i]) continue;
+                uint32_t ecx = ctx.ecx, v[6];
+                const uint32_t fns[6] = {0x17400, 0x174A0, 0x16130, 0x18160, 0x16100, 0x181B0};
+                for (int k = 0; k < 6; k++) ctx.ecx = players[i], v[k] = kernel::CallGuest(ctx, fns[k], {});
+                ctx.ecx = ecx;
+                LOGI("ammo trace: Player %d: clip size %d, 0x174A0 %d, 0x16130 %d, 0x18160 %d, 0x16100 %d, 0x181B0 %d; in hands %04X %04X", i + 1, int(v[0]), int(v[1]),
+                     int(v[2]), int(v[3]), int(v[4]), int(v[5]), kernel::R16(players[i] + 0x3AC), kernel::R16(players[i] + 0x3AE));
+                uint32_t weapon = Named(players[i], 0x3AC), self = weapon ? kernel::R32(weapon + kClassObject) : 0;
+                if (self && g_frames % 300 == 11) {
+                    ctx.ecx = self;
+                    uint32_t item = kernel::CallGuest(ctx, 0xF0CC0, {});
+                    ctx.ecx = players[i] + kInventory;
+                    uint32_t have = kernel::CallGuest(ctx, 0x110A0, {item});
+                    ctx.ecx = ecx;
+                    std::string items;
+                    char one[48];
+                    uint32_t list = kernel::R32(players[i] + kInventory), n = kernel::R32(players[i] + kInventory + 8);
+                    for (uint32_t k = 0; k < n && k < 24; k++) {
+                        std::snprintf(one, sizeof one, " [%X %X x%d]", kernel::R32(list + k * 12), kernel::R32(list + k * 12 + 4), int32_t(kernel::R32(list + k * 12 + 8)));
+                        items += one;
+                    }
+                    LOGI("ammo trace: Player %d: his weapon (template %u) takes item %X, of which his inventory says he has %d; inventory at %08X: list %08X, %u entries:%s; +0x0C %08X +0x10 %08X +0x14 %08X",
+                         i + 1, kernel::R32(weapon + kTemplateWord) & 0xFFFF, item, int(have), players[i] + kInventory, list, n, items.c_str(),
+                         kernel::R32(players[i] + kInventory + 0x0C), kernel::R32(players[i] + kInventory + 0x10), kernel::R32(players[i] + kInventory + 0x14));
+                }
+            }
+        }
+    }
+
+    // ---- a mark (F9, or a check below): the state of this moment into the session log
+    {
+        static uint32_t marks = 0;
+        std::string why;
+        uint32_t n = game_record::Marks(&why);
+        if (n != marks) {
+            marks = n;
+            LOGR("mark: state at the mark (%s): frame %llu, %s, %s", why.c_str(), (unsigned long long)g_frames,
+                 !in ? "no level in play" : g_one_view ? "one view (a scene)" : g_stream_view ? "Player 2's view goes to the stream" : second ? "split screen" : "one player",
+                 g_paused_now ? "paused" : "not paused");
+            if (in) {
+                LOGR("mark: Player 1 at %.2f %.2f %.2f facing %.0f, state %08X flags %08X health %.0f; his camera at %.2f %.2f %.2f looking %.2f %.2f %.2f, mode %u (%u on its stack), flags %08X",
+                     ReadF(g_player_object + kPosition), ReadF(g_player_object + kPosition + 4), ReadF(g_player_object + kPosition + 8), Facing(g_player_object),
+                     kernel::R32(g_player + 0xBC), kernel::R32(g_player + 0xB0), ReadF(g_player + 0x16), c1.eye[0], c1.eye[1], c1.eye[2], c1.way[0], c1.way[1], c1.way[2],
+                     c1.mode, c1.depth, c1.flags);
+                if (second)
+                    LOGR("mark: Player 2 at %.2f %.2f %.2f facing %.0f, state %08X flags %08X health %.0f; his camera at %.2f %.2f %.2f looking %.2f %.2f %.2f, mode %u (%u on its stack), flags %08X",
+                         ReadF(g_second_object + kPosition), ReadF(g_second_object + kPosition + 4), ReadF(g_second_object + kPosition + 8), Facing(g_second_object),
+                         kernel::R32(g_second + 0xBC), kernel::R32(g_second + 0xB0), ReadF(g_second + 0x16), c2.eye[0], c2.eye[1], c2.eye[2], c2.way[0], c2.way[1],
+                         c2.way[2], c2.mode, c2.depth, c2.flags);
+                for (int i = 0; i < 2; i++) {
+                    const PassStats& d = pass[i].draws ? pass[i] : g_pass_last[i];
+                    if (!d.draws) continue;
+                    float fs, fe;
+                    std::memcpy(&fs, &d.fog_start, 4), std::memcpy(&fe, &d.fog_end, 4);
+                    LOGR("mark: Player %d's view: %u draws (%u with fog); fog %s colour %08X from %.1f to %.1f, ambient %08X, lights %X; target %u x %u",
+                         i + 1, d.draws, d.fogged, d.fog_on ? "on" : "off", d.fog_color, fs, fe, d.ambient, d.lights, d.vw, d.vh);
+                }
+            }
+            game_detail::Line("mark %u %s", n, why.c_str());
+        }
+    }
+    for (int i = 0; i < 2; i++)
+        if (pass[i].draws) g_pass_last[i] = pass[i];
+    if (!game_detail::On()) return;
+    if (in != was_in) game_detail::Line(in ? "level in" : "level out"), was_in = in;
+    if (!in) return;
+
+    // ---- checks: something that should not be. Each writes a line, and asks for a full-size picture (a mark).
+    {
+        static uint64_t far1 = 0, far2 = 0, said1 = 0, said2 = 0, said3 = 0, level_frames = 0;
+        static uint32_t draws_before = 0;
+        static float eye_before[3] = {0, 0, 0};
+        level_frames++;
+        auto apart = [](const float* a, uint32_t object) {
+            float d = 0;
+            for (int i = 0; i < 3; i++) {
+                float v = a[i] - ReadF(object + kPosition + i * 4);
+                d += v * v;
+            }
+            return std::sqrt(d);
+        };
+        bool playing1 = (kernel::R32(g_player + 0xB0) & 1) && !g_one_view && !g_paused_now && !(kernel::R32(g_player + 0xBC) & 0x600000);
+        float d1 = c1.there ? apart(c1.eye, g_player_object) : 0;
+        // A camera that stays where it is while its player walks off: he has moved more than 3 m in two seconds and
+        // it has not moved a hand's breadth. (A following camera moves whenever he does; "far from him" alone needs
+        // room to walk 15 m away, and a room is often smaller: run camfix.)
+        struct Trail {
+            float player[120][3] = {}, eye[120][3] = {};
+            uint32_t filled = 0;
+            bool Still(uint64_t frame, uint32_t body, const CameraNow& c, bool playing) {
+                uint32_t at = uint32_t(frame % 120);
+                float now_p[3], moved = 0, camera = 0;
+                for (int i = 0; i < 3; i++) now_p[i] = ReadF(body + kPosition + i * 4);
+                bool still = false;
+                if (playing && c.there && filled >= 120) {
+                    for (int i = 0; i < 3; i++) moved += (now_p[i] - player[at][i]) * (now_p[i] - player[at][i]), camera += (c.eye[i] - eye[at][i]) * (c.eye[i] - eye[at][i]);
+                    still = moved > 3.0f * 3.0f && moved < 30.0f * 30.0f && camera < 0.1f * 0.1f;
+                }
+                filled = playing && c.there ? filled + 1 : 0;
+                for (int i = 0; i < 3; i++) player[at][i] = now_p[i], eye[at][i] = c.eye[i];
+                return still;
+            }
+        };
+        static Trail trail1, trail2;
+        static uint64_t said4 = 0;
+        if (trail1.Still(g_frames, g_player_object, c1, playing1) && g_frames - said4 > 1200) {
+            said4 = g_frames;
+            LOGR("check: Player 1's camera has not moved for two seconds while he walked off (it is %.0f m from him; mode %u, %u on its stack, flags %08X)", d1, c1.mode, c1.depth, c1.flags);
+            game_record::Mark("check: Player 1's camera does not follow him");
+        }
+        far1 = playing1 && d1 > 15.0f ? far1 + 1 : 0;
+        if (far1 == 120 && g_frames - said1 > 1200) {
+            said1 = g_frames;
+            LOGR("check: Player 1's camera has been %.0f m from him for two seconds while he plays (mode %u, %u on its stack, flags %08X)", d1, c1.mode, c1.depth, c1.flags);
+            game_record::Mark("check: Player 1's camera is far from him");
+        }
+        if (second) {
+            bool playing2 = (kernel::R32(g_second + 0xB0) & 1) && !g_one_view && !g_paused_now && !Down() && !(kernel::R32(g_second + 0xBC) & 0x600000);
+            float d2 = c2.there ? apart(c2.eye, g_second_object) : 0;
+            static uint64_t said5 = 0;
+            if (trail2.Still(g_frames, g_second_object, c2, playing2) && g_frames - said5 > 600) {
+                said5 = g_frames;
+                LOGR("check: Player 2's camera has not moved for two seconds while he walked off (it is %.0f m from him; mode %u, %u on its stack, flags %08X)", d2, c2.mode, c2.depth, c2.flags);
+                game_record::Mark("check: Player 2's camera does not follow him");
+                RemakeCamera2(ctx, "it had stopped following him");
+                return;
+            }
+            far2 = playing2 && (d2 > 15.0f || !c2.there) ? far2 + 1 : 0;
+            if (far2 == 120 && g_frames - said2 > 600) {
+                said2 = g_frames;
+                LOGR("check: Player 2's camera has been %.0f m from him for two seconds while he plays (mode %u, %u on its stack, flags %08X)", d2, c2.mode, c2.depth, c2.flags);
+                game_record::Mark("check: Player 2's camera is far from him");
+                RemakeCamera2(ctx, "it had stopped following him");
+            }
+        } else far2 = 0;
+        // what Player 1's view draws halves or doubles from one frame to the next while his camera has hardly moved
+        uint32_t draws = pass[0].draws;
+        float moved = 0;
+        for (int i = 0; i < 3; i++) moved += (c1.eye[i] - eye_before[i]) * (c1.eye[i] - eye_before[i]);
+        if (level_frames > 600 && playing1 && draws_before > 150 && draws > 0 && moved < 0.3f * 0.3f && (draws * 2 < draws_before || draws > draws_before * 2) &&
+            g_frames - said3 > 1800) {
+            said3 = g_frames;
+            LOGR("check: Player 1's view went from %u to %u draws in one frame with his camera still", draws_before, draws);
+            game_record::Mark("check: Player 1's view changed what it draws");
+        }
+        if (draws) draws_before = draws;
+        for (int i = 0; i < 3; i++) eye_before[i] = c1.eye[i];
+        if (!was_in) level_frames = 0;
+    }
+
+    // ---- the frame's line
+    static bool told = false;
+    if (!told) {
+        told = true;
+        game_detail::Line("f fields: frame, ms since the frame before, views (A one player, S split, T Player 2's goes to the stream, O one view: a scene; p paused) | "
+                          "1 = Player 1: x y z, facing, flags +B0, state +BC, health, insanity meter, class of what he uses (0 none) | c1 = his camera: eye x y z, "
+                          "looking x y z, mode, modes on its stack, flags | 2 and c2 = Player 2 and his camera (- when there is none) | d1 = what Player 1's view drew "
+                          "(with the 2D): draws, draws with fog, fog on, fog colour, fog start, fog end, ambient, lights, a mark of all its draws' fog and light "
+                          "(changes when any changes), target size | d2 = the same for Player 2's view (- in frames it was not drawn)");
+    }
+    char line[1200];
+    int n = 0;
+    auto player = [&](int who, uint32_t pl, uint32_t body, const CameraNow& c) {
+        uint32_t used = Named(pl, 0x33E);
+        n += std::snprintf(line + n, sizeof line - size_t(n), " | %d %.2f %.2f %.2f %.0f %08X %08X %.0f %.0f %X | c%d %.2f %.2f %.2f %.2f %.2f %.2f %u %u %X", who,
+                           ReadF(body + kPosition), ReadF(body + kPosition + 4), ReadF(body + kPosition + 8), Facing(body), kernel::R32(pl + 0xB0), kernel::R32(pl + 0xBC),
+                           ReadF(pl + 0x16), ReadF(pl + 0x48A), used ? ClassOf(used) : 0, who, c.eye[0], c.eye[1], c.eye[2], c.way[0], c.way[1], c.way[2], c.mode, c.depth,
+                           c.flags);
+    };
+    n += std::snprintf(line + n, sizeof line - size_t(n), "f %llu %.1f %c%s", (unsigned long long)g_frames, ms,
+                       g_one_view ? 'O' : g_stream_view && second ? 'T' : second ? 'S' : 'A', g_paused_now ? "p" : "");
+    player(1, g_player, g_player_object, c1);
+    if (second) player(2, g_second, g_second_object, c2);
+    else n += std::snprintf(line + n, sizeof line - size_t(n), " | 2 - | c2 -");
+    for (int i = 0; i < 2; i++) {
+        const PassStats& d = pass[i];
+        if (!d.draws) {
+            n += std::snprintf(line + n, sizeof line - size_t(n), " | d%d -", i + 1);
+            continue;
+        }
+        float fs, fe;
+        std::memcpy(&fs, &d.fog_start, 4), std::memcpy(&fe, &d.fog_end, 4);
+        n += std::snprintf(line + n, sizeof line - size_t(n), " | d%d %u %u %d %08X %.1f %.1f %08X %X %04X %ux%u", i + 1, d.draws, d.fogged, int(d.fog_on),
+                           d.fog_color, fs, fe, d.ambient, d.lights, unsigned(d.hash & 0xFFFF), d.vw, d.vh);
+    }
+    game_detail::Line("%s", line);
+
+    // ---- once a second: every object that is new, has moved, has changed or has ended
+    if (g_frames % 60 == 7) {
+        struct Seen {
+            uint32_t object = 0, flags = 0, model = 0;
+            float at[3] = {0, 0, 0};
+            uint64_t round = 0;
+        };
+        static std::map<uint32_t, Seen> seen;
+        static uint64_t round = 0;
+        static uint32_t level = 0;
+        if (level != g_player) level = g_player, seen.clear(), game_detail::Line("o fields: handle, class, template, model, x y z, the object's flags (+8), who (1 or 2: a Player; h1 or h2: in his hand)");
+        round++;
+        uint32_t table = kernel::R32(kObjectManager + 0x0C), written = 0;
+        const uint32_t hands[4] = {Named(g_player, 0x3AC), Named(g_player, 0x3AE), second ? Named(g_second, 0x3AC) : 0, second ? Named(g_second, 0x3AE) : 0};
+        for (uint32_t h = 1; table && h < 0x4000 && mem::IsCommitted(table + h * 6 + 4); h++) {
+            uint32_t object = kernel::R32(table + h * 6);
+            if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
+            Seen& was = seen[h];
+            float at[3] = {ReadF(object + kPosition), ReadF(object + kPosition + 4), ReadF(object + kPosition + 8)};
+            uint32_t flags = kernel::R32(object + 8), model = kernel::R32(object + 0x64);
+            float d = 0;
+            for (int i = 0; i < 3; i++) d += (at[i] - was.at[i]) * (at[i] - was.at[i]);
+            bool changed = was.object != object || d > 0.05f * 0.05f || flags != was.flags || model != was.model;
+            was.round = round;
+            if (!changed) continue;
+            was.object = object, was.flags = flags, was.model = model;
+            std::memcpy(was.at, at, sizeof at);
+            const char* who = object == g_player_object ? " 1" : object == g_second_object ? " 2" : object == hands[0] || object == hands[1] ? " h1" :
+                              object && (object == hands[2] || object == hands[3]) ? " h2" : "";
+            if (written++ < 1500)
+                game_detail::Line("o %X %08X %u %X %.2f %.2f %.2f %08X%s", h, ClassOf(object), kernel::R32(object + kTemplateWord) & 0xFFFF, model, at[0], at[1], at[2], flags, who);
+        }
+        for (auto it = seen.begin(); it != seen.end();) {
+            if (it->second.round == round) {
+                ++it;
+                continue;
+            }
+            game_detail::Line("x %X", it->first);
+            it = seen.erase(it);
+        }
+    }
+}
+
 void Frame(X86Context& ctx) {
     static const uint64_t spawn_at = [] {
         const char* v = std::getenv("S2_COOP_SPAWN");
@@ -1233,6 +1668,11 @@ void Frame(X86Context& ctx) {
     }();
     static const bool forced = std::getenv("S2_COOP") != nullptr;
     ++g_frames;
+    DetailFrame(ctx);
+    {   // tests: S2_TEST_MARK=<frame> asks for a mark at that frame, as F9 does
+        static const uint64_t mark_at = std::getenv("S2_TEST_MARK") ? uint64_t(std::atoll(std::getenv("S2_TEST_MARK"))) : 0;
+        if (mark_at && g_frames == mark_at) game_record::Mark("a test asked");
+    }
     static const uint64_t off_at = std::getenv("S2_COOP_OFF") ? uint64_t(std::atoll(std::getenv("S2_COOP_OFF"))) : 0;  // tests
     bool test_on = (forced || (spawn_at && g_frames + 61 >= spawn_at)) && !(off_at && g_frames >= off_at);
     // Hosting online: the game listens while the setting says so, and Player 2 is in while a player is connected.
@@ -1240,7 +1680,7 @@ void Frame(X86Context& ctx) {
     bool host = g_host_setting || host_test;
     // (Until 2026-11-26 this read "g_host_failed = host && !Host(host)": with host false the call was never made, so
     // hosting, once on, stayed on until the game closed. "Stop inviting" and a change to split screen did nothing,
-    // and the invite code went on working: Skylar's log suffering2_011 has no "hosting off" after either.)
+    // and the invite code went on working: the owner's log suffering2_011 has no "hosting off" after either.)
     if (host != game_net::Hosting() && !(host && g_host_failed)) {
         bool done = game_net::Host(host);
         g_host_failed = host && !done;
@@ -1254,6 +1694,8 @@ void Frame(X86Context& ctx) {
     if (god && g_player && kernel::R32(g_player + 0x1E) != 1) kernel::W32(g_player + 0x1E, 1);
     TestEnemy(ctx);
     TestLineup(ctx);
+    TestPut(ctx);
+    TestSpot(ctx);
     TestFace(ctx);
     TestExit(ctx);
     TestCensus();
@@ -1380,6 +1822,22 @@ void Frame(X86Context& ctx) {
     if (g_teleport2.exchange(false) && g_second_object && !g_one_view) {
         BesideFirst(ctx);
         LOGI("coop: Player 2 teleports to Player 1 (A+B+X+Y held five seconds)");
+        // (his way out of a camera that is stuck, too: when it is not in its following mode or is not his, it is made
+        // anew; first person and what he uses have their own modes and are left alone)
+        CameraNow c = CameraOf(g_camera2_object);
+        bool busy = g_second && (kernel::R32(g_second + 0xBC) & 0x648000) != 0;
+        if (!busy && c.there && (c.mode != 3 || (c.flags & 1))) RemakeCamera2(ctx, "Player 2 teleported and it was not in its following mode");
+    }
+    {   // tests: S2_TEST_CAM2_STUCK=<frame>: a mode that nobody moves the camera in is put on Player 2's Camera at that
+        // frame, as a stuck one would have (0x103750: this = Camera, mode)
+        static const uint64_t stuck_at = std::getenv("S2_TEST_CAM2_STUCK") ? uint64_t(std::atoll(std::getenv("S2_TEST_CAM2_STUCK"))) : 0;
+        if (stuck_at && g_frames == stuck_at && g_camera2_object) {
+            uint32_t camera = kernel::R32(g_camera2_object + kClassObject), ecx = ctx.ecx;
+            ctx.ecx = camera;
+            kernel::CallGuest(ctx, 0x103750, {0});
+            ctx.ecx = ecx;
+            LOGR("test: a mode 0 is put on Player 2's Camera: nobody moves it now");
+        }
     }
     if (ViewCamera2() && !g_one_view) {
         if (!g_stream_view) {  // this frame's picture: a bar where the two views meet
@@ -1485,7 +1943,7 @@ void Frame(X86Context& ctx) {
             const char* off;
         } kStates[] = {{0x8000, "goes into first person", "leaves first person"},
                        {0x40000, "begins to change form", "has changed form"},
-                       {0x200000, "uses something (a door, ladder, switch or the like)", "is done using it"},
+                       {0x200000, "uses something", "is done using it"},
                        {0x400000, "looks at a security monitor", "leaves the security monitor"}};
         const uint32_t players[2] = {g_player, g_second};
         for (int i = 0; i < 2; i++) {
@@ -1493,10 +1951,63 @@ void Frame(X86Context& ctx) {
                 before[i] = 0;
                 continue;
             }
-            uint32_t now = kernel::R32(players[i] + 0xBC);
-            for (const auto& st : kStates)
-                if ((now ^ before[i]) & st.bit) LOGI("coop: Player %d %s (state %08X)", i + 1, (now & st.bit) ? st.on : st.off, now);
+            uint32_t now = kernel::R32(players[i] + 0xBC), flags = kernel::R32(players[i] + 0xB0);
+            for (const auto& st : kStates) {
+                if (!((now ^ before[i]) & st.bit)) continue;
+                if (st.bit != 0x200000 || !(now & st.bit)) {
+                    LOGI("coop: Player %d %s (state %08X, flags %08X)", i + 1, (now & st.bit) ? st.on : st.off, now, flags);
+                    continue;
+                }
+                // (what it is and where: the two logs of 2026-11-26 could not tell a ledge from a ladder from a box)
+                uint32_t o = Named(players[i], 0x33E);
+                if (!o) o = Named(players[i], 0x340);
+                uint32_t cls = o ? ClassOf(o) : 0, body = i ? g_second_object : g_player_object;
+                const char* name = KindName(cls);
+                LOGI("coop: Player %d uses %s (class %08X at %.1f %.1f %.1f; he stands at %.2f %.2f %.2f; state %08X, flags %08X)", i + 1,
+                     name ? name : "something", cls, o ? ReadF(o + kPosition) : 0.f, o ? ReadF(o + kPosition + 4) : 0.f, o ? ReadF(o + kPosition + 8) : 0.f,
+                     body ? ReadF(body + kPosition) : 0.f, body ? ReadF(body + kPosition + 4) : 0.f, body ? ReadF(body + kPosition + 8) : 0.f, now, flags);
+            }
+            // Player 2 is off a ledge: a ledge stretches the climb to its height through the scale of the user's
+            // skeleton ([object +0xE8] +0x64, three floats; 0xD93D0 sets it, 0xD92A0 puts 1 back, both for "the
+            // player"). Should that way back ever be taken for Player 1 while it was Player 2 who climbed, he is
+            // not left stretched.
+            if (i == 1 && (before[i] & ~now & 0x200000) && g_second_object && mem::IsCommitted(g_second_object + 0xEC)) {
+                uint32_t skeleton = kernel::R32(g_second_object + 0xE8);
+                if (skeleton && mem::IsCommitted(skeleton + 0x70)) {
+                    float sx = ReadF(skeleton + 0x64), sy = ReadF(skeleton + 0x68), sz = ReadF(skeleton + 0x6C);
+                    if (sx != 1.0f || sy != 1.0f || sz != 1.0f) {
+                        const float one = 1.0f;
+                        for (uint32_t at : {0x64u, 0x68u, 0x6Cu}) std::memcpy(kernel::HostPtr(skeleton + at), &one, 4);
+                        LOGI("coop: Player 2's skeleton was left scaled %.2f %.2f %.2f after what he used: put back to 1", sx, sy, sz);
+                    }
+                }
+            }
             before[i] = now;
+        }
+    }
+    {   // S2_USE_TRACE=1: once a second, what each player has on his list of things to use (+0x342, 6 bytes each: the
+        // object's handle and the touch's word; count +0x34A) and what his two handles name
+        static const bool trace = std::getenv("S2_USE_TRACE") != nullptr;
+        if (trace && g_frames % 60 == 30) {
+            const uint32_t players[2] = {g_player, g_second};
+            uint32_t table = kernel::R32(kObjectManager + 0x0C);
+            for (int i = 0; i < 2; i++) {
+                uint32_t pl = players[i];
+                if (!pl || !mem::IsCommitted(pl + 0x540)) continue;
+                std::string line;
+                char one[64];
+                uint32_t list = kernel::R32(pl + 0x342), count = kernel::R32(pl + 0x34A);
+                for (uint32_t k = 0; list && k < count && k < 8; k++) {
+                    uint32_t h = kernel::R16(list + k * 6), o = table && h ? kernel::R32(table + h * 6) : 0;
+                    std::snprintf(one, sizeof one, " %08X(%X)", o && mem::IsCommitted(o + 0x110) ? ClassOf(o) : 0, kernel::R32(list + k * 6 + 2));
+                    line += one;
+                }
+                uint32_t h1 = kernel::R16(pl + 0x33E), h2 = kernel::R16(pl + 0x340);
+                uint32_t o1 = table && h1 ? kernel::R32(table + h1 * 6) : 0, o2 = table && h2 ? kernel::R32(table + h2 * 6) : 0;
+                LOGI("use trace: Player %d can use %u things:%s; +33E names %08X, +340 names %08X; looks at %u; +B0 %08X +BC %08X", i + 1, count, line.c_str(),
+                     o1 && mem::IsCommitted(o1 + 0x110) ? ClassOf(o1) : 0, o2 && mem::IsCommitted(o2 + 0x110) ? ClassOf(o2) : 0, kernel::R32(pl + 0x53A),
+                     kernel::R32(pl + 0xB0), kernel::R32(pl + 0xBC));
+            }
         }
     }
     {   // the record: a level comes into play, a level is left; a player's health reaches nothing
@@ -1715,6 +2226,27 @@ X86_FUNC(sub_0001B0D0) {
                  kernel::R32(ctx.esp + 4), game_coop::CallersOf(ctx).c_str());
     }
     __imp__sub_0001B0D0(ctx, base);
+}
+// The Player's touch method hands most of what he can use to 0x2DA30 first (this = Player; the usable's engine
+// object), which puts it on the list of what he is looking at (+0x532, count +0x53A, ten bytes an entry: the prompt
+// on the screen) when he stands and looks right for it. The list of what he can use is another: 0x1ABC0, below.
+// S2_USE_TRACE=1: each candidate and whether he is looking at it (when either changes).
+X86_EXTERN_FUNC(__imp__sub_0002DA30);
+X86_FUNC(sub_0002DA30) {
+    uint32_t player = ctx.ecx, object = kernel::R32(ctx.esp + 4);
+    uint32_t count = player && mem::IsCommitted(player + 0x540) ? kernel::R32(player + 0x53A) : 0;
+    __imp__sub_0002DA30(ctx, base);
+    static const bool trace = std::getenv("S2_USE_TRACE") != nullptr;
+    if (trace && object && mem::IsCommitted(object + 0x110) && (player == game_coop::g_player || player == game_coop::g_second)) {
+        static std::map<uint64_t, int> seen;
+        uint32_t after = kernel::R32(player + 0x53A);
+        uint64_t key = (uint64_t(object) << 2) | (player == game_coop::g_second ? 2 : 0) | (after > count ? 1 : 0);
+        if (seen.size() < 200 && !seen[key]++)
+            LOGI("use trace: Player %d is offered an object of class %08X (kind %u) at %.1f %.1f %.1f: %s", player == game_coop::g_second ? 2 : 1,
+                 game_coop::ClassOf(object), kernel::R32(object + 0xE0), game_coop::ReadF(object + game_coop::kPosition),
+                 game_coop::ReadF(object + game_coop::kPosition + 4), game_coop::ReadF(object + game_coop::kPosition + 8),
+                 after > count ? "he is looking at it" : "he is not looking at it");
+    }
 }
 COOP_COUNT(00029040)
 // (0x28E00, the Player is hurt: counted in its hook at the end of this file)
@@ -2056,9 +2588,10 @@ X86_FUNC(sub_00108120) {
 // class method +0x24. Trigger volumes hear of a player that way (Detector 0xFD110 keeps a list of who is inside),
 // items are picked up that way (the Player's own +0x24 = 0x1B0D0 sees the item and tells it), and the Player
 // lists what he can use that way. Touches between Player 2 and these classes are not delivered, either way round:
-// he sets off no trigger, picks nothing up and has nothing to use (the rule of 2026-11-23: only Player 1 opens
-// doors, uses and picks up, sets off triggers and scenes). Ladders, ledges and mounted weapons are among them for
-// now: Player 2's features come later, one at a time.
+// he sets off no trigger and picks nothing up (the rule of 2026-11-23: only Player 1 opens doors, uses and picks up,
+// sets off triggers and scenes). Since 2026-11-26 he climbs ladders, vaults ledges and pushes boxes: see "what Player
+// 2 can use", below. (A solid thing also tells its touch a second way, 0x1706F0, which is not filtered: that is how
+// he has opened doors and climbed ladders all along.)
 namespace game_coop {
 constexpr uint32_t kTemplates = 0x384BA4;  // the template table: chunks of 1024 at +0, entry size +0x14, count +0x18
 uint32_t ClassOf(uint32_t object) {
@@ -2098,15 +2631,14 @@ bool NotForSecond(uint32_t cls) {
         case 0xCF3A3FA5:  // Flashlight
         case 0xFE9F718D:  // Missile Item
         // things to use
+        // (Ladder 0x671882A1, Clamber Point 0xEC32498A = a ledge to vault, and Pushable 0x5FEBD8E9 were here until
+        // 2026-11-26: see "what Player 2 can use", below)
         case 0x3F4C759C:  // Switch
-        case 0x5FEBD8E9:  // Pushable
         case 0xD8E872CE:  // Security Monitor
         case 0xE4002F8D:  // Phone
         case 0x22B79066:  // Toilet
         case 0x69A9942B:  // Mountable
         case 0xC0DCDE7E:  // MountedWeapon
-        case 0x671882A1:  // Ladder
-        case 0xEC32498A:  // Clamber Point
             return true;
     }
     return false;
@@ -2488,6 +3020,165 @@ X86_FUNC(sub_00046B60) {
     __imp__sub_00046B60(ctx, base);
 }
 
+// ---- what Player 2 can use ---------------------------------------------------------------------------------------
+// (2026-11-26, after the online session of that day: "Player 2 was unable to vault", and a box he pushed "was
+// bugging out".)
+// What a Player can use is a list of his own (+0x342, six bytes an entry: the object's handle and the touch's word;
+// count +0x34A). An object puts itself there when it touches him: his touch method 0x1B0D0 calls 0x1ABC0 (this =
+// Player; the object, the word) every frame it touches. His once-a-frame method then goes through the list (0x41BA0,
+// called at 0x25524): with the jump button it asks the ledges (class Clamber Point: the game's "clamber" is the
+// vault), with the use button everything else. Each is asked through its method +0xAC whether he stands and faces
+// right for it, and the nearest that says yes is used. +0x33E is the handle of what he is using, +0x340 of what he
+// could use now.
+//   - A ledge's touch was refused to Player 2 (NotForSecond), so no ledge was ever on his list: he could not vault.
+//     Ladders and boxes were refused the same way, but they are solid and tell their touch the second way too: so he
+//     climbed ladders and took hold of boxes all the same.
+//   - The usable things ask for "the player", the first in the list, in sixteen places (work/re/player_owners.tsv):
+//     0xD7900 "can he use it from where he stands" when no user is named, a ledge's place along its edge 0xD8B70 and
+//     its height check 0xD8AD0, the scale of the climb 0xD93D0, the start and end of a use 0xD7EE0 (which writes the
+//     first Player down as the user) and 0xD92A0, and a box's own once-a-frame method 0xE3440, which moves the box
+//     with the hands of "the player's" skeleton. Inside Player 2's once-a-frame method he is the first (AsSecond).
+//     A box's own method runs outside it: there the box went by Player 1's hands while Player 2 pushed it. These
+//     run with Player 2 as the first whenever he is the one on the object and no Player's own method is running.
+//   - A box has one user: while one player has hold of it, it is not put on the other's list.
+//   - What stays Player 1's, although its touch can reach Player 2 the second way: the security monitors (decided
+//     2026-11-25), mounted weapons (the truck's gun comes later), phones, toilets and seats (they start scenes).
+namespace game_coop {
+uint32_t Named(uint32_t player, uint32_t at) {
+    if (!player || !mem::IsCommitted(player + 0x540)) return 0;
+    uint32_t table = kernel::R32(kObjectManager + 0x0C), h = kernel::R16(player + at);
+    uint32_t object = table && h ? kernel::R32(table + h * 6) : 0;
+    return object && mem::IsCommitted(object + 0x110) ? object : 0;
+}
+const char* KindName(uint32_t cls) {
+    switch (cls) {
+        case 0x671882A1: return "a ladder";
+        case 0xEC32498A: return "a ledge (a vault)";
+        case 0x5FEBD8E9: return "a box to push";
+        case 0x3F4C759C: return "a switch or a door";
+        case 0x69A9942B: return "a seat or a mount";
+        case 0xC0DCDE7E: return "a mounted weapon";
+        case 0xD8E872CE: return "a security monitor";
+        case 0xE4002F8D: return "a phone";
+        case 0x22B79066: return "a toilet";
+        case 0x0E15C87E: return "a person or a creature";
+        case 0xC3F8C321: return "a person";
+    }
+    return nullptr;
+}
+bool FirstOnly(uint32_t cls) {
+    switch (cls) {
+        case 0xD8E872CE:  // Security Monitor
+        case 0xE4002F8D:  // Phone
+        case 0x22B79066:  // Toilet
+        case 0x69A9942B:  // Mountable
+        case 0xC0DCDE7E:  // MountedWeapon
+            return true;
+    }
+    return false;
+}
+// Player 2 is the one on this object: he is using it, or it is what he could use now and Player 1 is not on it
+bool SecondOn(uint32_t object) {
+    if (!object || !g_second || !g_second_object) return false;
+    if (Named(g_second, 0x33E) == object) return true;
+    if (g_player && (Named(g_player, 0x33E) == object || Named(g_player, 0x340) == object)) return false;
+    return Named(g_second, 0x340) == object;
+}
+// ... for a usable thing's method (this = its class object, the engine object at +4), outside the Players' own
+bool ForSecond(uint32_t self) {
+    static const bool off = std::getenv("S2_COOP_NO_USE_SWAP") != nullptr;  // tests: as before 2026-11-26
+    if (off || g_running || !g_second_object || !self || !mem::IsCommitted(self + 8)) return false;
+    return SecondOn(kernel::R32(self + 4));
+}
+// the record: each thing a player can use, once for each player and level (and each that is kept off his list)
+void UseRecord(int who, uint32_t object, uint32_t cls, const char* refused) {
+    static std::map<uint64_t, int> seen;
+    static uint32_t level = 0;
+    if (level != g_player) level = g_player, seen.clear();
+    uint64_t key = (uint64_t(object) << 3) | (uint64_t(who) << 1) | (refused ? 1 : 0);
+    if (seen.size() >= 800 || seen[key]++) return;
+    const char* name = KindName(cls);
+    char what[48];
+    if (!name) std::snprintf(what, sizeof what, "an object of class %08X", cls), name = what;
+    if (refused) LOGI("use: %s at %.1f %.1f %.1f touches Player %d and is kept off his list: %s", name, ReadF(object + kPosition), ReadF(object + kPosition + 4),
+                      ReadF(object + kPosition + 8), who, refused);
+    else LOGI("use: Player %d can use %s at %.1f %.1f %.1f (it touches him)", who, name, ReadF(object + kPosition), ReadF(object + kPosition + 4),
+              ReadF(object + kPosition + 8));
+}
+// S2_USE_TRACE=1: a usable thing's answer when a player presses the button for it
+bool g_use_quiet = false;  // a test is asking by the thousand (TestSpot)
+void UseAnswer(X86Context& ctx, uint32_t self, uint32_t user, uint32_t answer) {
+    static const bool trace = std::getenv("S2_USE_TRACE") != nullptr;
+    static int said = 0;
+    if (!trace || g_use_quiet || said > 400 || !self || !mem::IsCommitted(self + 8)) return;
+    uint32_t object = kernel::R32(self + 4);
+    if (!object || !mem::IsCommitted(object + 0x110)) return;
+    said++;
+    const char* name = KindName(ClassOf(object));
+    LOGI("use trace: %s at %.1f %.1f %.1f is asked by Player %d (at %.2f %.2f %.2f): answer %u (3 is no); the first in the list is Player %d", name ? name : "something",
+         ReadF(object + kPosition), ReadF(object + kPosition + 4), ReadF(object + kPosition + 8), user == g_second_object ? 2 : user == g_player_object ? 1 : 0,
+         user && mem::IsCommitted(user + 0x60) ? ReadF(user + kPosition) : 0.f, user && mem::IsCommitted(user + 0x60) ? ReadF(user + kPosition + 4) : 0.f,
+         user && mem::IsCommitted(user + 0x60) ? ReadF(user + kPosition + 8) : 0.f, answer,
+         kernel::R32(kernel::R32(kObjectManager + kPlayerList)) == g_second_object ? 2 : 1);
+    (void)ctx;
+}
+}  // namespace game_coop
+
+// an object that touches a Player goes on his list of things to use (this = Player; the object, the touch's word)
+X86_EXTERN_FUNC(__imp__sub_0001ABC0);
+X86_FUNC(sub_0001ABC0) {
+    using namespace game_coop;
+    uint32_t player = ctx.ecx, object = kernel::R32(ctx.esp + 4);
+    int who = player && player == g_player ? 1 : g_second && player == g_second ? 2 : 0;
+    if (who && object && mem::IsCommitted(object + 0x110)) {
+        uint32_t cls = ClassOf(object);
+        const char* refused = nullptr;
+        if (who == 2 && FirstOnly(cls)) refused = "it is for Player 1 only";
+        else if (cls == 0x5FEBD8E9 && g_second && Named(who == 2 ? g_player : g_second, 0x33E) == object) refused = "the other player has hold of it";
+        UseRecord(who, object, cls, refused);
+        if (refused) {
+            kernel::Return(ctx, 0, 2);
+            return;
+        }
+    }
+    __imp__sub_0001ABC0(ctx, base);
+}
+// the usable things' methods that work on "the player" (this = the thing's class object)
+#define COOP_USABLE(addr)                                \
+    X86_EXTERN_FUNC(__imp__sub_##addr);                  \
+    X86_FUNC(sub_##addr) {                               \
+        game_coop::ListAsSecond as(game_coop::ForSecond(ctx.ecx)); \
+        __imp__sub_##addr(ctx, base);                    \
+    }
+COOP_USABLE(000E3440)  // a box's once-a-frame method: it goes by the hands of the player's skeleton
+COOP_USABLE(000D93D0)  // a ledge: the scale of the climb, written into the player's skeleton
+COOP_USABLE(000D92A0)  // a ledge: the use ends, the scale goes back to 1
+COOP_USABLE(000D7EE0)  // any of them: the use begins (the player is written down as the user) or ends
+COOP_USABLE(000D8AD0)  // a ledge: is the player at a height to take it
+COOP_USABLE(000D8B70)  // a ledge: the place along its edge nearest the player
+COOP_USABLE(000D9300)  // a ledge: which way of climbing fits the player
+COOP_USABLE(000D77B0)  // any of them: hands itself to the player
+// "can he use it from where he stands" (the object, its matrix by value, the way of using it, the user: 0 = "the
+// player")
+X86_EXTERN_FUNC(__imp__sub_000D7900);
+X86_FUNC(sub_000D7900) {
+    uint32_t object = kernel::R32(ctx.esp + 4), user = kernel::R32(ctx.esp + 0x4C);
+    static const bool off = std::getenv("S2_COOP_NO_USE_SWAP") != nullptr;
+    game_coop::ListAsSecond as(!off && !user && !game_coop::g_running && game_coop::g_second_object && game_coop::SecondOn(object));
+    __imp__sub_000D7900(ctx, base);
+}
+// the answers of a ledge, a box and a ladder to "can this one use you" (this; the user's object, a flag): traced
+#define COOP_CANUSE(addr)                                \
+    X86_EXTERN_FUNC(__imp__sub_##addr);                  \
+    X86_FUNC(sub_##addr) {                               \
+        uint32_t self = ctx.ecx, user = kernel::R32(ctx.esp + 4); \
+        __imp__sub_##addr(ctx, base);                    \
+        game_coop::UseAnswer(ctx, self, user, ctx.eax);  \
+    }
+COOP_CANUSE(000D9870)
+COOP_CANUSE(000E3D60)
+COOP_CANUSE(000DB1D0)
+
 // Tests: S2_COOP_EXIT=<frame> sets off the level's exit at that frame without walking to it: the first Level
 // Transition object that is loaded gets its own "go" (0x160B70, this = the Level Transition; it stops Player 1, puts
 // up the loading screen and leaves itself at 0x392138, from where the game's frame calls 0x160D20).
@@ -2643,6 +3334,17 @@ void TestCensus() {
         auto& s = seen[ClassOf(object)];
         if (!s.first++) s.second = object;
     });
+    // S2_TEST_KIND=<class id in hex>: every object of that class too, with its flags (which ledges are switched on)
+    if (const char* kind = std::getenv("S2_TEST_KIND")) {
+        uint32_t want = uint32_t(std::strtoul(kind, nullptr, 16));
+        int n = 0;
+        EachObject([&](uint32_t object) {
+            if (ClassOf(object) != want || n > 80) return;
+            uint32_t self = kernel::R32(object + kClassObject);
+            LOGR("census: %08X #%d at %.1f %.1f %.1f, object flags %08X, its own flags (+0x46) %08X", want, n++, ReadF(object + kPosition), ReadF(object + kPosition + 4),
+                 ReadF(object + kPosition + 8), kernel::R32(object + 8), self && mem::IsCommitted(self + 0x4C) ? kernel::R32(self + 0x46) : 0);
+        });
+    }
     for (const Kind& k : kKinds) {
         auto it = seen.find(k.cls);
         if (it == seen.end()) continue;
@@ -2651,6 +3353,124 @@ void TestCensus() {
              ReadF(o + kPosition + 4), ReadF(o + kPosition + 8), ReadF(g_player_object + kPosition), ReadF(g_player_object + kPosition + 4),
              ReadF(g_player_object + kPosition + 8));
     }
+}
+
+// S2_TEST_PUT=<frame>,<who 1 or 2>,<x>,<y>,<z>,<facing in degrees>[;<frame>,<who>,...]: that player is put at that
+// place facing that way (0 is +z, 90 is +x: the "facing" of the position lines), by the game's own teleport. Places
+// taken from a session log (where a player stood when he used something) can be tried again that way.
+void TestPut(X86Context& ctx) {
+    static const char* v = std::getenv("S2_TEST_PUT");
+    if (!v || !g_player_object || !g_player) return;
+    for (const char* c = v; c && *c; c = std::strchr(c, ';') ? std::strchr(c, ';') + 1 : nullptr) {
+        unsigned long long frame = 0;
+        int who = 1;
+        float x = 0, y = 0, z = 0, facing = 0;
+        if (std::sscanf(c, "%llu,%d,%f,%f,%f,%f", &frame, &who, &x, &y, &z, &facing) < 5 || g_frames != frame) continue;
+        uint32_t player = who == 2 ? g_second : g_player, object = who == 2 ? g_second_object : g_player_object;
+        if (!player || !object) {
+            LOGR("put: there is no Player %d", who);
+            continue;
+        }
+        float m[16] = {};
+        float a = facing / 57.29578f, fx = std::sin(a), fz = std::cos(a);
+        float old[16];
+        std::memcpy(old, kernel::HostPtr(object + kMatrix), 64);
+        // (the right vector keeps the hand of the matrix he has: as TestGoto does)
+        float rx = old[5] * old[10] - old[6] * old[9], rz = old[4] * old[9] - old[5] * old[8];
+        float sign = rx * old[0] + rz * old[2] < 0 ? -1.0f : 1.0f;
+        m[8] = fx, m[9] = 0, m[10] = fz;
+        m[0] = sign * fz, m[1] = 0, m[2] = -sign * fx;
+        m[4] = 0, m[5] = 1, m[6] = 0;
+        m[12] = x, m[13] = y, m[14] = z, m[15] = 1;
+        m[3] = old[3], m[7] = old[7], m[11] = old[11];
+        static uint32_t matrix = mem::AllocSystem(64);
+        std::memcpy(kernel::HostPtr(matrix), m, 64);
+        uint32_t ecx = ctx.ecx;
+        ctx.ecx = player;
+        kernel::CallGuest(ctx, kPlayerStop, {});
+        ctx.ecx = player;
+        kernel::CallGuest(ctx, kPlayerTeleport, {matrix});
+        ctx.ecx = ecx;
+        LOGR("put: Player %d put at %.2f %.2f %.2f facing %.0f", who, x, y, z, facing);
+    }
+}
+
+// S2_TEST_SPOT=<frame>,<class id in hex>,<which>[,<who 1 or 2>[,<floor>]]: finds a place from which that player can
+// use the <which>-th loaded object of that class. From that frame on he is put at one place after another round the
+// object (0.8, 1.2 and 1.6 m from it, every 30 degrees, facing it, at the object's height plus <floor> metres: a
+// player put in the air stays there, so the test says where the floor is, 0.05 above it), left there for a fifth
+// of a second, and the object is asked (its method +0xAC, as the Player's once-a-frame method asks when the button
+// is pressed). The first place it says yes from is logged and he stays
+// there: S2_TEST_PUT with that place repeats it in another run. (A ledge, a box or a ladder says yes only from the
+// right spot facing the right way with nothing between his head and it, and a place read off a session log, one a
+// second, is rarely it.)
+void TestSpot(X86Context& ctx) {
+    static const char* v = std::getenv("S2_TEST_SPOT");
+    if (!v || !g_player_object || !g_player) return;
+    static unsigned long long frame = 0;
+    static unsigned cls = 0;
+    static int which = 0, who = 1, step = -1, parsed = 0;
+    static float facing = 0, floor = 0;
+    if (!parsed) parsed = std::sscanf(v, "%llu,%x,%d,%d,%f", &frame, &cls, &which, &who, &floor) >= 3 ? 1 : -1;
+    if (parsed < 0 || g_frames < frame || step == -2 || (g_frames - frame) % 12) return;
+    uint32_t player = who == 2 ? g_second : g_player, body = who == 2 ? g_second_object : g_player_object;
+    uint32_t target = 0;
+    int n = 0;
+    EachObject([&](uint32_t object) {
+        if (ClassOf(object) == cls && n++ == which) target = object;
+    });
+    uint32_t self = target ? kernel::R32(target + kClassObject) : 0;
+    if (!player || !body || !self || !mem::IsCommitted(self + 0x90)) {
+        LOGR("spot: no Player %d, or no object %d of class %08X (%d loaded)", who, which, cls, n);
+        step = -2;
+        return;
+    }
+    float t[3] = {ReadF(target + kPosition), ReadF(target + kPosition + 4), ReadF(target + kPosition + 8)};
+    uint32_t ecx = ctx.ecx;
+    if (step >= 0) {  // where he was put half a second ago: can he use it from there?
+        ListAsSecond as(who == 2);
+        uint32_t method = kernel::R32(kernel::R32(self) + 0xAC);
+        ctx.ecx = self;
+        uint32_t plain = kernel::CallGuest(ctx, method, {body, 0});
+        ctx.ecx = self;
+        uint32_t looking = kernel::CallGuest(ctx, method, {body, 1});
+        ctx.ecx = ecx;
+        if (plain != 3 || looking != 3) {
+            LOGR("spot: object %d of class %08X at %.1f %.1f %.1f says yes to Player %d (answer %u; %u when it is what he looks at) at %.2f %.2f %.2f facing %.0f", which,
+                 cls, t[0], t[1], t[2], who, plain, looking, ReadF(body + kPosition), ReadF(body + kPosition + 4), ReadF(body + kPosition + 8), facing);
+            step = -2;
+            return;
+        }
+    }
+    step++;
+    static const float kFar[3] = {0.8f, 1.2f, 1.6f};
+    if (step >= 36) {
+        LOGR("spot: object %d of class %08X at %.1f %.1f %.1f said no to Player %d from all 36 places (its own flags +0x46: %08X)", which, cls, t[0], t[1], t[2], who,
+             kernel::R32(self + 0x46));
+        step = -2;
+        return;
+    }
+    float r = kFar[step / 12], a = float(step % 12) * 30.0f / 57.29578f;
+    float px = t[0] + r * std::sin(a), pz = t[2] + r * std::cos(a);
+    // (he walks against his matrix's third axis: to face the object that axis points away from it)
+    float fx = (px - t[0]) / r, fz = (pz - t[2]) / r;
+    facing = std::atan2(fx, fz) * 57.29578f;
+    float old[16], m[16] = {};
+    std::memcpy(old, kernel::HostPtr(body + kMatrix), 64);
+    float rx = old[5] * old[10] - old[6] * old[9], rz = old[4] * old[9] - old[5] * old[8];
+    float sign = rx * old[0] + rz * old[2] < 0 ? -1.0f : 1.0f;
+    m[8] = fx, m[9] = 0, m[10] = fz;
+    m[0] = sign * fz, m[1] = 0, m[2] = -sign * fx;
+    m[4] = 0, m[5] = 1, m[6] = 0;
+    m[12] = px, m[13] = t[1] + floor, m[14] = pz, m[15] = 1;
+    m[3] = old[3], m[7] = old[7], m[11] = old[11];
+    static uint32_t matrix = mem::AllocSystem(64);
+    std::memcpy(kernel::HostPtr(matrix), m, 64);
+    ctx.ecx = player;
+    kernel::CallGuest(ctx, kPlayerStop, {});
+    ctx.ecx = player;
+    kernel::CallGuest(ctx, kPlayerTeleport, {matrix});
+    ctx.ecx = ecx;
 }
 
 void TestGoto(X86Context& ctx) {
@@ -2715,7 +3535,7 @@ void TestGoto(X86Context& ctx) {
 //   0x100930  the insanity meter is filled (0x2A490 gives the most, 0x2ADD0 sets it)
 //   0x100840  into the creature form, unless he is in it (0x2B230)
 //   0x1008B0  out of it, when he is in it (0x2B230, then the meter to 0)
-// Player 2 stayed human there, with enemies around that only the creature can hurt (Skylar, 2026-11-26: "when player
+// Player 2 stayed human there, with enemies around that only the creature can hurt (the owner, 2026-11-26: "when player
 // 2 played, he didn't transform when player 1 transform"). The same is now done for Player 2 right after.
 // S2_TEST_STORY_FORM=<frame>: the fill and the change at that frame, the change back 600 frames later (tests).
 namespace game_coop {
@@ -3179,6 +3999,23 @@ void Outfit(const gpu::State& s) {
          dir.string().c_str());
 }
 uint32_t DrawVariant(X86Context& ctx, const gpu::State& s) {
+    {   // the detail record: what each view drew this frame (see DetailFrame)
+        PassStats& p = g_pass[g_screen_pass ? 1 : 0];
+        p.draws++;
+        uint32_t fog = s.rs[gpu::kRsFogEnable], z = s.rs[gpu::kRsZEnable];
+        if (fog) p.fogged++;
+        uint64_t h = (uint64_t(fog ? s.rs[gpu::kRsFogColor] : 0) * 0x9E3779B97F4A7C15ull) ^ (uint64_t(fog ? s.rs[gpu::kRsFogStart] : 0) << 17) ^
+                     (uint64_t(fog ? s.rs[gpu::kRsFogEnd] : 0) << 3) ^ (uint64_t(s.rs[gpu::kRsAmbient]) * 0xC2B2AE3D27D4EB4Full) ^ s.light_enable;
+        p.hash += h * 0xFF51AFD7ED558CCDull + 1;
+        if (z && !p.have) {  // the first draw of the pass that tests depth: the view's own state
+            p.have = true;
+            p.fog_on = fog != 0, p.fog_color = s.rs[gpu::kRsFogColor], p.fog_start = s.rs[gpu::kRsFogStart], p.fog_end = s.rs[gpu::kRsFogEnd];
+            p.ambient = s.rs[gpu::kRsAmbient], p.lights = s.light_enable;
+            p.proj[0] = s.transforms[3][0], p.proj[1] = s.transforms[3][5], p.proj[2] = s.transforms[3][10], p.proj[3] = s.transforms[3][14];
+            p.eye[0] = s.transforms[2][12], p.eye[1] = s.transforms[2][13], p.eye[2] = s.transforms[2][14];
+            p.vw = s.viewport.w, p.vh = s.viewport.h, p.rt = s.rt.data;
+        }
+    }
     static const uint64_t trace_at = std::getenv("S2_DRAW_TRACE") ? uint64_t(std::atoll(std::getenv("S2_DRAW_TRACE"))) : 0;
     // S2_CAPTURE_FRAME=<frame> (with XBE_CAPTURE_DIR): the runtime's frame capture, as F3 would, at that frame
     static const uint64_t cap_at = std::getenv("S2_CAPTURE_FRAME") ? uint64_t(std::atoll(std::getenv("S2_CAPTURE_FRAME"))) : 0;

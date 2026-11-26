@@ -14,6 +14,9 @@ void Init(const std::string& dir, const std::string& prefix, bool append = false
 void Write(Level lv, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 void Flush();
 const std::string& Path();
+// [local change, The Suffering: Ties That Bind] the seconds a line written now would carry (other records of the
+// same session, written elsewhere, use the same clock)
+double Seconds();
 
 #ifdef NDEBUG
 inline constexpr bool kVerbose = false;

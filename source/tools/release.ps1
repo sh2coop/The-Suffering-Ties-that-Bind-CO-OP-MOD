@@ -92,7 +92,7 @@ $signed = Join-Path $clone "Game Files\signed-update"
 New-Item -ItemType Directory -Force $signed | Out-Null
 Copy-Item "$rel\update.zip" (Join-Path $signed "update-$number.zip")
 Copy-Item "$rel\update.zip.sig" (Join-Path $signed "update-$number.zip.sig")
-Set-Content -Encoding ascii (Join-Path $clone "Logs\what is this folder.txt") "The game writes one file here every time it is started, and its crash reports.`r`nIf something goes wrong, zip this folder and send it."
+Set-Content -Encoding ascii (Join-Path $clone "Logs\what is this folder.txt") "The game writes a log file here every time it is started, and its crash reports. For the three newest starts there is also a packed record of every frame (..._detail.log.gz) and a folder of small pictures of the game's window, one every three seconds (..._pictures).`r`nSaw something wrong on the screen? Press F9 while it is there: a full picture and the game's state are saved here.`r`nIf something goes wrong, zip this folder and send it."
 $source = Join-Path $clone "source"
 New-Item -ItemType Directory $source | Out-Null
 $archive = Join-Path $rel "source.tar"

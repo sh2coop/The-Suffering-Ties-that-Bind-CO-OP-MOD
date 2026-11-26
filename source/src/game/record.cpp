@@ -7,7 +7,12 @@
 //   window:  the game window in front or not, minimized, its size, whenever one of them changes
 //   input:   every controller: plugged in or out, each button and trigger going down and up, each stick's direction
 //            (eight directions and the middle) when it changes
-// The keyboard is not recorded: a log is sent to someone else and must not hold what was typed.
+//   pictures: a small picture of the game's own window every three seconds (S2_PICTURE_SECONDS=<n>, 0 for none), and
+//            a full-size one when F9 is pressed or a check in the game asks for one ("mark:" lines; coop.cpp then
+//            writes the state of both players and cameras at that moment). They go to the session's pictures folder
+//            (detail.cpp). Only the game's window is ever taken, never the rest of the screen.
+// The keyboard is not recorded: a log is sent to someone else and must not hold what was typed. (F9 is the one key
+// looked at, and only whether it is down.)
 // The game's own events are logged where they happen (coop.cpp, net.cpp, menu.cpp), frame pacing by the runtime
 // ("pace:" lines, sdk/runtime/xdk/d3d8.cpp).
 #ifdef _WIN32
@@ -18,16 +23,29 @@
 
 #include <psapi.h>
 #endif
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "app/app.h"
 #include "core/log.h"
+#define STBI_WRITE_NO_STDIO
+#include "third_party/stb_image_write.h"  // (built in net.cpp)
+
+namespace game_menu { bool AddressOnScreen(); }  // menu.cpp: a row with an internet address is up
+namespace game_detail {  // detail.cpp
+bool On();
+std::string PicturesDir();
+void Line(const char* fmt, ...);
+}
 
 namespace game_record {
 namespace {
@@ -168,6 +186,160 @@ void WallClock() {
     LOGI("clock: %04u-%02u-%02u %02u:%02u:%02u.%03u UTC", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
 }
 
+// ---- pictures ---------------------------------------------------------------------------------------------------
+struct Shot {
+    std::vector<uint8_t> rgb;
+    int w = 0, h = 0;
+};
+
+// the game window's picture area as it is shown (the window draws itself into a bitmap: nothing else on the screen
+// is taken, and the window need not be in front)
+bool Grab(HWND hwnd, Shot& s) {
+    RECT rc{};
+    if (!hwnd || IsIconic(hwnd) || !GetClientRect(hwnd, &rc) || rc.right < 16 || rc.bottom < 16) return false;
+    int w = rc.right, h = rc.bottom;
+    HDC wdc = GetDC(hwnd);
+    if (!wdc) return false;
+    HDC mdc = CreateCompatibleDC(wdc);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = w, bi.bmiHeader.biHeight = -h, bi.bmiHeader.biPlanes = 1, bi.bmiHeader.biBitCount = 32, bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bmp = mdc ? CreateDIBSection(wdc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+    bool ok = false;
+    if (bmp && bits) {
+        HGDIOBJ old = SelectObject(mdc, bmp);
+        constexpr UINT kClientOnly = 1, kFullContent = 2;  // (PW_CLIENTONLY, PW_RENDERFULLCONTENT)
+        ok = PrintWindow(hwnd, mdc, kClientOnly | kFullContent) != 0;
+        GdiFlush();
+        if (ok) {
+            const uint8_t* p = static_cast<const uint8_t*>(bits);
+            s.w = w, s.h = h;
+            s.rgb.resize(size_t(w) * h * 3);
+            for (size_t i = 0, n = size_t(w) * h; i < n; i++) s.rgb[i * 3] = p[i * 4 + 2], s.rgb[i * 3 + 1] = p[i * 4 + 1], s.rgb[i * 3 + 2] = p[i * 4];
+        }
+        SelectObject(mdc, old);
+    }
+    if (bmp) DeleteObject(bmp);
+    if (mdc) DeleteDC(mdc);
+    ReleaseDC(hwnd, wdc);
+    return ok;
+}
+
+// a picture made smaller: each new pixel is the average of the ones it covers
+void Smaller(const Shot& in, int width, Shot& out) {
+    if (in.w <= width) {
+        out = in;
+        return;
+    }
+    out.w = width, out.h = std::max(1, int(int64_t(in.h) * width / in.w));
+    out.rgb.resize(size_t(out.w) * out.h * 3);
+    for (int y = 0; y < out.h; y++) {
+        int y0 = int(int64_t(y) * in.h / out.h), y1 = std::max(y0 + 1, int(int64_t(y + 1) * in.h / out.h));
+        for (int x = 0; x < out.w; x++) {
+            int x0 = int(int64_t(x) * in.w / out.w), x1 = std::max(x0 + 1, int(int64_t(x + 1) * in.w / out.w));
+            uint32_t sum[3] = {0, 0, 0}, n = 0;
+            for (int yy = y0; yy < y1 && yy < in.h; yy++) {
+                const uint8_t* p = &in.rgb[(size_t(yy) * in.w + x0) * 3];
+                for (int xx = x0; xx < x1 && xx < in.w; xx++, p += 3) sum[0] += p[0], sum[1] += p[1], sum[2] += p[2], n++;
+            }
+            uint8_t* d = &out.rgb[(size_t(y) * out.w + x) * 3];
+            for (int c = 0; c < 3; c++) d[c] = uint8_t(n ? sum[c] / n : 0);
+        }
+    }
+}
+
+bool SaveJpeg(const std::string& path, const Shot& s, int quality) {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    auto put = [](void* file, void* data, int size) { std::fwrite(data, 1, size_t(size), static_cast<FILE*>(file)); };
+    int ok = stbi_write_jpg_to_func(put, f, s.w, s.h, 3, s.rgb.data(), quality);
+    std::fclose(f);
+    return ok != 0;
+}
+
+std::mutex g_mark_lock;
+std::vector<std::string> g_mark_asked;  // full-size pictures asked for, each with why
+std::atomic<uint32_t> g_marks{0};       // how many were taken (the game writes its state when this moves)
+std::string g_mark_why;                 // ... and why the newest one was
+
+void Pictures() {
+    int every = 3;
+    if (const char* v = std::getenv("S2_PICTURE_SECONDS")) every = std::max(0, std::atoi(v));
+    std::string dir = game_detail::PicturesDir();
+    if (dir.empty()) return;
+    LOGR("pictures: a small picture of the game's window every %d s and a full one at F9 (or when a check asks), into the session's pictures folder", every);
+    Clock::time_point last = Clock::now();
+    bool f9_before = false;
+    uint32_t small_count = 0, mark_count = 0, failed = 0;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        HWND hwnd = static_cast<HWND>(app::Window());
+        if (!hwnd) continue;
+        std::vector<std::string> marks;
+        bool f9 = GetForegroundWindow() == hwnd && (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+        if (f9 && !f9_before) marks.push_back("F9 was pressed");
+        f9_before = f9;
+        {
+            std::lock_guard l(g_mark_lock);
+            for (auto& m : g_mark_asked) marks.push_back(std::move(m));
+            g_mark_asked.clear();
+        }
+        Clock::time_point now = Clock::now();
+        bool due = every > 0 && now - last >= std::chrono::seconds(every);
+        if (marks.empty() && !due) continue;
+        // (no picture of a screen that shows an internet address: the folder is sent to other people)
+        if (game_menu::AddressOnScreen()) {
+            static int said = 0;
+            if (said++ < 2) LOGI("pictures: none while the screen shows an internet address");
+            for (const auto& m : marks) LOGR("mark: %s (no picture: the screen shows an internet address)", m.c_str());
+            if (!marks.empty()) {
+                std::lock_guard l(g_mark_lock);
+                g_mark_why = marks.back();
+                g_marks++;
+            }
+            if (due) last = now;
+            continue;
+        }
+        Shot full;
+        double at = logx::Seconds();
+        if (!Grab(hwnd, full)) {
+            if (failed++ < 3) LOGI("pictures: the window's picture could not be taken (it is minimized, or Windows refused)");
+            if (due) last = now;
+            for (const auto& m : marks) LOGR("mark: %s (no picture: the window could not be taken)", m.c_str());
+            if (!marks.empty()) {
+                std::lock_guard l(g_mark_lock);
+                g_mark_why = marks.back();
+                g_marks++;
+            }
+            continue;
+        }
+        char name[64];
+        if (!marks.empty() && mark_count < 400) {
+            std::snprintf(name, sizeof name, "mark_%07.1f.jpg", at);
+            bool ok = SaveJpeg(dir + "/" + name, full, 88);
+            mark_count++;
+            for (const auto& m : marks) LOGR("mark: %s: the picture is %s (%d x %d)%s", m.c_str(), name, full.w, full.h, ok ? "" : ", which could not be written");
+            std::lock_guard l(g_mark_lock);
+            g_mark_why = marks.back();
+            g_marks++;
+        }
+        if (due) {
+            last = now;
+            Shot small_one;
+            Smaller(full, 480, small_one);
+            std::snprintf(name, sizeof name, "%07.1f.jpg", at);
+            SaveJpeg(dir + "/" + name, small_one, 68);
+            // (how bright it is, into the detail record: a sudden change shows there without opening the pictures)
+            uint64_t sum[3] = {0, 0, 0};
+            for (size_t i = 0; i + 2 < small_one.rgb.size(); i += 3) sum[0] += small_one.rgb[i], sum[1] += small_one.rgb[i + 1], sum[2] += small_one.rgb[i + 2];
+            double n = double(small_one.rgb.size() / 3 + 1);
+            game_detail::Line("pic %s window %dx%d mean %.1f %.1f %.1f", name, full.w, full.h, sum[0] / n, sum[1] / n, sum[2] / n);
+            if (++small_count == 1) LOGI("pictures: the first one is %s (%d x %d from a window of %d x %d)", name, small_one.w, small_one.h, full.w, full.h);
+        }
+    }
+}
+
 void Run() {
     GetStateFn get = XInput();
     if (!get) LOGW("input: no XInput library on this PC, controllers are not recorded");
@@ -192,6 +364,28 @@ void Init() {
 #ifdef _WIN32
     if (std::getenv("S2_NO_RECORD")) return;
     std::thread(Run).detach();
+    if (game_detail::On()) std::thread(Pictures).detach();
+#endif
+}
+
+// a full-size picture of the window now, with why (any thread: a check in the game found something odd)
+void Mark(const std::string& why) {
+#ifdef _WIN32
+    std::lock_guard l(g_mark_lock);
+    if (g_mark_asked.size() < 8) g_mark_asked.push_back(why);
+#else
+    (void)why;
+#endif
+}
+// how many marks there have been, and why the newest (the game writes its state into the log when the count moves)
+uint32_t Marks(std::string* why) {
+#ifdef _WIN32
+    std::lock_guard l(g_mark_lock);
+    if (why) *why = g_mark_why;
+    return g_marks.load();
+#else
+    (void)why;
+    return 0;
 #endif
 }
 }  // namespace game_record

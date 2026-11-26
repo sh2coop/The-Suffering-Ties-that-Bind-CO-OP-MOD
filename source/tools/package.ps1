@@ -119,8 +119,15 @@ UPDATES
 
 SOMETHING WENT WRONG?
 
-  Zip the "Logs" folder (it is right here, beside "The Suffering 2") and send it.
-  It has one file for every time the game was started, and the crash reports.
+  Saw something wrong on the screen? Press F9 while it is there. The game saves a
+  full picture of its window and what it was doing at that moment.
+
+  Then zip the "Logs" folder (it is right here, beside "The Suffering 2") and send it.
+  For every time the game was started it has a log file, and for the three newest
+  starts also a packed record of every frame ("..._detail.log.gz") and a folder of
+  small pictures of the game's window, one every three seconds ("..._pictures").
+  Only the game's own window is ever pictured, and the keyboard is not recorded.
+  An hour of play is about 60 to 100 MB. The crash reports are in there too.
 "@ | Set-Content -Encoding utf8 (Join-Path $Out "READ ME.txt")
 
 $size = (Get-ChildItem $Out -Recurse -File | Measure-Object Length -Sum).Sum / 1MB

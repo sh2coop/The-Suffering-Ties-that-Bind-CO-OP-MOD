@@ -37,6 +37,7 @@ bool HostHasPlayer();
 bool HostExpect(const std::string& address);
 int JoinState();
 int JoinPhase();
+bool JoinRetarget(const std::string& address);
 }
 
 namespace game_meet {
@@ -230,7 +231,14 @@ void Run() {
             if (!mine.empty()) {
                 join_told = now;
                 int status = Post("/join", "{\"code\":\"" + join_code + "\",\"addr\":\"" + mine + "\"}", answer);
-                LOGI("meet: this PC's address %s is left for the host (status %d)", mine.c_str(), status);
+                // (the address itself is not written: logs are sent around. Its port is what matters here.)
+                size_t colon = mine.rfind(':');
+                LOGI("meet: this PC's address (outside port %s) is left for the host (status %d)", colon == std::string::npos ? "?" : mine.c_str() + colon + 1, status);
+                // The answer says where the host's game is NOW: its outside port can change while this one waits
+                // (2026-11-26: it did, and this game sent to the old port for 90 s). net.cpp sends there from now on.
+                std::string host = Field(answer, "host"), lan = Field(answer, "lan");
+                if (status == 200 && !lan.empty()) host = lan;
+                if (status == 200 && !host.empty()) game_net::JoinRetarget(host);
             }
         }
         {   // the join this code started is over (in the game, or given up): the code is done with

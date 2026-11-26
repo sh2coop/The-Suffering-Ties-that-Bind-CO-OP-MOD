@@ -13,6 +13,7 @@ void Loaded();
 namespace game_watchdog { void Init(); }  // freeze report (src/game/watchdog.cpp)
 namespace game_meet { void Init(); }      // the meeting point: one short code to join (src/game/meet.cpp)
 namespace game_record { void Init(); }    // the session record: clock, load, window, controllers (src/game/record.cpp)
+namespace game_detail { void Init(); }    // the detail record: every frame, every object, pictures (src/game/detail.cpp)
 namespace game_coop {
 void Ui(double fps);  // coop.cpp
 extern uint32_t g_p2_invert, g_p2_speed;  // Player 2's own look
@@ -27,6 +28,7 @@ static void GameInit() {
     game_pad::Init();
     game_diag::Init();
     game_watchdog::Init();
+    game_detail::Init();
     game_record::Init();
     game_meet::Init();
 }

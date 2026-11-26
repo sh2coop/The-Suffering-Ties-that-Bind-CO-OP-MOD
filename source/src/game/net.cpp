@@ -80,6 +80,7 @@
 #include "third_party/stb_image.h"
 
 namespace game_coop {
+extern std::atomic<int> g_ammo2_rounds, g_ammo2_clip, g_ammo2_more;  // Player 2's ammunition (coop.cpp, DetailFrame)
 void RemotePlayer(bool connected);  // the host's remote player came or went
 bool SplitActive();                 // player two is in and the screen is split
 bool StreamView();                  // player two is in and the frames handed over are his view, whole
@@ -87,8 +88,15 @@ extern uint32_t g_p2_invert, g_p2_speed;  // this PC's Player 2 look settings
 void RemoteLookFrom(uint32_t invert, uint32_t speed);  // a joined player's, as his PC sends them
 void RemoteLookForget();
 bool InLevel();  // a level is in play on this PC
+bool SceneNow();  // the picture is one view, Player 1's: a scene, or the story holds him
 extern uint32_t g_p2_volume;  // this PC's volume for a host's sound, per cent
 void RemoteVolumeFrom(uint32_t volume);  // a joined player's, as his PC sends it
+}
+
+namespace game_detail {  // detail.cpp: the record of every frame, and the session's pictures folder
+bool On();
+std::string PicturesDir();
+void Line(const char* fmt, ...);
 }
 
 namespace game_net {
@@ -239,10 +247,30 @@ void Most(std::atomic<uint32_t>& a, uint32_t v) {
     uint32_t was = a.load();
     while (v > was && !a.compare_exchange_weak(was, v)) {}
 }
-// what a controller packet holds, when it changes: the joined player's buttons as the host got them
-void RemoteInput(uint16_t buttons, const uint8_t analog[8]) {
+// what a controller packet holds, when it changes: the joined player's buttons and sticks as the host got them
+// (the sticks since 2026-11-26: the log of that day's session could not say whether the joined player had pushed
+// the stick while he held a box for 18 s; named as record.cpp names a controller's)
+const char* StickWay(int x, int y, bool was_out) {
+    static const char* const kNames[9] = {"the middle", "up", "up and right", "right", "down and right", "down", "down and left", "left", "up and left"};
+    double r = std::sqrt(double(x) * x + double(y) * y) / 32767.0;
+    if (r < (was_out ? 0.25 : 0.40)) return kNames[0];
+    double a = std::atan2(double(x), double(y)) * 57.29578;  // 0 up, 90 right
+    if (a < 0) a += 360;
+    return kNames[1 + int((a + 22.5) / 45.0) % 8];
+}
+void RemoteInput(uint16_t buttons, const uint8_t analog[8], int lx, int ly, int rx, int ry) {
     static uint16_t before = 0;
     static bool held[8] = {};
+    {
+        static const char* left = nullptr;
+        static const char* right = nullptr;
+        const char* middle = StickWay(0, 0, true);
+        const char* l = StickWay(lx, ly, left && left != middle);
+        const char* r = StickWay(rx, ry, right && right != middle);
+        if (left && l != left) LOGI("input: the joined player: left stick %s", l);
+        if (right && r != right) LOGI("input: the joined player: right stick %s", r);
+        left = l, right = r;
+    }
     static const struct {
         uint16_t bit;
         const char* name;
@@ -260,6 +288,11 @@ void RemoteInput(uint16_t buttons, const uint8_t analog[8]) {
 }
 constexpr int kJoiningMs = 2000;  // the joiner's "joining" screen before the host's picture is shown
 std::atomic<Clock::time_point> g_host_waits{};  // when the host last said "not in a level yet"
+// ... and when it last said "a scene is on: what you see is Player 1's view" (packet type 10), and since when it has
+// been saying so. While a scene plays or the story holds Player 1, the joined player's own view is not sent and his
+// controller does nothing; nothing told him, and it read as a camera that had stopped ("there was a bug where his
+// camera became fixed", 2026-11-26). His screen now says so for the first seconds of each.
+std::atomic<Clock::time_point> g_host_scene{}, g_host_scene_since{};
 std::mutex g_note_lock;
 std::string g_note;
 void Note(const std::string& n) {
@@ -653,6 +686,14 @@ void HostListen() {
                 if (!g_host.connected || !said) said = true, LOGI("coop: a friend is watching this game's menus (no level is in play here yet)");
             }
         }
+        if (game_coop::InLevel() && game_coop::SceneNow()) {
+            static Clock::time_point told{};
+            if (Clock::now() - told > std::chrono::milliseconds(1000)) {
+                told = Clock::now();
+                const uint8_t scene[6] = {'S', '2', 'C', '1', 10, 1};
+                sendto(g_host.sock, reinterpret_cast<const char*>(scene), sizeof scene, 0, reinterpret_cast<const sockaddr*>(&from), sizeof from);
+            }
+        }
         if (!same) {
             if (g_host.have_client && Clock::now() - g_host.last_input < std::chrono::milliseconds(kClientTimeout))
                 continue;  // one remote player at a time
@@ -678,7 +719,7 @@ void HostListen() {
         if (int32_t(seq - g_host.seq) > 0 || !g_host.seq) {
             g_host.seq = seq;
             g_host.pad = p;
-            if (g_host.connected) RemoteInput(p.buttons, p.analog);
+            if (g_host.connected) RemoteInput(p.buttons, p.analog, p.lx, p.ly, p.rx, p.ry);
         }
         g_host.last_input = Clock::now();
         if (!g_host.connected) {
@@ -744,6 +785,22 @@ void HostEncode() {
         }
         frame++;
         if (frame == 1 || frame % 300 == 0) LOGI("coop: picture %u to the remote player: %u x %u, %zu bytes", frame, w, h, jpeg.size());
+        {   // the detail record: the picture the joined player is sent, kept every three seconds exactly as it goes
+            // out (what HE saw: his view is not on this PC's screen), and a line for each one
+            static Clock::time_point kept{};
+            if (game_detail::On()) {
+                game_detail::Line("sent %u %ux%u %zu bytes", frame, w, h, jpeg.size());
+                if (Clock::now() - kept >= std::chrono::seconds(3)) {
+                    kept = Clock::now();
+                    char name[64];
+                    std::snprintf(name, sizeof name, "/%07.1f_p2.jpg", logx::Seconds());
+                    if (FILE* f = std::fopen((game_detail::PicturesDir() + name).c_str(), "wb")) {
+                        std::fwrite(jpeg.data(), 1, jpeg.size(), f);
+                        std::fclose(f);
+                    }
+                }
+            }
+        }
         uint16_t parts = uint16_t((jpeg.size() + kChunk - 1) / kChunk);
         std::vector<uint8_t> pkt(kFrameHead + kChunk);
         float shape = g_host.frame_aspect.load();
@@ -796,7 +853,9 @@ void HostBeacon() {
     std::memcpy(pkt + 5, &port, 2);
     std::memcpy(pkt + 7, name.c_str(), std::min<size_t>(name.size(), 31));
     for (int tick = 0; g_host.run; tick++) {
-        if (tick % 20 == 0) StunAsk(g_host.sock);  // (see Stun, above)
+        // (see Stun, above. Every five seconds while nobody is in: on 2026-11-26 the host's outside port changed as
+        // the friend's packets began to arrive and it took up to twenty seconds to notice; every twenty with a player)
+        if (tick % (ClientConnected() ? 20 : 5) == 0) StunAsk(g_host.sock);
         for (uint32_t b : Broadcasts()) {
             sockaddr_in to{};
             to.sin_family = AF_INET;
@@ -822,6 +881,17 @@ void HostBeacon() {
             if (punch) {
                 const uint8_t hello[5] = {'S', '2', 'C', '1', 6};
                 sendto(g_host.sock, reinterpret_cast<const char*>(hello), sizeof hello, 0, reinterpret_cast<sockaddr*>(&peer), sizeof peer);
+                static Clock::time_point said{};
+                if (Clock::now() - said > std::chrono::seconds(10)) {
+                    said = Clock::now();
+                    unsigned mine;
+                    {
+                        std::lock_guard s(g_stun.lock);
+                        mine = g_stun.port[0] ? g_stun.port[0] : g_stun.port[1];
+                    }
+                    LOGI("net: host, waiting for the expected visitor: sending to his outside port %u, nothing has come from him yet; this game's outside port is %u",
+                         unsigned(ntohs(peer.sin_port)), mine);
+                }
             }
         }
     }
@@ -953,6 +1023,41 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
                             uint8_t* d = g_host.frame.data() + (size_t(y) * ow + size_t(x)) * 3;
                             for (int c = 0; c < 3; c++) d[c] = uint8_t((d[c] * (80 - inside * 3) + colour[c] * inside * 3) / 80);  // (see-through at 60%)
                         }
+                }
+            }
+        }
+        {   // His ammunition, where the game's own HUD has Player 1's (asked for 2026-11-26: "he also doesnt have an
+            // ammo hud"): a mark for each round in the weapon, the clip's other places dark, and in a box the number
+            // the game shows there, what is in the weapon plus what he carries for it. (The game's HUD keeps one
+            // set of numbers, Player 1's: these are read from Player 2 himself, coop.cpp.)
+            int rounds = game_coop::g_ammo2_rounds.load(), clip = std::max(game_coop::g_ammo2_clip.load(), 0), more = game_coop::g_ammo2_more.load();
+            if (rounds >= 0 && clip > 0) {
+                int total = rounds + std::max(more, 0);
+                // (a big clip: at most twenty marks, each for several rounds)
+                int each = (clip + 19) / 20;
+                clip = (clip + each - 1) / each, rounds = (rounds + each - 1) / each;
+                static const uint8_t kDigits[10][7] = {{0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}, {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}, {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F},
+                                                       {0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E}, {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}, {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E},
+                                                       {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}, {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}, {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E},
+                                                       {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}};
+                int top = py(40), bottom = py(53), high = std::max(7, bottom - top);
+                int dot = std::max(1, (high - 4) / 7);                       // a digit is 5 x 7 dots
+                char text[12];
+                std::snprintf(text, sizeof text, "%d", std::clamp(total, 0, 9999));
+                int digits = int(std::strlen(text)), box_w = digits * 6 * dot + 3 * dot, right = px(603), left = right - box_w;
+                rect(left - 1, top - 1, right + 1, bottom + 1, 150, 150, 140);  // the box: a pale edge, dark inside
+                rect(left, top, right, bottom, 12, 12, 12);
+                int ty = top + (high - 7 * dot) / 2, tx = left + 2 * dot;
+                for (int i = 0; i < digits; i++, tx += 6 * dot)
+                    for (int r = 0; r < 7; r++)
+                        for (int c = 0; c < 5; c++)
+                            if (kDigits[text[i] - '0'][r] & (0x10 >> c)) rect(tx + c * dot, ty + r * dot, tx + (c + 1) * dot, ty + (r + 1) * dot, 232, 228, 210);
+                // the marks, right to left from the box: one for each place in the clip
+                int mark_w = std::max(2, int(2.0f * kx * sx + 0.5f)), step = mark_w + std::max(1, mark_w / 2), x = left - 2 * step;
+                for (int i = 0; i < clip; i++, x -= step) {
+                    bool full = i < rounds;
+                    rect(x - 1, top + 1, x + mark_w + 1, bottom - 1, 10, 10, 10);
+                    rect(x, top + 2, x + mark_w, bottom - 2, full ? 222 : 52, full ? 214 : 50, full ? 180 : 46);
                 }
             }
         }
@@ -1102,6 +1207,25 @@ void Letterbox(const uint8_t* rgba, int w, int h, float shape, std::vector<uint8
 
 void SoundIn(const uint8_t* b, int n);
 
+// The host's game port, as seen from outside, can change while a friend is on his way in. In the session of
+// 2026-11-26 (suffering2_012.log and the friend's suffering2_002.log) the host's router gave the game a new outside
+// port (27025 became 22611) within ten seconds of the friend's first packets arriving: the meeting point was told the
+// new port at once, but the friend's game went on sending to the old one for its whole 90 s and gave up, and only
+// typing the code again got him in. The joiner now follows the host: the meeting point's answer is read every four
+// seconds (meet.cpp) and a packet of the game's own that comes from the host's address on another port is believed.
+// Only until the first picture: after that the two games are talking and the port stays.
+void Retarget(const sockaddr_in& to, const char* how) {
+    std::lock_guard l(g_client.lock);
+    if (!g_client.run || g_client.have_frame) return;
+    if (to.sin_addr.s_addr == g_client.host.sin_addr.s_addr && to.sin_port == g_client.host.sin_port) return;
+    bool same_pc = to.sin_addr.s_addr == g_client.host.sin_addr.s_addr;
+    LOGR("coop: internet: the host's game is now at port %u%s (it was port %u): this game sends there (%s)", unsigned(ntohs(to.sin_port)),
+         same_pc ? "" : " of another address", unsigned(ntohs(g_client.host.sin_port)), how);
+    g_client.host.sin_addr = to.sin_addr;
+    g_client.host.sin_port = to.sin_port;
+    g_client.last_frame = Clock::now();  // (the wait for an answer starts again)
+}
+
 void ClientRecv() {
     std::map<uint32_t, std::vector<std::vector<uint8_t>>> parts;
     std::map<uint32_t, uint16_t> have, last_len, size_w, size_h;
@@ -1116,10 +1240,28 @@ void ClientRecv() {
         socklen_t len = sizeof from;
         int n = int(recvfrom(g_client.sock, reinterpret_cast<char*>(buf.data()), int(buf.size()), 0,
                              reinterpret_cast<sockaddr*>(&from), &len));
-        static std::atomic<uint32_t> packets{0};
-        if (n > 0 && ++packets == 1) LOGI("coop: first packet from the host (%d bytes, type %d)", n, n > 4 ? buf[4] : -1);
+        {   // this side's outside address is asked again every five seconds until the first picture (it goes to the
+            // meeting point for the host, and a router can change it when the host's first packets arrive)
+            static Clock::time_point asked{};
+            bool waiting;
+            {
+                std::lock_guard l(g_client.lock);
+                waiting = !g_client.have_frame;
+            }
+            if (waiting && Clock::now() - asked > std::chrono::seconds(5)) asked = Clock::now(), StunAsk(g_client.sock);
+        }
         if (StunAnswer(buf.data(), n)) continue;                                        // (how the joiner looks from outside)
-        if (n >= 5 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 6) continue;  // (the host's hole-punching hello)
+        bool ours = n >= 5 && std::memcmp(buf.data(), "S2C1", 4) == 0;
+        // (until 2026-11-26 this line counted the STUN servers' answers too, and said "from the host" of them)
+        static std::atomic<uint32_t> packets{0};
+        if (ours && ++packets == 1) LOGI("coop: first packet from the host (%d bytes, type %d, from port %u)", n, buf[4], unsigned(ntohs(from.sin_port)));
+        // the host's game answers from another port than the one this game sends to: that is where it is now
+        if (ours && from.sin_addr.s_addr == g_client.host.sin_addr.s_addr && from.sin_port != g_client.host.sin_port) Retarget(from, "its packets come from there");
+        if (ours && buf[4] == 6) {                                                       // (the host's hole-punching hello)
+            static Clock::time_point said{};
+            if (Clock::now() - said > std::chrono::seconds(20)) said = Clock::now(), LOGI("coop: internet: the host's game is sending to this one (its hello came from port %u)", unsigned(ntohs(from.sin_port)));
+            continue;
+        }
         if (n > 0) g_rec.bytes_in += uint32_t(n);
         if (n >= 9 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 9) {          // the answer to a timed controller packet
             uint32_t seq;
@@ -1130,6 +1272,15 @@ void ClientRecv() {
                 g_rec.trips++;
                 Most(g_rec.trip_worst_us, us);
             }
+            continue;
+        }
+        if (n >= 6 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 10) {         // a scene is on in the host's game
+            Clock::time_point now = Clock::now();
+            if (now - g_host_scene.load() > std::chrono::milliseconds(2500)) {
+                g_host_scene_since = now;
+                LOGI("coop: the host's game is in a scene: the picture is Player 1's view and this controller waits");
+            }
+            g_host_scene = now;
             continue;
         }
         if (n >= 5 && std::memcmp(buf.data(), "S2C1", 4) == 0 && buf[4] == 8) {          // the host is there, not in a level yet
@@ -1226,6 +1377,7 @@ void ClientRecv() {
         }
         frame.clear();
         for (auto& c : p) frame.insert(frame.end(), c.begin(), c.end());
+        if (game_detail::On()) game_detail::Line("got %u %ux%u %zu bytes in %u parts", id, unsigned(size_w.count(id) ? size_w[id] : 0), unsigned(size_h.count(id) ? size_h[id] : 0), frame.size(), unsigned(count));
         int iw, ih, comp;
         uint8_t* px = stbi_load_from_memory(frame.data(), int(frame.size()), &iw, &ih, &comp, 4);
         for (auto it = parts.begin(); it != parts.end();) it = it->first <= id ? parts.erase(it) : std::next(it);
@@ -1311,13 +1463,15 @@ const uint8_t* Present(uint32_t& w, uint32_t& h) {
     std::lock_guard l(g_client.lock);
     if (!g_client.have_frame) return nullptr;
     // (the joiner's own screen says "joining" for a moment first: cut straight from his menu to the middle of the
-    // host's game, he could not tell what had happened; Skylar's first online session, 2026-11-25)
+    // host's game, he could not tell what had happened; the owner's first online session, 2026-11-25)
     bool menus = Clock::now() - g_host_waits.load() < std::chrono::milliseconds(3000);
     if (Clock::now() - g_client.first_frame < std::chrono::milliseconds(menus ? kJoiningMs / 3 : kJoiningMs)) return nullptr;
     g_client.present = g_client.shown;
     // the host is still in his menus: the friend watches them, and is told so
     if (Clock::now() - g_host_waits.load() < std::chrono::milliseconds(3000))
         Strip(g_client.present, "CONNECTED TO YOUR FRIEND'S GAME", "YOU PLAY WHEN THE GAME STARTS. HOLD BACK TO LEAVE.");
+    else if (Clock::now() - g_host_scene.load() < std::chrono::milliseconds(2500) && Clock::now() - g_host_scene_since.load() < std::chrono::seconds(6))
+        Strip(g_client.present, "A SCENE IS PLAYING. THIS IS PLAYER 1'S VIEW.", "YOU PLAY AGAIN WHEN IT ENDS.");
     static uint32_t calls = 0;
     if (++calls % 300 == 1) {  // (a check now and then: is there a picture in it)
         uint64_t sum = 0;
@@ -1604,6 +1758,12 @@ bool Join(int index) {
     g_client.host.sin_family = AF_INET;
     g_client.host.sin_port = htons(target.port);
     g_client.host.sin_addr.s_addr = target.ip;
+    // tests: S2_TEST_WRONG_PORT=<n>: this game first sends to that port of the host's address, as if the host's
+    // outside port had changed after the meeting point was asked (what happened on 2026-11-26)
+    if (const char* wrong = std::getenv("S2_TEST_WRONG_PORT")) {
+        g_client.host.sin_port = htons(uint16_t(std::atoi(wrong)));
+        LOGR("coop: test: the first packets go to port %s, not the host's", wrong);
+    }
     g_client.name = target.name;
     g_client.joined = g_client.last_frame = Clock::now();
     g_client.back = false;
@@ -1727,6 +1887,18 @@ int OutsideKind() {
     if (!g_stun.port[0] || !g_stun.port[1]) return 0;
     return g_stun.port[0] == g_stun.port[1] && g_stun.ip[0] == g_stun.ip[1] ? 1 : 2;
 }
+// the joiner: the meeting point says the host's game is at this address now ("203.0.113.7:51234")
+bool JoinRetarget(const std::string& address) {
+    size_t colon = address.rfind(':');
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    if (colon == std::string::npos || inet_pton(AF_INET, address.substr(0, colon).c_str(), &to.sin_addr) != 1) return false;
+    int port = std::atoi(address.c_str() + colon + 1);
+    if (port <= 0 || port > 65535 || !g_client.run) return false;
+    to.sin_port = htons(uint16_t(port));
+    Retarget(to, "the meeting point says so");
+    return true;
+}
 bool HostExpecting() {
     std::lock_guard l(g_host.lock);
     return g_host.run && g_host.punch_until > Clock::now() && !g_host.connected;
@@ -1802,8 +1974,21 @@ void ClientPad(const input::Pad& p) {
     pkt[27] = uint8_t(game_coop::g_p2_invert ? 1 : 0);
     pkt[28] = uint8_t(std::clamp<uint32_t>(game_coop::g_p2_speed, 40, 100));
     pkt[29] = uint8_t(std::min<uint32_t>(game_coop::g_p2_volume, 100));
-    sendto(g_client.sock, reinterpret_cast<const char*>(pkt), sizeof pkt, 0, reinterpret_cast<sockaddr*>(&g_client.host),
-           sizeof g_client.host);
+    sockaddr_in to;
+    {
+        std::lock_guard l(g_client.lock);  // (Retarget changes it from other threads)
+        to = g_client.host;
+    }
+    sendto(g_client.sock, reinterpret_cast<const char*>(pkt), sizeof pkt, 0, reinterpret_cast<sockaddr*>(&to), sizeof to);
+    {   // the record: where the controller packets go and whether anything has come back, every ten seconds while
+        // there is no picture yet (the wait that went wrong on 2026-11-26 left nothing in the joiner's log)
+        static Clock::time_point said{};
+        if (!have && now - g_client.joined > std::chrono::seconds(8) && now - said > std::chrono::seconds(10)) {
+            said = now;
+            LOGI("net: joining, no picture yet after %.0f s: sending to the host's port %u, %s", std::chrono::duration<double>(now - g_client.joined).count(),
+                 unsigned(ntohs(to.sin_port)), HostNotStarted() ? "the host answers (he is in his menus)" : "nothing has come back from the host's game");
+        }
+    }
 }
 
 // the host's remote player's pad, when one is connected

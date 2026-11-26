@@ -1,1 +1,1 @@
-49 2026-11-25 Review fixes: Player 2 keeps his health and meter over saves and level changes, is not left behind after a ride, and keeps his view when Player 1 transforms.
+50 2026-11-26 Online: joining follows the host when its port changes. Player 2 can vault ledges, push boxes and reload, waits during story moments, has an ammo display, leaves no floating guns, and his camera resets if it stops following him. New detailed logs: every frame recorded, a small picture every 3 seconds, F9 marks a glitch.

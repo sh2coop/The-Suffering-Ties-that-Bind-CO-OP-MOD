@@ -1,2 +1,3 @@
-The game writes one file here every time it is started, and its crash reports.
+The game writes a log file here every time it is started, and its crash reports. For the three newest starts there is also a packed record of every frame (..._detail.log.gz) and a folder of small pictures of the game's window, one every three seconds (..._pictures).
+Saw something wrong on the screen? Press F9 while it is there: a full picture and the game's state are saved here.
 If something goes wrong, zip this folder and send it.
