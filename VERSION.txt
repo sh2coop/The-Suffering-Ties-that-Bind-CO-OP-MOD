@@ -1,1 +1,1 @@
-38 2026-11-25 The joining player now gets a clear waiting screen that says what he is waiting for, and a short Joining step before the game appears.
+39 2026-11-25 Smoother for the host while a friend is joined, and every session log now records how smoothly the game ran.

@@ -3942,6 +3942,10 @@ bool D3D12Backend::DeliverSnapshot() {
     Late& l = snap_;
     uint64_t done = fence_->GetCompletedValue();
     int best = -1;
+    // [local change, The Suffering: Ties That Bind] true only for a snapshot not handed over before: a title may
+    // take one every few frames (the view for the joined player is drawn about thirty times a second), and the same
+    // picture must not go to the sink twice
+    bool fresh = false;
     for (int i = 0; i < kFrames; i++) {
         bool finished = l.fence[i] && l.fence[i] <= done;
         bool newest = best < 0 || l.fence[i] > l.fence[best];
@@ -3957,9 +3961,10 @@ bool D3D12Backend::DeliverSnapshot() {
             D3D12_RANGE none{0, 0};
             l.rb[best]->Unmap(0, &none);
             l.delivered = l.fence[best];
+            fresh = true;
         }
     }
-    return !snap_px_.empty() && snap_px_.size() == size_t(l.gw) * l.gh * 4;
+    return fresh && !snap_px_.empty() && snap_px_.size() == size_t(l.gw) * l.gh * 4;
 }
 
 // filters src into a new w x h target, left as a copy source

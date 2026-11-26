@@ -757,7 +757,11 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
     static std::atomic<uint32_t> calls{0};
     if (++calls == 1) LOGI("coop: the renderer hands over frames (%u x %u)", w, h);
     auto now = Clock::now();
-    if (now - g_host.last_sent < std::chrono::milliseconds(kFrameInterval) || !ClientConnected()) return;
+    // (Player 2's own view is drawn only when a picture is due, every 30 ms or more, see coop.cpp 0x1B83E0, and reaches
+    // this place a frame or two later, not evenly: each one is taken. The limit is for the frames of a scene, where
+    // the host's own picture comes every frame.)
+    int least = game_coop::StreamView() ? kFrameInterval / 2 : kFrameInterval;
+    if (now - g_host.last_sent < std::chrono::milliseconds(least) || !ClientConnected()) return;
     g_host.last_sent = now;
     bool half = game_coop::SplitActive();
     // the right half (and not the divider's own columns), halved again in size when it is large: the picture is

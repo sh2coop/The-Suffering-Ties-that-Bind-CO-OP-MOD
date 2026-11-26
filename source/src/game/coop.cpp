@@ -1667,6 +1667,40 @@ X86_FUNC(sub_001FB290) {
     __imp__sub_001FB290(ctx, base);
 }
 
+// The camera loop (0x1B83E0: the view's cameras from the last to the first, the screen). Online, Player 2's view is
+// drawn for the stream alone, which carries about thirty pictures a second: it is drawn when the next picture is due
+// and left out of the other frames (the view then reads as one camera for the length of the loop).
+// Why: the host draws the world twice a frame while a player is joined. Measured 2026-11-25 on the kitchen level,
+// uncapped: 4.3 ms a frame alone, 6.8 ms hosting, the same 2 ms more at 1280 x 720 as at 3840 x 1600 (the game's own
+// work for the second view, not the picture's size). In a busy scene that took a host under his 120 frames a second
+// and the frames came unevenly ("I was stuttering a little bit too"). S2_COOP_EVERY_FRAME=1: as before.
+X86_EXTERN_FUNC(__imp__sub_001B83E0);
+X86_FUNC(sub_001B83E0) {
+    using namespace game_coop;
+    static const bool every = std::getenv("S2_COOP_EVERY_FRAME") != nullptr;
+    uint32_t view = kernel::R32(kViewPointer);
+    uint32_t cameras = view ? kernel::R32(view + kViewCameras) : 0, count = view ? kernel::R32(view + kViewCount) : 0;
+    bool streams = !every && StreamView() && g_no_texture && cameras && count == 2 &&
+                   kernel::R32(cameras + kViewCameraBytes + kVcTexture) == g_no_texture;
+    if (streams) {
+        using StreamClock = std::chrono::steady_clock;
+        constexpr auto kPictureEvery = std::chrono::milliseconds(30);  // (net.cpp sends one at most every 28 ms)
+        static StreamClock::time_point drawn{};
+        static uint32_t skipped = 0, drew = 0;
+        StreamClock::time_point now = StreamClock::now();
+        if (now - drawn < kPictureEvery) {
+            skipped++;
+            kernel::W32(view + kViewCount, 1);
+            __imp__sub_001B83E0(ctx, base);
+            if (kernel::R32(kViewPointer) == view && kernel::R32(view + kViewCount) == 1) kernel::W32(view + kViewCount, count);
+            return;
+        }
+        drawn = now;
+        if (++drew % 600 == 1) LOGI("coop: Player 2's view for the stream: drawn %u times, left out of %u frames", drew, skipped);
+    }
+    __imp__sub_001B83E0(ctx, base);
+}
+
 // A view camera ends (this = view camera): it releases its texture. Player 2's has none to release.
 X86_EXTERN_FUNC(__imp__sub_001BB8C0);
 X86_FUNC(sub_001BB8C0) {

@@ -1442,6 +1442,27 @@ void FramePresented() {
     g_world_before = g_world_draws > 0;
     g_world_draws = 0;
     g_frames_shown++;
+    // [local change, The Suffering: Ties That Bind] How the frames came, into the session log every ten seconds: a
+    // player's "it stuttered" could not be checked from his log before (2026-11-25, the first online session).
+    {
+        using PaceClock = std::chrono::steady_clock;
+        static PaceClock::time_point last = PaceClock::now(), since = last;
+        static uint32_t frames = 0, slow = 0, very_slow = 0;
+        static double worst = 0;
+        PaceClock::time_point now = PaceClock::now();
+        double ms = std::chrono::duration<double, std::milli>(now - last).count();
+        last = now;
+        frames++;
+        worst = std::max(worst, ms);
+        if (ms > 25.0) slow++;
+        if (ms > 50.0) very_slow++;
+        double span = std::chrono::duration<double>(now - since).count();
+        if (span >= 10.0) {
+            LOGI("pace: %u frames in %.1f s (%.1f a second), slowest %.0f ms, %u over 25 ms, %u over 50 ms", frames, span,
+                 double(frames) / span, worst, slow, very_slow);
+            since = now, frames = slow = very_slow = 0, worst = 0;
+        }
+    }
 }
 }  // namespace
 
