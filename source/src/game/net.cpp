@@ -84,6 +84,7 @@ extern std::atomic<int> g_ammo2_rounds, g_ammo2_clip, g_ammo2_more;  // Player 2
 void RemotePlayer(bool connected);  // the host's remote player came or went
 bool SplitActive();                 // player two is in and the screen is split
 bool StreamView();                  // player two is in and the frames handed over are his view, whole
+bool StreamHasLayer();              // ... with the game's own 2D for him in them (its crosshair, messages, pictures over the screen)
 extern uint32_t g_p2_invert, g_p2_speed;  // this PC's Player 2 look settings
 void RemoteLookFrom(uint32_t invert, uint32_t speed);  // a joined player's, as his PC sends them
 void RemoteLookForget();
@@ -97,6 +98,9 @@ namespace game_detail {  // detail.cpp: the record of every frame, and the sessi
 bool On();
 std::string PicturesDir();
 void Line(const char* fmt, ...);
+}
+namespace game_record {  // record.cpp
+uint32_t Marks(std::string* why);  // how many marks (full-size pictures of the window) there have been
 }
 
 namespace game_net {
@@ -938,13 +942,18 @@ void HostEncode() {
         if (frame == 1 || frame % 300 == 0) LOGI("coop: picture %u to the remote player: %u x %u, %zu bytes", frame, w, h, jpeg.size());
         {   // the detail record: the picture the joined player is sent, kept every three seconds exactly as it goes
             // out (what HE saw: his view is not on this PC's screen), and a line for each one
+            // ... and at every mark (F9, or a check that found something odd), beside the full picture of the window
             static Clock::time_point kept{};
+            static uint32_t marks_seen = game_record::Marks(nullptr);
             if (game_detail::On()) {
                 game_detail::Line("sent %u %ux%u %zu bytes", frame, w, h, jpeg.size());
-                if (Clock::now() - kept >= std::chrono::seconds(3)) {
-                    kept = Clock::now();
+                uint32_t marks = game_record::Marks(nullptr);
+                bool marked = marks != marks_seen;
+                marks_seen = marks;
+                if (marked || Clock::now() - kept >= std::chrono::seconds(3)) {
+                    if (!marked) kept = Clock::now();
                     char name[64];
-                    std::snprintf(name, sizeof name, "/%07.1f_p2.jpg", logx::Seconds());
+                    std::snprintf(name, sizeof name, marked ? "/mark_%07.1f_p2.jpg" : "/%07.1f_p2.jpg", logx::Seconds());
                     if (FILE* f = std::fopen((game_detail::PicturesDir() + name).c_str(), "wb")) {
                         std::fwrite(jpeg.data(), 1, jpeg.size(), f);
                         std::fclose(f);
@@ -1195,9 +1204,10 @@ void Compose(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch, std::v
                 }
             }
         }
+        // (the crosshair: the game's own is in the picture when its 2D layer is drawn for him, coop.cpp StreamLayer)
         int cx = int(ow) / 2, cy = int(oh) / 2;
         int arm = std::max(3, int(5.0f * ky)), gap = std::max(1, int(2.0f * ky)), thick = std::max(1, int(1.0f * ky + 0.5f));
-        for (int pass = 0; pass < 2; pass++) {  // the dark edge, then the light cross
+        for (int pass = game_coop::StreamHasLayer() ? 2 : 0; pass < 2; pass++) {  // the dark edge, then the light cross
             int e = pass ? 0 : 1;
             uint8_t c = pass ? 225 : 20;
             rect(cx - gap - arm - e, cy - e, cx - gap + e, cy + thick + e, c, c, c);

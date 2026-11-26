@@ -1341,6 +1341,7 @@ namespace {
 uint32_t g_world_draws = 0;   // since the last present
 bool g_world_before = false;  // the frame before had some
 bool g_flat_draw = false;     // the draw being sent is squeezed
+bool g_flat_cover = false;    // ... a whole-picture one, into one half and covering it (gpu::g_flat2d.cover)
 float g_flat_middle = -1;     // ... and the height its vertices are about (-1: not known)
 uint64_t g_frames_shown = 0;  // frames shown
 
@@ -1351,7 +1352,7 @@ void Trace2D(const uint8_t* vertices, uint32_t stride, uint32_t count) {
         const char* v = std::getenv("S2_2D_TRACE");
         return v ? uint64_t(std::atoll(v)) : 0;
     }();
-    if (!at || g_frames_shown != at || !vertices || stride < 8 || !count || count > 4096) return;
+    if (!((at && g_frames_shown == at) || gpu::g_trace_2d.load() > 0) || !vertices || stride < 8 || !count || count > 4096) return;
     float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
     for (uint32_t i = 0; i < count; i++) {
         float xy[2];
@@ -1381,8 +1382,33 @@ void Trace2D(const uint8_t* vertices, uint32_t stride, uint32_t count) {
         stack += one;
         most--;
     }
-    LOGI("2d trace: %u vertices, box %.0f %.0f to %.0f %.0f, target %s, called from%s", count, x0, y0, x1, y1,
-         Dev(kDevRenderTarget) == PostBuffer() ? "shown buffer" : "other", stack.c_str());
+    auto simple = [](uint32_t method) { return g_state.simple[method >> 2]; };
+    LOGI("2d trace: %u vertices, box %.0f %.0f to %.0f %.0f, target %s, blend %u (source %X, destination %X, operation %X), alpha test %u, "
+         "depth test %u write %u, fog %u, texture %08X, called from%s",
+         count, x0, y0, x1, y1, Dev(kDevRenderTarget) == PostBuffer() ? "shown buffer" : "other", simple(gpu::kMBlendEnable), simple(gpu::kMSrcBlend),
+         simple(gpu::kMDestBlend), simple(gpu::kMBlendOp), simple(gpu::kMAlphaTestEnable), g_state.rs[gpu::kRsZEnable], simple(gpu::kMZWriteEnable),
+         g_state.rs[gpu::kRsFogEnable], g_state.textures[0], stack.c_str());
+    // (what the pixel is made of: a pixel program or the stages' operations, and what the colour is multiplied by)
+    LOGI("2d trace:   pixel program %s (%u combiners); stage 0 colour op %X args %X %X, alpha op %X args %X %X; stage 1 colour op %X; "
+         "texture factor %08X, lighting %u, alpha function %X against %X, colour write %X",
+         g_state.ps ? "yes" : "no", simple(gpu::kMPsCombinerCount) & 0xFF, g_state.tss[0][gpu::kTssColorOp], g_state.tss[0][gpu::kTssColorArg1],
+         g_state.tss[0][gpu::kTssColorArg2], g_state.tss[0][gpu::kTssAlphaOp], g_state.tss[0][gpu::kTssAlphaArg1], g_state.tss[0][gpu::kTssAlphaArg2],
+         g_state.tss[1][gpu::kTssColorOp], g_state.rs[gpu::kRsTextureFactor], g_state.rs[gpu::kRsLighting], simple(gpu::kMAlphaFunc), simple(gpu::kMAlphaRef),
+         simple(gpu::kMColorWriteEnable));
+    if (count <= 4 && x0 <= 1.0f && y0 <= 1.0f && x1 >= 600.0f && y1 >= 440.0f) {  // a whole-picture draw: every state, to set two of them side by side
+        std::string all = "rs";
+        char v[16];
+        for (uint32_t i = 0; i < gpu::kRsMax; i++) std::snprintf(v, sizeof v, " %X", g_state.rs[i]), all += v;
+        for (int st = 0; st < 4; st++) {
+            std::snprintf(v, sizeof v, " | t%d", st), all += v;
+            for (uint32_t i = 0; i < gpu::kTssCount; i++) std::snprintf(v, sizeof v, " %X", g_state.tss[st][i]), all += v;
+            std::snprintf(v, sizeof v, " tex %X", g_state.textures[st] ? 1u : 0u), all += v;
+        }
+        all += " | simple";
+        for (uint32_t m = 0x290; m <= 0x38C; m += 4) std::snprintf(v, sizeof v, " %X", g_state.simple[m >> 2]), all += v;
+        std::snprintf(v, sizeof v, " | fvf %X", g_state.vs_handle), all += v;
+        LOGI("2d trace:   states: %s", all.c_str());
+    }
     if (stride == 0x20 && count >= 100) {  // a mesh of screen positions with texture coordinates: its first vertices
         for (uint32_t i = 0; i < 24 && i < count; i++) {
             float v[8];
@@ -1397,6 +1423,7 @@ void Trace2D(const uint8_t* vertices, uint32_t stride, uint32_t count) {
 // vertices: the draw's vertices where they are at hand (x and y lead each), else null
 void ClassifyDraw(const uint8_t* vertices, uint32_t stride, uint32_t count) {
     g_flat_draw = false;
+    g_flat_cover = false;
     bool ready_made = !(g_state.vs_handle & 1) && (g_state.vs_handle & 0xE) == 4;
     if (!ready_made) {
         g_world_draws++;
@@ -1406,11 +1433,12 @@ void ClassifyDraw(const uint8_t* vertices, uint32_t stride, uint32_t count) {
     if (!gpu::g_flat2d.on && !gpu::g_flat2d.half) return;
     g_flat_middle = -1;
     uint32_t rt = Dev(kDevRenderTarget);
-    if (!g_split) {
+    bool layer_now = gpu::g_flat2d.layer_now && !gpu::g_flat2d.half;  // [local change, The Suffering: Ties That Bind]
+    if (!g_split && !layer_now) {
         g_flat_draw = rt == g_buffers[1] && !g_world_draws && !g_world_before;
         return;
     }
-    if (rt != PostBuffer()) return;
+    if (!layer_now && rt != PostBuffer()) return;
     bool whole = false;
     if (vertices && stride >= 8 && count && count <= 4096) {
         uint32_t w = 640, h = 480;
@@ -1425,7 +1453,8 @@ void ClassifyDraw(const uint8_t* vertices, uint32_t stride, uint32_t count) {
         whole = x0 <= 1.0f && y0 <= 1.0f && x1 >= float(w) - 1.0f && y1 >= float(h) - 1.0f;
         g_flat_middle = (y0 + y1) * 0.5f;
     }
-    g_flat_draw = !whole;
+    g_flat_cover = whole && gpu::g_flat2d.cover && gpu::g_flat2d.half;  // [local change, The Suffering: Ties That Bind]
+    g_flat_draw = !whole || g_flat_cover;
 }
 
 // stream 0's vertices from the first one of a draw, or null
@@ -1442,6 +1471,7 @@ void FramePresented() {
     g_world_before = g_world_draws > 0;
     g_world_draws = 0;
     g_frames_shown++;
+    if (gpu::g_trace_2d.load() > 0) gpu::g_trace_2d--;
     // [local change, The Suffering: Ties That Bind] How the frames came, into the session log every ten seconds: a
     // player's "it stuttered" could not be checked from his log before (2026-11-25, the first online session).
     {
@@ -1488,6 +1518,7 @@ const gpu::State& ForDraw() {
         ay = flat.half_sy;
         bool top = g_flat_middle >= 0 && g_flat_middle < float(h) / 3, bottom = g_flat_middle > float(h) * 2 / 3;
         by = top ? 0.0f : bottom ? float(h) * (1 - ay) : float(h) * 0.5f * (1 - ay);
+        if (g_flat_cover) ax = 0.5f, bx = float(flat.half - 1) * half, ay = 1, by = 0;  // the whole picture onto the half
     } else if (!flat.on) {
         return base;
     }

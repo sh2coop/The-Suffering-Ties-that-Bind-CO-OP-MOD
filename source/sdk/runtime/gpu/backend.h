@@ -124,8 +124,18 @@ struct Flat2D {
     float sx = 1, sy = 1;
     int half = 0;
     float half_sx = 1, half_sy = 1;
+    // The title is drawing the layer over a view in the middle of the frame, among the world's draws (the picture
+    // sent to a joined player is taken there): these ready-made draws are the layer's all the same, squeezed like
+    // it, except one that covers the whole picture.
+    bool layer_now = false;
+    // A draw that covers the whole picture is left where it is (a fade, a flash over the screen). With cover set
+    // while half is, such a draw goes into that half instead and covers it: one player's own flash, in his view.
+    bool cover = false;
 };
 inline Flat2D g_flat2d;
+// [local change, The Suffering: Ties That Bind] tests: the title asks for the ready-made draws of the frame being
+// drawn to be logged (xdk/d3d8.cpp Trace2D); counted down at each present
+inline std::atomic<int> g_trace_2d{0};
 // the halves side by side (left, right) rather than top and bottom: the divider's direction
 inline std::atomic<bool> g_split_vertical{false};
 

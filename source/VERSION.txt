@@ -1,1 +1,1 @@
-52 2026-11-26 Co-op: a player in first person is seen as his whole body by the other player, with his weapon in his hand (it was a pair of arms in the air). Works for both players, also with both in first person at once, in split screen and online.
+53 2026-11-26 Co-op online: the joined player now sees the red picture that comes over the screen when an innocent is killed, and the game's hints, prompts and crosshair. The red flash when a player is hurt now shows for that player only, in split screen and online.

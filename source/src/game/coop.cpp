@@ -234,6 +234,8 @@ extern bool g_paused_now;
 extern std::map<uint32_t, int> g_hurt_us;
 void Downs(X86Context& ctx);
 bool g_screen_pass = false;     // the engine is drawing Player 2's view camera
+void StreamLayer(X86Context& ctx);  // online: the menu system's 2D layer for Player 2, drawn over his view before it is taken
+bool StreamHasLayer();              // ... and whether it was, in the frame's picture for him
 uint64_t Frames() { return g_frames; }
 
 // Player 2's view camera, wherever it is in the list now (0: none)
@@ -1890,7 +1892,10 @@ void DetailFrame(X86Context& ctx) {
                           "1 = Player 1: x y z, facing, flags +B0, state +BC, health, insanity meter, class of what he uses (0 none) | c1 = his camera: eye x y z, "
                           "looking x y z, mode, modes on its stack, flags | 2 and c2 = Player 2 and his camera (- when there is none) | d1 = what Player 1's view drew "
                           "(with the 2D): draws, draws with fog, fog on, fog colour, fog start, fog end, ambient, lights, a mark of all its draws' fog and light "
-                          "(changes when any changes), target size | d2 = the same for Player 2's view (- in frames it was not drawn)");
+                          "(changes when any changes), target size | d2 = the same for Player 2's view (- in frames it was not drawn) | s = the screen "
+                          "flashes (pictures over the whole screen, the red one after an innocent is killed among them): how many, then of up to three "
+                          "of them: strength, colour, texture (0 none), class of the object that owns it (P1 or P2: that Player's own, the flash when he is "
+                          "hurt, drawn for him only); L when the game's 2D was drawn into Player 2's picture");
     }
     char line[1200];
     int n = 0;
@@ -1916,6 +1921,48 @@ void DetailFrame(X86Context& ctx) {
         std::memcpy(&fs, &d.fog_start, 4), std::memcpy(&fe, &d.fog_end, 4);
         n += std::snprintf(line + n, sizeof line - size_t(n), " | d%d %u %u %d %08X %.1f %.1f %08X %X %04X %ux%u", i + 1, d.draws, d.fogged, int(d.fog_on),
                            d.fog_color, fs, fe, d.ambient, d.lights, unsigned(d.hash & 0xFFFF), d.vw, d.vh);
+    }
+    {   // the screen flashes: the pictures the game lays over the whole screen (this = 0x391C70: a list at +6 of
+        // entries of 0x16 bytes, their number at +0xE; an entry: order, strength, -, colour, texture, the handle of
+        // the object that owns it and gives it its strength every frame through 0x113580)
+        constexpr uint32_t kFlashes = 0x391C70;
+        uint32_t list = kernel::R32(kFlashes) ? kernel::R32(kFlashes + 6) : 0, count = list ? kernel::R32(kFlashes + 0xE) : 0;
+        if (count > 32 || (count && !mem::IsCommitted(list + count * 0x16))) count = 0;
+        uint32_t table = kernel::R32(kObjectManager + 0x0C);
+        static std::vector<uint32_t> owners_before;
+        std::vector<uint32_t> owners;
+        n += std::snprintf(line + n, sizeof line - size_t(n), " | s %u", count);
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t e = list + i * 0x16, h = kernel::R16(e + 0x14);
+            uint32_t owner = table && h ? kernel::R32(table + h * 6) : 0;
+            uint32_t cls = owner && mem::IsCommitted(owner + 0x110) ? ClassOf(owner) : 0;
+            int whose = !owner ? 0 : owner == g_player_object ? 1 : owner == g_second_object ? 2 : 0;
+            float strength = ReadF(e + 4);
+            char who[12];
+            if (whose) std::snprintf(who, sizeof who, "P%d", whose);
+            else std::snprintf(who, sizeof who, "%08X", cls);
+            if (i < 3) n += std::snprintf(line + n, sizeof line - size_t(n), " %.2f %08X %X %s", strength, kernel::R32(e + 0x0C), kernel::R32(e + 0x10), who);
+            owners.push_back(h);
+            // (a Player keeps his entry for good, at strength 0 between hits: his are not announced)
+            if (!whose && std::find(owners_before.begin(), owners_before.end(), h) == owners_before.end())
+                LOGI("coop: a picture over the whole screen begins (%u now): strength %.2f, colour %08X, texture %X, owned by an object of class %08X%s", count, strength,
+                     kernel::R32(e + 0x0C), kernel::R32(e + 0x10), cls,
+                     !(g_stream_view && second) ? "" : StreamHasLayer() ? "; the joined player's picture gets it too" : "; the joined player's picture does not get it");
+            // tests: S2_TEST_FLASH_MARK=1 asks for a full-size picture when a Player's own flash comes up (three for each)
+            static const bool flash_mark = std::getenv("S2_TEST_FLASH_MARK") != nullptr;
+            static float strength_before[3] = {};
+            static int marked[3] = {};
+            if (whose) {
+                if (flash_mark && strength >= 0.15f && strength_before[whose] < 0.15f && marked[whose]++ < 3) {
+                    char why[96];
+                    std::snprintf(why, sizeof why, "test: Player %d's own screen flash came up (strength %.2f)", whose, strength);
+                    game_record::Mark(why);
+                }
+                strength_before[whose] = strength;
+            }
+        }
+        owners_before.swap(owners);
+        if (g_stream_view && second && StreamHasLayer()) n += std::snprintf(line + n, sizeof line - size_t(n), " L");
     }
     game_detail::Line("%s", line);
 
@@ -1985,6 +2032,12 @@ void Frame(X86Context& ctx) {
                 if (r && mem::IsCommitted(r + 0x80)) Dump(at == 0x760 ? "fp probe +760" : "fp probe +764", r, 0x80);
             }
         }
+    }
+    {   // tests: S2_DRAW_TRACE=<frame> also asks the runtime for that frame's ready-made (2D) draws with their boxes
+        static const uint64_t trace_at = std::getenv("S2_DRAW_TRACE") ? uint64_t(std::atoll(std::getenv("S2_DRAW_TRACE"))) : 0;
+        // (three presents: the first may be this frame's own, already under way, and Player 2's view for the stream is
+        // drawn in every second frame only)
+        if (trace_at && g_frames == trace_at) gpu::g_trace_2d = 3;
     }
     {   // tests: S2_TEST_MARK=<frame>[,<frame>...] asks for a mark at those frames, as F9 does
         static const std::vector<uint64_t> marks = [] {
@@ -2641,7 +2694,12 @@ X86_EXTERN_FUNC(__imp__sub_001FB290);
 X86_FUNC(sub_001FB290) {
     if (game_coop::g_screen_pass && !kernel::R32(ctx.ecx + 0xE0)) {
         game_coop::g_screen_pass = false;
-        if (game_coop::g_stream_view && !game_coop::g_one_view && !game_coop::g_paused_now) gpu::SnapshotForStream();  // (Player 1's view comes over it)
+        // (S2_DRAW_TRACE: where in the frame's draws Player 2's pass ends)
+        if (gpu::g_trace_2d.load() > 0) LOGI("draw trace: -- Player 2's pass ends here (the renderer goes back to the screen); stream view %d", int(game_coop::g_stream_view));
+        if (game_coop::g_stream_view && !game_coop::g_one_view && !game_coop::g_paused_now) {
+            game_coop::StreamLayer(ctx);  // the menu system's 2D for Player 2, over his view
+            gpu::SnapshotForStream();     // (Player 1's view comes over it)
+        }
         kernel::Return(ctx, 0, 0);
         return;
     }
@@ -2794,7 +2852,128 @@ struct Layer {
     }
 };
 bool g_layer_inside = false;  // the second pass is running (it comes back into the hooks)
+
+// Online, the joined player's picture is his view taken inside the frame, at the end of his pass, before any 2D is
+// drawn: nothing of the game's 2D reached him. Reported 2026-11-26: "player 2 didn't get the overlay when moral
+// decisions are made like when u kill an innocent person". That overlay is a red picture over the screen for about
+// three seconds, one of the game's screen flashes, which the game draws once over the finished frame (so with two
+// views side by side it lies across both halves as one picture, and the host alone had it online). Now two things
+// are drawn for Player 2 over his view right before that view is taken: the screen flashes, and the menu system's
+// 2D (the manager's method +0x20: the crosshair, the messages and hints, the prompts) with him as the player, as
+// for the right half of a split screen. The overlay with Player 1's health and ammunition (0x22B560) is not:
+// Player 2's own are drawn into his picture by net.cpp.
+//   S2_COOP_NO_STREAM_LAYER=1: as before (tests)
+std::atomic<bool> g_stream_layer{false};
+bool StreamHasLayer() { return g_stream_layer.load(); }
+bool g_flash_for_second = false;  // the screen flashes are being drawn into the picture for a joined Player 2
+bool g_flash_inside = false;      // one of them is being drawn into a half by the hook of 0x1131F0
+void StreamLayer(X86Context& ctx) {
+    static const bool off = std::getenv("S2_COOP_NO_STREAM_LAYER") != nullptr;
+    uint32_t manager = kernel::R32(0x391D64);
+    if (off || !manager || !g_second || !mem::IsCommitted(g_second + 0x490) || g_layer_inside) {
+        g_stream_layer = false;
+        return;
+    }
+    uint32_t ecx = ctx.ecx, eax = ctx.eax;
+    uint32_t draw = kernel::R32(kernel::R32(manager) + 0x20);
+    g_layer_inside = true;
+    {
+        AsSecond as(g_second);
+        Layer whole(0);
+        // (these draws are the 2D layer's although the world's are all around them: the runtime squeezes them like
+        // the layer when the picture is not 4:3, so that the letters keep their shape on a wide screen)
+        gpu::g_flat2d.layer_now = true;
+        // While a view is drawn the second texture stage is on: its colour operation is "add" (7), written straight
+        // into the XDK's stage states at 0x286C80 with the "stages changed" bit 0x800 of 0x286BC8, at the start of
+        // each view (0x1B848F). The game's 2D routines set the first stage only and count on the second being off
+        // (1), which the post step does before the frame's own 2D (0x1E6ABB; the sprites inside a view do the same
+        // around their draws, 0x1ECFE7 and 0x1ED00F). Drawn here without that, the red picture came out half again
+        // as bright as on Player 1's screen: the second stage added its grey to it (found by setting every render
+        // state of the two draws side by side, S2_DRAW_TRACE).
+        constexpr uint32_t kStagesChanged = 0x286BC8, kStage1ColourOp = 0x286C80;
+        uint32_t stage1 = kernel::R32(kStage1ColourOp);
+        kernel::W32(kStagesChanged, kernel::R32(kStagesChanged) | 0x800);
+        kernel::W32(kStage1ColourOp, 1);
+        // First the pictures over the screen, as in the game's own order: the screen flashes (this = 0x391C70, their
+        // list at +6, 0x16 bytes each, count at +0xE; 0x1134C0 drops the entries whose owner is gone, which it would
+        // do later in the frame anyway, and draws each of the rest as one picture across the whole view, 0x1131F0,
+        // which changes nothing). The game draws them once, over the finished frame (its method at 0x114D30, when
+        // [0x393364] bit 1 is set): the red picture after an innocent is killed is one of them.
+        if (kernel::R32(0x393364) & 2) {
+            g_flash_for_second = true;  // (Player 1's own flash is left out: the hook of 0x1131F0 below)
+            ctx.ecx = 0x391C70;
+            kernel::CallGuest(ctx, 0x1134C0, {});
+            g_flash_for_second = false;
+        }
+        ctx.ecx = manager;
+        kernel::CallGuest(ctx, draw, {});
+        gpu::g_flat2d.layer_now = false;
+        kernel::W32(kStagesChanged, kernel::R32(kStagesChanged) | 0x800);
+        kernel::W32(kStage1ColourOp, stage1);
+    }
+    g_layer_inside = false;
+    ctx.ecx = ecx, ctx.eax = eax;
+    if (!g_stream_layer.exchange(true)) LOGI("coop: online: the game's 2D is drawn for Player 2 over his view before it is taken (the screen flashes, and the menu system's layer: crosshair, messages, prompts)");
+}
 }  // namespace game_coop
+
+// The screen flashes, each player's own. A screen flash is a picture or a colour across the whole view (this =
+// 0x391C70; 0x1134C0 walks the list and drops the entries whose owner is gone, 0x1131F0 draws one entry and changes
+// nothing). The object that owns an entry gives it its colour and strength every frame (0x113580: owner, red,
+// green, blue, strength, order, texture; 0x113480 takes an owner's away). Most belong to the game as a whole (a
+// Screen Fader object: a level's fade from black, the red picture after an innocent is killed). One belongs to each
+// Player: the flash when he is hurt (his method 0x43E80, from his once-a-frame method at 0x2FFA9; colours from his
+// properties 0x16B and on, times from 0x170 and 0x174). The game draws them all across the whole frame, so with
+// two players the one's hurt flash lay over the other's view as well.
+//   - Two views side by side: a Player's own flash goes into his half only (the runtime puts the whole-picture
+//     draw onto the half: gpu::g_flat2d.half with cover). The game's own stay across the whole frame.
+//   - Online: the host's screen leaves out Player 2's flash, and the picture taken for Player 2 (StreamLayer)
+//     leaves out Player 1's.
+//   S2_COOP_FLASH_ALL=1: as the game has it (tests)
+namespace game_coop {
+// 1 or 2: the entry is that Player's own flash; 0: the game's
+int FlashOwner(uint32_t manager, uint32_t index) {
+    uint32_t list = kernel::R32(manager + 6);
+    if (!list || index >= kernel::R32(manager + 0xE) || !mem::IsCommitted(list + index * 0x16 + 0x16)) return 0;
+    uint32_t h = kernel::R16(list + index * 0x16 + 0x14), table = kernel::R32(kObjectManager + 0x0C);
+    uint32_t owner = table && h ? kernel::R32(table + h * 6) : 0;
+    if (!owner) return 0;
+    return owner == g_player_object ? 1 : owner == g_second_object ? 2 : 0;
+}
+}  // namespace game_coop
+
+X86_EXTERN_FUNC(__imp__sub_001131F0);
+X86_FUNC(sub_001131F0) {
+    using namespace game_coop;
+    static const bool all = std::getenv("S2_COOP_FLASH_ALL") != nullptr;
+    int whose = all || g_flash_inside || !g_second || !g_second_object || !ViewCamera2() || g_one_view ? 0 : FlashOwner(ctx.ecx, kernel::R32(ctx.esp + 4));
+    if (!whose) {
+        __imp__sub_001131F0(ctx, base);
+        return;
+    }
+    static bool told[3] = {};
+    if (!told[whose]) {
+        told[whose] = true;
+        LOGI("coop: Player %d's own screen flash (when he is hurt) is drawn for him only: %s", whose,
+             g_stream_view ? "online, on the host's screen for Player 1 and in the joined player's picture for Player 2" : "in his half of the screen");
+    }
+    if (g_stream_view) {  // online: the screen is Player 1's view, the picture taken inside the frame is Player 2's
+        if (whose == (g_flash_for_second ? 2 : 1)) __imp__sub_001131F0(ctx, base);
+        else kernel::Return(ctx, 0, 1);
+        return;
+    }
+    if (!TwoLayers()) {  // a menu has the screen: as the game has it
+        __imp__sub_001131F0(ctx, base);
+        return;
+    }
+    gpu::g_flat2d.half = whose;
+    gpu::g_flat2d.cover = true;
+    g_flash_inside = true;
+    __imp__sub_001131F0(ctx, base);
+    g_flash_inside = false;
+    gpu::g_flat2d.cover = false;
+    gpu::g_flat2d.half = 0;
+}
 
 // The overlay's draw. Player 1's goes into the left half. A second draw for Player 2 is off (S2_COOP_HUD2=1 turns
 // it on for tests): the overlay keeps one set of values, pulled from "the player" by its own script (a task
@@ -3370,8 +3549,10 @@ X86_EXTERN_FUNC(__imp__sub_00072330);
 X86_FUNC(sub_00072330) {
     bool second = game_coop::HitBySecond(kernel::R32(ctx.esp + 4));
     // tests: S2_COOP_ONEHIT=1 leaves whatever Player 2 hits with half a point of health, so his hit kills it
-    static const bool onehit = std::getenv("S2_COOP_ONEHIT") != nullptr;
-    if (onehit && second && mem::IsCommitted(ctx.ecx + 0x20) && game_coop::ReadF(ctx.ecx + 0x16) > 0.5f) {
+    // (S2_COOP_ONEHIT=all: whoever hits it)
+    static const char* onehit_v = std::getenv("S2_COOP_ONEHIT");
+    static const bool onehit = onehit_v != nullptr, onehit_all = onehit_v && !std::strcmp(onehit_v, "all");
+    if (onehit && (second || onehit_all) && mem::IsCommitted(ctx.ecx + 0x20) && game_coop::ReadF(ctx.ecx + 0x16) > 0.5f) {
         float half = 0.5f;
         std::memcpy(kernel::HostPtr(ctx.ecx + 0x16), &half, 4);
     }
@@ -4563,4 +4744,23 @@ X86_FUNC(sub_00191070) {
         if (place && mem::IsCommitted(place + 12)) std::memcpy(at, kernel::HostPtr(place), 12);
         LOGI("sound trace: wave %08X place %08X (%.1f %.1f %.1f) flags %X scale %.2f from %08X gave %08X", sound, place, at[0], at[1], at[2], flags, scale, from, ctx.eax);
     }
+}
+
+// Tests: S2_SPAWN_TRACE=<class id in hex> logs every object of that class the game makes from a template
+// (0x18C370: owner, matrix, -, template), with the place and who asked. (Who makes the short pale flash at a hit:
+// a Screen Fader, class 21C015A3.)
+X86_EXTERN_FUNC(__imp__sub_0018C370);
+X86_FUNC(sub_0018C370) {
+    static const uint32_t want = std::getenv("S2_SPAWN_TRACE") ? uint32_t(std::strtoul(std::getenv("S2_SPAWN_TRACE"), nullptr, 16)) : 0;
+    if (want) {
+        uint32_t owner = kernel::R32(ctx.esp + 4), matrix = kernel::R32(ctx.esp + 8), tmpl = kernel::R32(ctx.esp + 16);
+        if (tmpl < 0x10000 && game_coop::ClassOfTemplate(tmpl) == want) {
+            float at[3] = {0, 0, 0};
+            if (matrix && mem::IsCommitted(matrix + 64)) std::memcpy(at, kernel::HostPtr(matrix + 48), 12);
+            LOGI("spawn trace: frame %llu: template %u of class %08X at %.2f %.2f %.2f, owner %08X (class %08X), inside the method of Player %08X, asked from %s",
+                 (unsigned long long)game_coop::Frames(), tmpl, want, at[0], at[1], at[2], owner,
+                 owner && mem::IsCommitted(owner + 0x110) ? game_coop::ClassOf(owner) : 0, game_coop::g_running, game_coop::Callers(ctx, 14).c_str());
+        }
+    }
+    __imp__sub_0018C370(ctx, base);
 }
