@@ -1,0 +1,10 @@
+# The co-op meeting point (see worker.js). Put online with: npx wrangler deploy
+name = "s2-meet"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "s2-meet"
+database_id = "ee3cf511-feb4-448d-b543-9da47d2c879b"

@@ -11,6 +11,7 @@ void Loaded();
 }
 
 namespace game_watchdog { void Init(); }  // freeze report (src/game/watchdog.cpp)
+namespace game_meet { void Init(); }      // the meeting point: one short code to join (src/game/meet.cpp)
 namespace game_record { void Init(); }    // the session record: clock, load, window, controllers (src/game/record.cpp)
 namespace game_coop {
 void Ui(double fps);  // coop.cpp
@@ -26,6 +27,7 @@ static void GameInit() {
     game_diag::Init();
     game_watchdog::Init();
     game_record::Init();
+    game_meet::Init();
 }
 
 // what the runtime asks of the game; strings must be set, hooks may stay null

@@ -1,1 +1,1 @@
-40 2026-11-25 Session logs now record far more: controllers, network quality, PC load, long frames and what each player was doing.
+41 2026-11-25 Joining online now takes one short code like WOLF-4271: the host sends it, the friend types it under Join online.

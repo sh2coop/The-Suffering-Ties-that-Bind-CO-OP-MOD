@@ -86,6 +86,18 @@ bool HostExpect(const std::string& address);  // the host: a visitor will come f
 bool HostExpecting();
 int InternetState();  // hosting: 0 not yet, 1 looking the address up, 2 port open, 3 port to forward, 4 shared address, 5 none
 }
+namespace game_meet {  // meet.cpp: one short code (WOLF-4271) through the meeting point
+bool Available();
+int HostState();  // 0 not inviting, 1 asking for a code, 2 the code is there, 3 no code (Note says why)
+std::string HostCode();
+std::string Note();
+void ClearNote();
+std::string Tidy(const std::string& typed);
+bool Join(const std::string& typed);
+int JoinLookup();  // 0 nothing, 1 asking the meeting point, 2 the host's address is there, 3 failed (Note says why)
+bool TakeHost(std::string& address);
+void JoinForget();
+}
 namespace game_menu {
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -251,6 +263,8 @@ void SetCoop(int choice) {
     if (choice != kHost) game_coop::g_host_setting = false;
     g_host_chosen = Clock::now();
     game_net::ClearNote();
+    game_meet::ClearNote();
+    if (choice != kJoin) game_meet::JoinForget();
 }
 void SettleHost(bool now) {
     if (g_coop == kHost && !game_coop::g_host_setting && (now || Clock::now() - g_host_chosen > std::chrono::milliseconds(1000)))
@@ -319,6 +333,7 @@ struct Entry {
     std::string before;
 };
 Entry g_entry;
+bool g_by_code = false;    // the join on its way was started with a short code
 std::string g_friend;  // the host: the joiner's code as entered last (this run only)
 std::atomic<bool> g_typing{false};  // (the controller code asks: Backspace is not the BACK button meanwhile)
 // One press of a button is several events (A is 0x412, 0x418, 0x41A, 0x420 and 0x44B). When the entry ends on one
@@ -335,6 +350,7 @@ int LastOf(int n) { return kFirst[n] + kWidth[n] - 1; }
 
 void EntryStart(bool for_friend) {
     g_entry = {};
+    if (!for_friend) g_by_code = false;
     g_entry.for_friend = for_friend;
     g_entry.before = for_friend ? g_friend : Address();
     Code(g_entry.before.c_str(), g_entry.field, true);  // (noughts, when it is a name or nothing yet)
@@ -418,6 +434,79 @@ std::string EntryText() {
     return out;
 }
 
+// Entering a friend's short code, WOLF-4271: four letters and four digits. A controller turns one character at a
+// time (up and down), a keyboard types them; the dash is not typed.
+struct Friendly {
+    char c[9] = "AAAA0000";
+    int caret = 0;
+};
+Friendly g_fr;
+bool g_friendly = false;   // the entry that is open is this one
+std::string g_code_typed;  // the code entered last (this run): there again when the friend has to come back in
+void FriendlyStart(bool empty) {
+    g_fr = {};
+    std::string before = game_meet::Tidy(g_code_typed);
+    if (!empty && before.size() == 9) std::memcpy(g_fr.c, (before.substr(0, 4) + before.substr(5)).c_str(), 8);
+    g_friendly = true;
+    g_typing = true;
+    game_net::ClearNote();
+    game_meet::ClearNote();
+    LOGI("menu: a friend's code is being entered");
+}
+std::string FriendlyCode() { return std::string(g_fr.c, 4) + "-" + std::string(g_fr.c + 4, 4); }
+void JoinByCode(const std::string& code) {
+    g_code_typed = code;
+    g_by_code = true;
+    bool asked = game_meet::Join(code);
+    LOGI("menu: join with the code %s %s", code.c_str(), asked ? "started" : "did not start");
+}
+void FriendlyEnd(bool keep) {
+    g_typing = false;
+    g_friendly = false;
+    g_after_entry = 2;
+    LOGI("menu: the friend's code was %s", keep ? "entered" : "left as it was");
+    if (keep) JoinByCode(FriendlyCode());
+}
+void FriendlyMove(int dir) { g_fr.caret = std::clamp(g_fr.caret + dir, 0, 7); }
+void FriendlyTurn(int dir) {
+    char& ch = g_fr.c[g_fr.caret];
+    if (g_fr.caret < 4) ch = char('A' + ((ch - 'A' + dir) % 26 + 26) % 26);
+    else ch = char('0' + ((ch - '0' + dir) % 10 + 10) % 10);
+}
+void FriendlyKey(char key) {  // a letter or a digit typed: it goes where it fits, from the caret on
+    bool letter = key >= 'A' && key <= 'Z';
+    if (letter && g_fr.caret >= 4) return;
+    if (!letter && g_fr.caret < 4) g_fr.caret = 4;
+    g_fr.c[g_fr.caret] = key;
+    if (g_fr.caret < 7) g_fr.caret++;
+}
+// "WO[L]F-4271": the character in hand in brackets
+std::string FriendlyText() {
+    std::string out;
+    for (int i = 0; i < 8; i++) {
+        if (i == 4) out += '-';
+        if (i == g_fr.caret) out += '[';
+        out += g_fr.c[i];
+        if (i == g_fr.caret) out += ']';
+    }
+    return out;
+}
+// a short code somewhere in a text (a friend's message): "" none
+std::string FindFriendly(const std::string& text) {
+    for (size_t i = 0; i + 8 <= text.size(); i++) {
+        if (i && std::isalnum(static_cast<unsigned char>(text[i - 1]))) continue;
+        size_t at = i;
+        int letters = 0, digits = 0;
+        while (at < text.size() && letters < 4 && std::isalpha(static_cast<unsigned char>(text[at]))) at++, letters++;
+        if (letters != 4) continue;
+        if (at < text.size() && (text[at] == '-' || text[at] == ' ')) at++;
+        while (at < text.size() && digits < 4 && std::isdigit(static_cast<unsigned char>(text[at]))) at++, digits++;
+        if (digits != 4 || (at < text.size() && std::isalnum(static_cast<unsigned char>(text[at])))) continue;
+        return game_meet::Tidy(text.substr(i, at - i));
+    }
+    return "";
+}
+
 // the host has entered the joiner's code: his router is shown packets going there
 void ExpectNow() {
     int f[kFields];
@@ -497,6 +586,7 @@ std::chrono::steady_clock::time_point g_copied_at{};
 bool JustCopied() { return std::chrono::steady_clock::now() - g_copied_at < std::chrono::milliseconds(2500); }
 void CopyMine() {
     std::string code = game_net::OutsideAddress();
+    if (CoopChoice() == kHost && !game_meet::HostCode().empty()) code = game_meet::HostCode();  // (the one a friend types)
     if (code.empty() || !OpenClipboard(static_cast<HWND>(app::Window()))) return;
     EmptyClipboard();
     if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, code.size() + 1)) {
@@ -512,6 +602,13 @@ void JoinNow();
 // host name is taken too.
 void Paste() {
     std::string text = Clipboard();
+    if (std::string code = FindFriendly(text); !code.empty() && game_meet::Available() && CoopChoice() == kJoin && (!g_typing || g_friendly)) {
+        if (g_typing) g_typing = false, g_friendly = false, g_after_entry = 2;
+        LOGI("menu: a short code was pasted");
+        if (!game_net::JoinState()) JoinByCode(code);
+        return;
+    }
+    if (g_friendly) return;
     for (size_t i = 0; i < text.size(); i++) {
         char before = i ? text[i - 1] : ' ';
         if (std::isdigit(static_cast<unsigned char>(before)) || before == '.') continue;
@@ -526,6 +623,7 @@ void Paste() {
             ExpectNow();
         } else {
             g_address = CodeText(f);
+            g_by_code = false;
             game_net::ClearNote();
             if (!game_net::JoinState()) JoinNow();  // (a pasted code is whole: the join starts at once)
         }
@@ -561,8 +659,26 @@ void Keys(bool entry) {
         front = true, paste = key == 'v', digit = key >= '0' && key <= '9' ? key - '0' : -1;
         next = key == '.' || key == ':', del = key == 'b', clear = key == 'd', leave = key == 'e';
     }
+    char letter = 0;
+    for (int c = 'A'; c <= 'Z'; c++)
+        if (Pressed(c) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000)) letter = char(c);
+    if (!TestKeys().empty()) letter = 0;
     if (paste) Paste();
-    if (!front || (GetAsyncKeyState(VK_SHIFT) & 0x8000)) return;
+    if (!front || (GetAsyncKeyState(VK_SHIFT) & 0x8000 && !letter)) return;
+    bool friendly_row = CoopChoice() == kJoin && game_meet::Available();
+    if (entry && g_friendly) {  // the short code: letters and digits
+        if (letter) FriendlyKey(letter);
+        if (digit >= 0) FriendlyKey(char('0' + digit));
+        if (del) FriendlyMove(-1);
+        if (leave) FriendlyEnd(false);
+        return;
+    }
+    if (!entry && friendly_row) {  // a letter typed on the row starts a new code
+        if (!letter) return;
+        FriendlyStart(true);
+        FriendlyKey(letter);
+        return;
+    }
     if (!entry) {  // a digit typed on the row starts a new address
         if (digit < 0) return;
         EntryStart(CoopChoice() == kHost);
@@ -625,7 +741,7 @@ void MoveFocusTo(int focus);
 bool Waiting() { return !SecondsPage() && CoopChoice() == kJoin && game_net::JoinState() == 1; }
 
 bool Visible(int row) {
-    if (Waiting()) return row == kOnline && game_net::JoinPhase() == 1 && !g_typing;
+    if (Waiting()) return row == kOnline && game_net::JoinPhase() == 1 && !g_typing && !g_by_code;
     // (his volume is for a player on another PC: in split screen both players have one sound)
     if (SecondsPage()) return row == kLook || row == kSpeed || (row == kVolume && game_net::HostHasPlayer());
     switch (row) {
@@ -645,6 +761,11 @@ bool Focusable(int row) { return row != kOnline || CoopChoice() == kJoin || Coop
 std::string OnlineText(bool focused) {
     if (CoopChoice() == kHost) {
         if (g_typing) return "Friend's code:  " + EntryText();
+        if (!game_coop::g_host_failed && game_meet::Available()) {  // the short code a friend types
+            std::string invite = game_meet::HostCode();
+            if (!invite.empty()) return focused ? "Invite code:  [ " + invite + " ]" : "Invite code:  " + invite;
+            if (game_meet::HostState() != 3) return "Invite code:  one moment";
+        }
         std::string code = game_coop::g_host_failed ? std::string() : game_net::OutsideAddress();
         if (!code.empty()) return focused ? "Your code:  [ " + code + " ]" : "Your code:  " + code;
         std::string address;
@@ -662,7 +783,14 @@ std::string OnlineText(bool focused) {
         }
         return "Your address:  " + address;
     }
+    if (g_typing && g_friendly) return "Friend's code:  " + FriendlyText();
     if (g_typing) return "Host's code:  " + EntryText();
+    if (game_meet::Available() && !game_net::JoinState()) {
+        if (game_meet::JoinLookup() == 1) return "Friend's code:  " + g_code_typed + "  (looking it up)";
+        std::string last = g_code_typed.empty() ? "not entered" : g_code_typed;
+        return focused ? "Friend's code:  [ " + last + " ]" : "Friend's code:  " + last;
+    }
+    if (game_net::JoinState() && g_by_code) return "Friend's code:  " + g_code_typed + (game_net::JoinState() == 2 ? "  (joined)" : "");
     if (game_net::JoinState() == 1) {
         std::string mine = game_net::OutsideAddress();
         return "Your code:  " + (mine.empty() ? std::string("looking it up") : mine);
@@ -708,7 +836,9 @@ std::string Help() {
             if (g_typing)
                 return "Enter the code your friend's screen shows. Up and down change the digit, A is done, B cancels. Ctrl+V pastes it.";
             if (JustCopied()) return "Copied. Paste it into a message to your friend.";
-            if (game_net::HostExpecting()) return "Waiting for your friend to come in. This can take half a minute.";
+            if (game_net::HostExpecting()) return "Your friend is connecting. This can take half a minute.";
+            if (!game_coop::g_host_failed && game_meet::Available() && !game_meet::HostCode().empty())
+                return "Send this code to your friend: X (Ctrl+C) copies it. Your friend picks Join online and enters it. You can just play meanwhile.";
             if (game_net::OutsideKind() == 2)
                 return "Your router gives every connection a new port, so a code cannot work. Forward UDP port 27025 to this PC instead.";
             if (!game_net::OutsideAddress().empty())
@@ -727,7 +857,13 @@ std::string Help() {
         case kJoin: {
             if (g_typing)
                 return "Up and down change the digit, left and right move. A joins, B cancels. A keyboard can type the code, or paste it with Ctrl+V.";
+            if (g_typing && g_friendly)
+                return "Up and down change the letter or digit, left and right move. A joins, B cancels. A keyboard can type the code, or paste it with Ctrl+V.";
+            if (game_meet::JoinLookup() == 1) return "Looking the code up...";
+            if (!game_net::JoinState() && !game_meet::Note().empty()) return game_meet::Note();
             if (game_net::JoinPhase() == 3) return "The host is in the game. You are coming in as Player 2 now.";
+            if (game_net::JoinPhase() == 1 && g_by_code)
+                return "The code is right. Connecting to your friend's game now. This can take half a minute. Hold BACK to stop.";
             if (game_net::JoinPhase() == 2)
                 return "You are connected. The host is still in his menu. You come in by yourself as soon as he starts or loads a game. Hold BACK to stop.";
             if (game_net::JoinState() == 1) {
@@ -739,10 +875,13 @@ std::string Help() {
             if (game_net::JoinState()) return "Joined. To leave the game, hold BACK (keyboard: Backspace) for two seconds.";
             std::string note = game_net::LastNote();
             if (!note.empty()) {
+                if (note.rfind("No answer", 0) == 0 && g_by_code)
+                    return "No connection to your friend's game. One of your routers may block direct connections: ask your friend to forward UDP port 27025.";
                 if (note.rfind("No answer", 0) == 0) note += " Check the code, and that the host entered yours.";
                 return note;
             }
             if (row == kCoop) return "Join a friend's game: go down to Host's code. To leave a game later, hold BACK (Backspace) for two seconds.";
+            if (game_meet::Available()) return "Press A and enter your friend's code, like WOLF-4271. Y (Ctrl+V) pastes it. Your friend sees it under Host online.";
             return "Y (Ctrl+V) pastes the host's code and joins. Or press A, enter the code he sees under Host online, and press A.";
         }
     }
@@ -821,6 +960,7 @@ void Refresh(X86Context& ctx) {
     static const char* const kWaitTitles[] = {"", "WAITING FOR HOST", "CONNECTED", "JOINING GAME"};
     int phase = waiting ? std::clamp(game_net::JoinPhase(), 1, 3) : 0;
     std::string title = phase ? kWaitTitles[phase] : seconds ? "PLAYER 2 SETTINGS" : "DISPLAY AND CO-OP";
+    if (phase == 1 && g_by_code) title = "CONNECTING";
     if (g_page.title && title != g_page.title_text) {
         SetText(ctx, g_page.title, title);
         if (phase) LOGR("menu: the joining player's screen says %s", title.c_str());
@@ -895,6 +1035,11 @@ void Tick(X86Context& ctx) {
     }
     if (takes_code) Keys(g_typing);
 #endif
+    if (std::string host; game_meet::TakeHost(host)) {  // the meeting point knows the code: join that game
+        Address() = host;  // (through Address(): its first use reads the settings file over it)
+        g_by_code = true;
+        JoinNow();
+    }
     Refresh(ctx);
 }
 
@@ -1006,7 +1151,7 @@ void Build(X86Context& ctx, uint32_t screen) {
 bool BackCloses(X86Context& ctx) {
     if (g_typing) {
         uint32_t manager = kernel::R32(0x391D64);
-        if (manager && ThisCall(ctx, 0x1A09C0, kernel::R32(0x384BC8), {manager + 0x68, kBack, 1})) EntryEnd(false);
+        if (manager && ThisCall(ctx, 0x1A09C0, kernel::R32(0x384BC8), {manager + 0x68, kBack, 1})) g_friendly ? FriendlyEnd(false) : EntryEnd(false);
         return false;
     }
     if (Waiting()) return false;  // (the waiting screen stays up: holding BACK stops the join)
@@ -1152,7 +1297,7 @@ X86_FUNC(sub_0014BEE0) {
     using namespace game_menu;
     if (ctx.ecx == g_page.screen) {
         if (std::getenv("S2_MENU_TRACE")) LOGI("menu: the page ends, called from %s", game_coop::CallersOf(ctx).c_str());
-        if (g_typing) EntryEnd(false);
+        if (g_typing) g_friendly ? FriendlyEnd(false) : EntryEnd(false);
         SettleHost(true);  // (the choice was made; the page was left before the moment was up)
         g_page = {};
     }
@@ -1174,6 +1319,19 @@ X86_FUNC(sub_0014BDA0) {
         return;
     }
     if (SecondsPage() && g_page.focus == 0 && (event == kLeft || event == kRight)) {  // (the brightness is Player 1's)
+        kernel::Return(ctx, 1, 1);
+        return;
+    }
+    if (g_typing && g_friendly) {  // a short code is being entered
+        switch (event) {
+            case kLeft: FriendlyMove(-1); break;
+            case kRight: FriendlyMove(1); break;
+            case kUp: FriendlyTurn(1); break;
+            case kDown: FriendlyTurn(-1); break;
+            case kAccept: FriendlyEnd(true); break;
+            case kBack: FriendlyEnd(false); break;
+        }
+        Refresh(ctx);
         kernel::Return(ctx, 1, 1);
         return;
     }
@@ -1203,8 +1361,10 @@ X86_FUNC(sub_0014BDA0) {
     if (g_page.focus > 0 && (event == kLeft || event == kRight || event == kAccept)) {
         int row = g_page.focus - 1;
         if (row != kOnline) Step(row, event == kLeft ? -1 : 1);
+        else if (CoopChoice() == kHost && !game_meet::HostCode().empty()) CopyMine();  // (the short code: nothing to enter, A copies it)
         else if (CoopChoice() == kHost) EntryStart(true);  // the joiner's code
         else if (game_net::JoinState()) {}                 // (joining or joined: nothing to enter)
+        else if (game_meet::Available()) FriendlyStart(false);
         else if (int f[kFields]; event == kAccept && !Address().empty() && !Code(g_address.c_str(), f, true)) JoinNow();  // a host name
         else EntryStart(false);
         Refresh(ctx);
