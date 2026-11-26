@@ -1,1 +1,1 @@
-47 2026-11-25 Split screen no longer collapses when Player 1 opens a door, Player 2 stays the creature as long as the story keeps Player 1 one, and Stop inviting really stops.
+48 2026-11-25 Any button now skips the logo films and the title screen when the game starts.

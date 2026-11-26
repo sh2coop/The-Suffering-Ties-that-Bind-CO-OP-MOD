@@ -1431,6 +1431,52 @@ X86_FUNC(sub_00154550) {
     kernel::Return(ctx, 0, 0);
 }
 
+// ---- the screens before the main menu, skipped with any button ---------------------------------------------------------
+// (Skylar, 2026-11-26.) Two screens come up when the game starts:
+//   - the publisher's and the developer's logos, films of fifteen seconds together (screen methods 0x341B70, once
+//     a frame 0x14DA30). Its input handler 0x14D690 only answers event 0x420 (the A button).
+//   - the title with the legal lines (methods 0x3419E8, once a frame 0x14C590), which loads the menu's resources and
+//     then stays until its least time is over: state at +0x68, 4 = waiting for the time (shown since +0x6C against the
+//     seconds in property 0x15), 5 = done. It takes no input at all (0x1D6540).
+// Now any button of controller 1 (or the keyboard keys that stand for them) ends the film and ends the title's
+// wait. The loading itself is not cut short: the main menu needs what it loads.
+namespace game_menu {
+bool AnyButtonPressed() {
+    static bool before = true;  // (a button held since before the screen came up does not count)
+    input::Pad p = input::Poll(0);
+    bool now = p.buttons != 0;
+    for (int i = 0; i < 8; i++) now |= p.analog[i] > 60;
+    bool pressed = now && !before;
+    before = now;
+    return pressed;
+}
+}  // namespace game_menu
+X86_EXTERN_FUNC(__imp__sub_0014DA30);
+X86_FUNC(sub_0014DA30) {  // the logo film's screen, once a frame (this)
+    if (ctx.ecx && kernel::R32(ctx.ecx) == 0x341B70 && game_menu::AnyButtonPressed()) {
+        // (the screen plays a list of films, the one in hand at +0x68; +0x70 is set when a film has ended, and the
+        // screen then goes on to the next one or, after the last, closes and makes the title screen: 0x14D8E0.
+        // The A button's own way, [0x384B94]->method +0x3C, did not end a film on this port.)
+        LOGR("menu: a button was pressed: the logo films are skipped");
+        kernel::W32(ctx.ecx + 0x68, 0x7FFF);
+        kernel::W32(ctx.ecx + 0x70, 1);
+    }
+    __imp__sub_0014DA30(ctx, base);
+}
+X86_EXTERN_FUNC(__imp__sub_0014C590);
+X86_FUNC(sub_0014C590) {  // the title and legal screen, once a frame (this)
+    static uint32_t asked = 0;  // the screen a button was pressed on (while it still loads: remembered until it waits)
+    if (ctx.ecx && kernel::R32(ctx.ecx) == 0x3419E8) {
+        if (game_menu::AnyButtonPressed()) asked = ctx.ecx;
+        if (asked == ctx.ecx && kernel::R32(ctx.ecx + 0x68) == 4) {
+            kernel::W32(ctx.ecx + 0x68, 5);
+            asked = 0;
+            LOGR("menu: a button was pressed: the title screen's wait is skipped");
+        }
+    }
+    __imp__sub_0014C590(ctx, base);
+}
+
 // its destructor: the rows go with the screen's other children
 X86_FUNC(sub_0014BEE0) {
     using namespace game_menu;
