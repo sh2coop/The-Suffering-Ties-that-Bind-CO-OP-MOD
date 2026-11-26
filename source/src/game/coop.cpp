@@ -198,6 +198,28 @@ constexpr uint32_t kObjectManager = 0x394678, kManagerState = 0x134;
 constexpr uint32_t kCameraTrack = 0x103740;        // (this = Camera, object to follow)
 constexpr uint32_t kSoundPointer = 0x384BBC, kSetListener = 0x1A2690;  // (this, object sound is heard from)
 uint32_t g_camera2_object = 0;  // Player 2's Camera: its engine object
+// A first-person player's body for the other player's view (see "the stand-in bodies", below): one more Player
+// object for each player
+struct Double {
+    uint32_t object = 0, player = 0;      // its engine object and its Player (the class object); 0: not made
+    bool out = false;                     // its owner is in first person: it is drawn and runs (else it is put away)
+    uint64_t since = 0;                   // the frame it was made in, or last taken out or put away
+    bool landed = false;                  // it has been put on its owner the game's way since it was taken out (PinDoubles)
+    uint32_t display = 0;                 // its own weapon display on the HUD (Player +0x7F0), taken off it while it lives
+    uint32_t held[2] = {};                // the objects in its hands (once a frame, for the draw)
+    uint32_t owner_held[2] = {};          // and in its owner's, while it is out
+    uint32_t tried = 0xFFFF;              // the weapon it was last handed (an item: a template's number)
+    uint64_t tried_at = 0;
+};
+Double g_doubles[2];              // [0] Player 1's, [1] Player 2's
+bool g_doubles_fresh = false;     // Doubles has looked them over since the views were last drawn (the second pin only then)
+bool g_double_spawning = false;   // the game is making a stand-in right now (it gets no HUD parts: the hook on 0x1DE10)
+uint32_t g_double_hits = 0;       // how often something hurt a stand-in (it should be never: the record says so if it happens)
+int DoubleOf(uint32_t player);    // which stand-in this Player is: 0, 1 or -1
+int DoubleObject(uint32_t object);
+void EndDoubles(X86Context& ctx, const char* why);
+void Doubles(X86Context& ctx);     // once a frame
+void PinDoubles(X86Context& ctx);  // the stand-ins that are out are put exactly where their owners are
 uint32_t g_no_texture = 0;      // the stand-in texture of Player 2's view camera
 extern const char* g_scene_why;
 bool g_one_view = false;        // a scene: the picture is one view, Player 1's (see Views)
@@ -342,6 +364,30 @@ struct AsSecond {
         kernel::W32(kGameCamera, camera);
         kernel::W32(kernel::R32(kViewPointer) + kViewCurrent, current);
         kernel::W32(kViewMatrixPointer, matrix);
+    }
+};
+// A stand-in body's own methods: it is "the player" (the first in the list) meanwhile, with its owner's walk stick,
+// Camera and view (AsSecond's swap, when the owner is Player 2). Declared before AsSecond in the hooks, so that it
+// is undone after it.
+int g_double_scope = 0;  // how many AsDouble are open: a stand-in is "the player" right now (its events are dropped, 0x1A1E40)
+struct AsDouble {
+    int which;
+    uint32_t first = 0;
+    AsSecond owner;
+    explicit AsDouble(uint32_t player) : which(DoubleOf(player)), owner(which == 1 ? g_second : 0) {
+        if (which < 0) return;
+        g_double_scope++;
+        uint32_t list = kernel::R32(kObjectManager + kPlayerList);
+        if (!list) return;
+        first = kernel::R32(list);
+        kernel::W32(list, g_doubles[which].object);
+    }
+    ~AsDouble() {
+        if (which < 0) return;
+        g_double_scope--;
+        if (!first) return;
+        uint32_t list = kernel::R32(kObjectManager + kPlayerList);
+        if (list && g_doubles[which].object && kernel::R32(list) == g_doubles[which].object) kernel::W32(list, first);
     }
 };
 constexpr uint32_t kUser = 0x3A, kUserDevice = 0x3E;  // the Player's input user part, and its controller index
@@ -515,6 +561,8 @@ void SecondGone(X86Context& ctx, const char* why) {
         ctx.ecx = ecx;
     }
     g_second = g_second_object = g_camera2_object = 0;
+    g_doubles[0] = g_doubles[1] = Double{};  // (ended with the level, or by EndSecond)
+    g_doubles_fresh = false;
     g_spare_at = 0;
     g_down_until = 0;
     g_one_view = false;
@@ -542,6 +590,7 @@ void SplitOn(X86Context& ctx);
 // 2026-11-26: nine saves in that session; run guns1 shows one).
 uint32_t Named(uint32_t player, uint32_t at);
 void EndSecond(X86Context& ctx, const char* why) {
+    EndDoubles(ctx, why);
     uint32_t ecx = ctx.ecx;
     static const bool leave = std::getenv("S2_COOP_LEAVE_GUNS") != nullptr;  // tests: as before 2026-11-26
     uint32_t held[2] = {leave ? 0 : Named(g_second, 0x3AC), leave ? 0 : Named(g_second, 0x3AE)};
@@ -566,6 +615,7 @@ void EndSecond(X86Context& ctx, const char* why) {
 
 // right before the game saves (the hook on 0x1B4D50)
 void BeforeSave(X86Context& ctx) {
+    EndDoubles(ctx, "the game is saving");
     if (!g_second_object || !IsPlayerObject(g_second_object)) return;
     g_return.valid = true;
     std::memcpy(g_return.matrix, kernel::HostPtr(g_second_object + kMatrix), 64);
@@ -583,7 +633,7 @@ void BeforeSave(X86Context& ctx) {
 // from the one held, so it finds none for empty hands; 0x14F30 and 0x16320 put it in his hands).
 // (Everything is copied for now, quest items too: the Player 1 only rule for those is still to come.)
 constexpr uint32_t kInventory = 0x128, kInventoryCopy = 0x11380;
-constexpr uint32_t kEquip = 0x14F30, kEquipped = 0x16320;  // (this = Player, weapon's template, slot): as 0x171F0 calls them
+constexpr uint32_t kEquip = 0x14F30;  // (this = Player, weapon's template, slot): puts a weapon in his hands, as 0x171F0 does
 uint64_t g_arm_at = 0;
 // Player 2's weapon loads itself from what he carries, within a second of being put in his hands: the ammunition he
 // had just been given went into the empty gun and he was left with one clip and nothing to reload with, where Player
@@ -628,11 +678,11 @@ void Arm(X86Context& ctx) {
         uint32_t held = table && handle ? kernel::R32(table + handle * 6) : 0;
         if (held) {
             uint32_t weapon = kernel::R32(held + kTemplateWord) & 0xFFFF;
+            // (0x14F30 puts it in his hands. 0x16320, called after it until 2026-11-26 because the weapon button
+            // does, only makes the notice on the HUD that names the weapon: not for Player 2's.)
             AsSecond as(g_second);
             ctx.ecx = g_second;
             kernel::CallGuest(ctx, kEquip, {weapon, 1});
-            ctx.ecx = g_second;
-            kernel::CallGuest(ctx, kEquipped, {weapon, 1});
         }
     }
     // (what he was given, for Spare below: his weapon loads itself from it a moment later)
@@ -1075,6 +1125,7 @@ void Session(X86Context& ctx, bool wanted) {
         Arm(ctx);
     }
     Spare(ctx);
+    Doubles(ctx);
 }
 
 // The teleport: Player 2 holds A, B, X and Y together for five seconds and is put beside Player 1 (never the other
@@ -1335,6 +1386,256 @@ void TestClasses(X86Context& ctx) {
 }
 
 // once a frame (hooks.cpp, before the frame is shown)
+// ---- the stand-in bodies --------------------------------------------------------------------------------------------
+// In first person the game takes the Player's body off him: 0x27760 gives his object the first-person model (two arms,
+// model 0x3C0002 in place of the body 0x3C0001, kept at Player +0x764) with a skeleton of its own. With two players
+// the other one saw a pair of arms in the air ("the first person i still only see his arms", "it should be the same
+// thing im seeing as if hes 3rd person", 2026-11-26). The body the other player sees is a stand-in: one more Player
+// object from the same template for each player, worked like a puppet.
+//   - They are made once, half a second after both players are in, and put away (not out: not drawn, no Run). A
+//     player's is taken out when he goes into first person and put away again when he leaves it or the picture
+//     becomes one view. They end with Player 2 (a save, a level exit, co-op off) and are made again after him. Why
+//     not made when they are needed: see SpawnDouble.
+//   - They are not on the players' list (nothing counts them as players) and their input user's device is one that
+//     does not exist: no button reaches them.
+//   - While one is out its Run runs, as "the player" (AsDouble) with its owner's walk stick: it stands when he stands
+//     and runs when he runs. It has no Detect (the hook on 0x24B00), so it has no movement of its own and meets
+//     nothing. Two things were found the hard way:
+//       With its Detect running and the stand-in standing in its owner, he could not walk (8 cm where he walked 3 m).
+//       A Player is moved by a second object of his own (class Collider, made by 0x1CB80, see ProxyOf); a sweep that
+//       finds another player's Collider leaves contacts in THAT player's body too (he is told of the touch, 0x1706F0),
+//       and his solver (0x19E580) then takes his whole step back. That is also why two players cannot walk through
+//       each other.
+//       Put on its owner every frame the game's way (0x2F060) it never landed: 0x2F060 clears the on-the-ground bit
+//       (Player +0xA8 bit 0), so it stayed in the Fall state (state 9, Player +0xBC bit 9) and its Run dropped it
+//       faster each frame, up to 1.03 m a frame: it was drawn sunk to the waist, its pistol a metre under its hand.
+//   - It is put where its owner is twice a frame (PinDoubles).
+//   - It holds the kind of weapon its owner holds (0x14F30, again when he changes weapons).
+//   - It sends no game events and has no HUD parts (the hooks on 0x1A1E40 and 0x1DE10, below).
+//   - Nothing finds it: its object carries the engine's "not for questions" mark, touches with it are refused both
+//     ways (RefuseTouch, 0x1706F0) and nothing hurts it (Player +0x1E; the hook on 0x28E00 says so if anything tries).
+//   - It is drawn in every view but its owner's, and its owner's arms and weapon in his own view only (0x1D1970).
+// Not done: a stand-in has no buttons, so it does not jump, fire, reload or swing with its owner; while he is in the
+// air it is carried along standing. A player in creature form has none.
+//   S2_COOP_NO_DOUBLE=1: none (as before 2026-11-26)      S2_COOP_DOUBLE_NO_WEAPON=1: empty hands
+//   S2_COOP_DOUBLE_SOLID=1: without the "not for questions" mark      S2_COOP_DOUBLE_EVENTS=1: their events go out
+bool g_double_off = std::getenv("S2_COOP_NO_DOUBLE") != nullptr;
+int DoubleOf(uint32_t player) {  // which stand-in this Player (class object) is: 0 Player 1's, 1 Player 2's, -1 neither
+    if (!player) return -1;
+    return g_doubles[0].player == player ? 0 : g_doubles[1].player == player ? 1 : -1;
+}
+int DoubleObject(uint32_t object) {  // the same, by its engine object
+    if (!object) return -1;
+    return g_doubles[0].object == object ? 0 : g_doubles[1].object == object ? 1 : -1;
+}
+// A Player is moved by a second object of his own (made by 0x1CB80 from the template his property 0x78 names, kept
+// by the handle at body +0xD8, the body being [Player +0xF0]): it is that object that is swept through the world.
+// (A stand-in has none as long as its Detect never runs; 0x1CB80 is also called from 0x41770 and 0x45890, so the
+// code below looks for one all the same.)
+uint32_t ProxyOf(uint32_t player) {
+    if (!player || !mem::IsCommitted(player + 0xF4)) return 0;
+    uint32_t body = kernel::R32(player + 0xF0);
+    if (!body || !mem::IsCommitted(body + 0x130)) return 0;
+    uint32_t table = kernel::R32(kObjectManager + 0x0C), h = kernel::R16(body + 0xD8);
+    uint32_t object = table && h ? kernel::R32(table + h * 6) : 0;
+    return object && mem::IsCommitted(object + 0x110) ? object : 0;
+}
+void OffTheList(uint32_t object) {
+    uint32_t list = kernel::R32(kObjectManager + kPlayerList), count = kernel::R32(kObjectManager + kPlayerCount);
+    for (uint32_t i = 0; list && i < count && i < 8; i++) {
+        if (kernel::R32(list + i * 4) != object) continue;
+        for (uint32_t k = i; k + 1 < count; k++) kernel::W32(list + k * 4, kernel::R32(list + k * 4 + 4));
+        kernel::W32(kObjectManager + kPlayerCount, count - 1);
+        return;
+    }
+}
+void EndDoubles(X86Context& ctx, const char* why) {
+    uint32_t ecx = ctx.ecx;
+    int ended = 0;
+    for (Double& d : g_doubles) {
+        uint32_t object = d.object, player = d.player, display = d.display, held[2] = {Named(d.player, 0x3AC), Named(d.player, 0x3AE)};
+        d = Double{};
+        if (!object) continue;
+        ended++;
+        if (display && mem::IsCommitted(player + 0x7F4) && !kernel::R32(player + 0x7F0)) kernel::W32(player + 0x7F0, display);
+        if (mem::IsCommitted(object + 0x110) && int32_t(kernel::R32(object + 8)) >= 0) {
+            ctx.ecx = object;
+            kernel::CallGuest(ctx, kObjectEnd, {});
+        }
+        // (what it held goes with it: a held weapon is an object of its own, see EndSecond)
+        for (uint32_t h : held) {
+            if (!h || h == object || int32_t(kernel::R32(h + 8)) < 0) continue;
+            if (Named(g_player, 0x3AC) == h || Named(g_player, 0x3AE) == h || Named(g_second, 0x3AC) == h || Named(g_second, 0x3AE) == h) continue;
+            ctx.ecx = h;
+            kernel::CallGuest(ctx, kObjectEnd, {});
+        }
+    }
+    ctx.ecx = ecx;
+    if (ended) LOGI("coop: the stand-in bodies are taken out (%s)", why);
+}
+// They are made once and put away, not each time a player goes into first person: the making of a Player has the HUD
+// show its parts afresh (the new Player's own making sends 0x186B1, 0x186AC and 0x186B3, and those cannot be dropped:
+// without them the ammunition counter and the flashlight sign stayed off Player 1's HUD for good, run dbl48).
+void SpawnDouble(X86Context& ctx, int which) {
+    Double& d = g_doubles[which];
+    uint32_t owner = g_player_object;  // (both players are of one template: the stand-ins are made beside Player 1)
+    if (!owner) return;
+    static uint32_t matrix = mem::AllocSystem(64);
+    std::memcpy(kernel::HostPtr(matrix), kernel::HostPtr(owner + kMatrix), 64);
+    uint32_t tmpl = kernel::R32(owner + kTemplateWord) & 0xFFFF, ecx = ctx.ecx;
+    uint32_t count = kernel::R32(kObjectManager + kPlayerCount);
+    g_double_spawning = true;
+    uint32_t object = kernel::CallGuest(ctx, kSpawn, {owner, matrix, 0, tmpl});
+    g_double_spawning = false;
+    ctx.ecx = ecx;
+    uint32_t player = object ? kernel::R32(object + kClassObject) : 0;
+    if (!player || !IsPlayerObject(object)) {
+        LOGR("coop: Player %d's stand-in body could not be made (object %08X)", which + 1, object);
+        return;
+    }
+    d = Double{};
+    d.object = object, d.player = player, d.since = g_frames;
+    OffTheList(object);
+    kernel::W32(player + kUserDevice, 3);  // a controller that is not there
+    kernel::W32(player + 0x1E, 1);         // nothing hurts it
+    // A Player may have a weapon display of his own (+0x7F0, made at 0x20497 when his property 0x144 names one), which
+    // is told of each weapon he takes in hand (0x15047). A stand-in has none while it lives (the Player's code leaves
+    // the display alone when there is none, 0x1501B) and gets it back to end with.
+    d.display = kernel::R32(player + 0x7F0);
+    kernel::W32(player + 0x7F0, 0);
+    LOGI("coop: Player %d's stand-in body (object %08X, Player %08X) is made and put away: it shows him to the other player while he is in first person; %u players were listed, %u are now",
+         which + 1, object, player, count, kernel::R32(kObjectManager + kPlayerCount));
+}
+// A stand-in that is out is put where its owner stands, facing as he faces. Twice a frame: before the Players' methods
+// run, so that its own Run starts from its owner's place with its owner's stick, and again right before the views are
+// drawn (the hook on 0x1B83E0), which throws away the step its own Run took in between.
+// How: the first time it is out (and whenever it is far off) the game's own way of putting a Player somewhere
+// (0x2F060), followed by the game's own "he has landed" (0x3BB00: it ends the Fall and Jump states, begins Landing and
+// sets the on-the-ground bit that 0x2F060 cleared; a stand-in has no Detect to find the ground with). After that only
+// its place is written: its object's matrix, its skeleton's copy of it (+0x1A4, as 0x2F060 does) and its body's
+// "where I was" (body +0x84); what it holds is moved by the same step (a held thing's place is worked out from the
+// hand while the Player's own methods run, so without this it would lag the body by that step).
+void PinDoubles(X86Context& ctx) {
+    uint32_t ecx = ctx.ecx, eax = ctx.eax;
+    for (int which = 0; which < 2; which++) {
+        Double& d = g_doubles[which];
+        if (!d.object || !d.out) continue;
+        uint32_t owner = which ? g_second_object : g_player_object, owner_player = which ? g_second : g_player;
+        if (!owner || !owner_player || !mem::IsCommitted(owner + 0x110) || !mem::IsCommitted(d.object + 0x110)) continue;
+        // (both still what they were: not ended, and each object still its Player's)
+        if (int32_t(kernel::R32(owner + 8)) < 0 || kernel::R32(owner + kClassObject) != owner_player) continue;
+        if (int32_t(kernel::R32(d.object + 8)) < 0 || kernel::R32(d.object + kClassObject) != d.player) continue;
+        static uint32_t matrix = mem::AllocSystem(64);
+        std::memcpy(kernel::HostPtr(matrix), kernel::HostPtr(owner + kMatrix), 64);
+        float step[3], far2 = 0;
+        for (int i = 0; i < 3; i++) step[i] = ReadF(matrix + 0x30 + i * 4) - ReadF(d.object + kPosition + i * 4), far2 += step[i] * step[i];
+        if (!d.landed || far2 > 4.0f) {
+            d.landed = true;
+            ctx.ecx = d.player;
+            kernel::CallGuest(ctx, kPlayerTeleport, {matrix});
+            ctx.ecx = d.player;
+            kernel::CallGuest(ctx, 0x3BB00, {});
+        } else {
+            ctx.ecx = d.object;
+            uint32_t its = kernel::CallGuest(ctx, 0x184EB0, {});  // (an object's matrix, to be written: the engine marks it changed)
+            if (its && mem::IsCommitted(its + 0x3C)) std::memcpy(kernel::HostPtr(its), kernel::HostPtr(matrix), 64);
+            uint32_t skeleton = kernel::R32(d.object + 0xE8), body = kernel::R32(d.player + 0xF0);
+            if (skeleton && mem::IsCommitted(skeleton + 0x1E4)) std::memcpy(kernel::HostPtr(skeleton + 0x1A4), kernel::HostPtr(matrix), 64);
+            if (body && mem::IsCommitted(body + 0x90)) std::memcpy(kernel::HostPtr(body + 0x84), kernel::HostPtr(matrix + 0x30), 12);
+            for (uint32_t at : {0x3ACu, 0x3AEu}) {
+                uint32_t held = Named(d.player, at);
+                if (!held || (at == 0x3AE && held == Named(d.player, 0x3AC))) continue;
+                ctx.ecx = held;
+                uint32_t m = kernel::CallGuest(ctx, 0x184EB0, {});
+                if (!m || !mem::IsCommitted(m + 0x3C)) continue;
+                for (int i = 0; i < 3; i++) {
+                    float v = ReadF(m + 0x30 + i * 4) + step[i];
+                    std::memcpy(kernel::HostPtr(m + 0x30 + i * 4), &v, 4);
+                }
+            }
+        }
+        if (uint32_t proxy = ProxyOf(d.player)) {
+            ctx.ecx = proxy;
+            uint32_t its = kernel::CallGuest(ctx, 0x184EB0, {});
+            if (its && mem::IsCommitted(its + 0x3C)) std::memcpy(kernel::HostPtr(its + 0x30), kernel::HostPtr(matrix + 0x30), 12);
+        }
+        OffTheList(d.object);
+    }
+    ctx.ecx = ecx, ctx.eax = eax;
+}
+// once a frame
+void Doubles(X86Context& ctx) {
+    g_doubles_fresh = false;
+    bool both = g_second && g_second_object && mem::IsCommitted(g_second + 0x490) && g_player && g_player_object && mem::IsCommitted(g_player + 0x490);
+    for (Double& d : g_doubles)
+        if (d.object && (!mem::IsCommitted(d.object + 0x110) || int32_t(kernel::R32(d.object + 8)) < 0 || kernel::R32(d.object + kClassObject) != d.player)) {
+            LOGI("coop: a stand-in body's object ended by itself");
+            d = Double{};
+        }
+    if (!both || g_double_off) {
+        EndDoubles(ctx, "the two players are no longer both in");
+        return;
+    }
+    // (made when both have been in for half a second and the picture is theirs: not in a scene, not while one is down)
+    static uint64_t both_since = 0;
+    if (!g_doubles[0].object || !g_doubles[1].object) {
+        if (!both_since) both_since = g_frames;
+        if (g_frames < both_since + 30 || g_one_view || Down()) return;
+        for (int which = 0; which < 2; which++)
+            if (!g_doubles[which].object) SpawnDouble(ctx, which);
+        if (!g_doubles[0].object || !g_doubles[1].object) return;
+    }
+    both_since = 0;
+    static const bool solid = std::getenv("S2_COOP_DOUBLE_SOLID") != nullptr;      // tests
+    static const bool unarmed = std::getenv("S2_COOP_DOUBLE_NO_WEAPON") != nullptr;  // tests
+    uint32_t ecx = ctx.ecx;
+    for (int which = 0; which < 2; which++) {
+        Double& d = g_doubles[which];
+        uint32_t owner = which ? g_second : g_player;
+        // Out while its owner is in first person: the Player's state 15 (bit 15 of his state word +0xBC); 0xC0000 are
+        // Morph and Insanity, the creature form.
+        bool want = !g_one_view && !Down() && (kernel::R32(owner + 0xBC) & 0x8000) && !(kernel::R32(owner + 0xBC) & 0xC0000);
+        if (d.out != want) {
+            if (want) LOGI("coop: Player %d is in first person: his stand-in body shows him to the other player", which + 1);
+            else LOGI("coop: Player %d's stand-in body is put away (he is no longer in first person, or the picture is one view)", which + 1);
+            d.out = want, d.since = g_frames, d.landed = false;
+        }
+        // Nothing finds it, out or put away: its object, what it holds and the object that moves it (should it have
+        // one) carry the engine's "not for questions" mark (object word +8, 0x400000: the world's questions pass such
+        // objects by, 0x1965CD; the game itself puts it on a player's weapons for the length of his own sweep,
+        // 0x16820, and on a player for his line-of-sight check, 0xD72D5).
+        d.held[0] = Named(d.player, 0x3AC), d.held[1] = Named(d.player, 0x3AE);
+        if (!solid)
+            for (uint32_t object : {d.object, ProxyOf(d.player), d.held[0], d.held[1]})
+                if (object) kernel::W32(object + 8, kernel::R32(object + 8) | 0x400000);
+        if (kernel::R32(d.player + 0x1E) != 1) kernel::W32(d.player + 0x1E, 1);
+        float most = ReadF(d.player + 0x1A);
+        if (most > 0) std::memcpy(kernel::HostPtr(d.player + 0x16), &most, 4);
+        d.owner_held[0] = d.owner_held[1] = 0;
+        if (!d.out) continue;
+        d.owner_held[0] = Named(owner, 0x3AC), d.owner_held[1] = Named(owner, 0x3AE);
+        // The weapon in its hands is the kind its owner holds (the object in his right hand, handle at +0x3AC; an item
+        // is its template's number), put there by 0x14F30 as Player 2's is (Arm), again whenever he changes weapons.
+        uint32_t item = d.owner_held[0] ? kernel::R32(d.owner_held[0] + kTemplateWord) & 0xFFFF : 0xFFFF;
+        uint32_t has = d.held[0] ? kernel::R32(d.held[0] + kTemplateWord) & 0xFFFF : 0xFFFF;
+        if (!unarmed && item != 0xFFFF && item != has && (d.tried != item || d.tried_at < d.since || g_frames > d.tried_at + 120)) {
+            d.tried = item, d.tried_at = g_frames;
+            {
+                AsDouble as(d.player);
+                ctx.ecx = d.player;
+                kernel::CallGuest(ctx, kEquip, {item, 1});
+                ctx.ecx = ecx;
+            }
+            OffTheList(d.object);
+            LOGI("coop: Player %d's stand-in is handed the weapon he holds (item %u, class %08X; it had %s)", which + 1, item, ClassOfTemplate(item),
+                 has == 0xFFFF ? "nothing" : "another");
+            d.held[0] = Named(d.player, 0x3AC), d.held[1] = Named(d.player, 0x3AE);
+        }
+    }
+    PinDoubles(ctx);
+    g_doubles_fresh = true;
+}
+
 // Player 2's Camera made anew: his view camera and his Camera object are ended the way they are when he leaves, and
 // made again the way they are when he comes in (SplitOn). For a Camera that no longer follows him ("there was a bug
 // where his camera became fixed", 2026-11-26; not reproduced, so the cause is not known: the check in DetailFrame
@@ -1685,9 +1986,14 @@ void Frame(X86Context& ctx) {
             }
         }
     }
-    {   // tests: S2_TEST_MARK=<frame> asks for a mark at that frame, as F9 does
-        static const uint64_t mark_at = std::getenv("S2_TEST_MARK") ? uint64_t(std::atoll(std::getenv("S2_TEST_MARK"))) : 0;
-        if (mark_at && g_frames == mark_at) game_record::Mark("a test asked");
+    {   // tests: S2_TEST_MARK=<frame>[,<frame>...] asks for a mark at those frames, as F9 does
+        static const std::vector<uint64_t> marks = [] {
+            std::vector<uint64_t> list;
+            for (const char* e = std::getenv("S2_TEST_MARK"); e && *e; e = std::strchr(e, ',') ? std::strchr(e, ',') + 1 : nullptr) list.push_back(uint64_t(std::atoll(e)));
+            return list;
+        }();
+        for (uint64_t at : marks)
+            if (at && g_frames == at) game_record::Mark("a test asked");
     }
     static const uint64_t off_at = std::getenv("S2_COOP_OFF") ? uint64_t(std::atoll(std::getenv("S2_COOP_OFF"))) : 0;  // tests
     bool test_on = (forced || (spawn_at && g_frames + 61 >= spawn_at)) && !(off_at && g_frames >= off_at);
@@ -2202,8 +2508,14 @@ X86_FUNC(sub_00025480) {
     game_coop::Count(0x25480, ctx.ecx);
     uint32_t before = game_coop::g_running;
     game_coop::g_running = ctx.ecx;
+    game_coop::AsDouble dbl(ctx.ecx);
     game_coop::AsSecond as(ctx.ecx);
     game_coop::GlobalsWatch watch(0x25480, ctx.ecx == game_coop::g_second ? 2 : 1, game_coop::g_watch_globals);
+    if (int which = game_coop::DoubleOf(ctx.ecx); which >= 0 && !game_coop::g_doubles[which].out) {  // a stand-in body, put away: it does nothing
+        game_coop::g_running = before;
+        kernel::Return(ctx, 0, 0);
+        return;
+    }
     __imp__sub_00025480(ctx, base);
     game_coop::g_running = before;
 }
@@ -2214,8 +2526,14 @@ X86_FUNC(sub_00024B00) {
     game_coop::Count(0x24B00, ctx.ecx);
     uint32_t before = game_coop::g_running;
     game_coop::g_running = ctx.ecx;
+    game_coop::AsDouble dbl(ctx.ecx);
     game_coop::AsSecond as(ctx.ecx);
     game_coop::GlobalsWatch watch(0x24B00, ctx.ecx == game_coop::g_second ? 2 : 1, game_coop::g_watch_globals);
+    if (game_coop::DoubleOf(ctx.ecx) >= 0) {  // a stand-in body has no Detect (see "the stand-in bodies")
+        game_coop::g_running = before;
+        kernel::Return(ctx, 0, 0);
+        return;
+    }
     __imp__sub_00024B00(ctx, base);
     game_coop::g_running = before;
 }
@@ -2360,6 +2678,12 @@ X86_FUNC(sub_001B83E0) {
         }
         drawn = now;
         if (++drew % 600 == 1) LOGI("coop: Player 2's view for the stream: drawn %u times, left out of %u frames", drew, skipped);
+    }
+    // The stand-in bodies that are out, exactly where their owners are now. Once for each time Doubles has looked
+    // them over: a frame drawn while a level is taken down or loaded must not touch what may be gone.
+    if (game_coop::g_doubles_fresh) {
+        game_coop::g_doubles_fresh = false;
+        PinDoubles(ctx);
     }
     __imp__sub_001B83E0(ctx, base);
     // a scene online with a large picture for the joined player: this frame, finished, about thirty times a second
@@ -2677,6 +3001,7 @@ bool NotForSecond(uint32_t cls) {
 
 // true: this touch is not delivered
 bool RefuseTouch(uint32_t touched, uint32_t toucher) {
+    if (DoubleObject(touched) >= 0 || DoubleObject(toucher) >= 0) return true;  // a stand-in body touches nothing
     if (!g_second_object) return false;
     uint32_t other = toucher == g_second_object ? touched : touched == g_second_object ? toucher : 0;
     if (Trace() && g_player_object && (toucher == g_player_object || touched == g_player_object)) {  // what Player 1 touches
@@ -2745,6 +3070,20 @@ X86_FUNC(sub_001706F0) {
             LOGI("coop trace: touch by handle: an object of class %08X%s is told of class %08X%s", game_coop::ClassOf(touched),
                  touched == game_coop::g_second_object ? " (Player 2)" : touched == game_coop::g_player_object ? " (Player 1)" : "",
                  game_coop::ClassOf(toucher), toucher == game_coop::g_second_object ? " (Player 2)" : toucher == game_coop::g_player_object ? " (Player 1)" : "");
+    }
+    if (game_coop::g_doubles[0].object || game_coop::g_doubles[1].object) {
+        // A stand-in body touches nothing, this way neither: nothing is told that it (or an object that moves it)
+        // touched it, and it is told of nothing.
+        uint32_t table = kernel::R32(game_coop::kObjectManager + 0x0C), handle = kernel::R32(ctx.ecx + 0x0C) & 0xFFFF;
+        uint32_t touched = table && handle ? kernel::R32(table + handle * 6) : 0, contact = kernel::R32(ctx.esp + 4);
+        uint32_t toucher = contact && mem::IsCommitted(contact + 0x34) ? kernel::R32(contact + 0x30) : 0;
+        bool refuse = game_coop::DoubleObject(touched) >= 0 || game_coop::DoubleObject(toucher) >= 0;
+        for (const game_coop::Double& d : game_coop::g_doubles)
+            if (uint32_t proxy = d.player ? game_coop::ProxyOf(d.player) : 0; proxy && toucher == proxy) refuse = true;
+        if (refuse) {
+            kernel::Return(ctx, 0, 1);
+            return;
+        }
     }
     __imp__sub_001706F0(ctx, base);
 }
@@ -2870,6 +3209,16 @@ void HitsSecond() {
 X86_EXTERN_FUNC(__imp__sub_00028E00);
 X86_FUNC(sub_00028E00) {
     game_coop::Count(0x28E00, ctx.ecx);
+    if (game_coop::DoubleOf(ctx.ecx) >= 0) {
+        // a stand-in body: nothing should reach it (it is out of the physics' questions); if something does, it is
+        // not hurt, and the record keeps the first times
+        uint32_t by = kernel::R32(ctx.esp + 8);
+        if (game_coop::g_double_hits++ < 12)
+            LOGR("coop: a stand-in body was hit (%u) by %s: not hurt", game_coop::g_double_hits,
+                 by && mem::IsCommitted(by + 0x110) ? game_coop::WhoIs(by).c_str() : "nothing named");
+        float none = 0;
+        std::memcpy(kernel::HostPtr(ctx.esp + 4), &none, 4);
+    }
     uint32_t before = game_coop::g_hit_by;
     game_coop::g_hit_by = kernel::R32(ctx.esp + 8);
     // tests: S2_COOP_HURT_TRACE=1 logs where the first hurts of a Player by a person or a creature come from
@@ -3154,6 +3503,51 @@ void UseAnswer(X86Context& ctx, uint32_t self, uint32_t user, uint32_t answer) {
     (void)ctx;
 }
 }  // namespace game_coop
+
+// The game's events (0x1A1E40: this = the sender at [0x384B9C], the event's number; numbers 0x186A0 to 0x186C5, sent
+// from the Player's code among others: 0x186A7 "a weapon is in his hand" at 0x14078, on which the HUD takes its weapon
+// parts away and slides them in again with the weapon's name; others set off the hints on the screen). The stand-in
+// body sends none: while it is "the player" (AsDouble: its own Run, being handed its weapon, taking it in hand) the
+// event is dropped. Why: with the stand-in taking its owner's weapon in hand, "Colt 1911" slid across Player 1's
+// screen for two seconds each time a player went into first person (runs dbl24 to dbl49).
+X86_EXTERN_FUNC(__imp__sub_001A1E40);
+X86_FUNC(sub_001A1E40) {
+    static const bool keep = std::getenv("S2_COOP_DOUBLE_EVENTS") != nullptr;  // tests: its events go out
+    if (game_coop::g_double_scope > 0 && !keep) {
+        static int said = 0;
+        if (said < 8) said++, LOGI("coop: an event of the stand-in body's (%X) is not sent", kernel::R32(ctx.esp + 4));
+        kernel::Return(ctx, 0, 1);
+        return;
+    }
+    __imp__sub_001A1E40(ctx, base);
+}
+// A weapon comes into a Player's hand (0x13A00, this = Player; the weapon's template) and into his other hand
+// (0x18020, this = Player). The game calls them from the Player's Run and also from outside it (the moment in the
+// drawing movement at which the weapon is taken, reached through 0x1A0600), and they send 0x186A7 at their end. For
+// the stand-in body they run with it as "the player", like its own Run, so that the event is dropped.
+X86_EXTERN_FUNC(__imp__sub_00013A00);
+X86_FUNC(sub_00013A00) {
+    game_coop::AsDouble dbl(ctx.ecx);
+    __imp__sub_00013A00(ctx, base);
+}
+X86_EXTERN_FUNC(__imp__sub_00018020);
+X86_FUNC(sub_00018020) {
+    game_coop::AsDouble dbl(ctx.ecx);
+    __imp__sub_00018020(ctx, base);
+}
+// The weapon a Player takes in hand brings three HUD parts with it (0x1DE10, this = Player: made from the weapon's
+// properties 2 to 4, kept at Player +0x7D4, +0x7D8 and +0x7DC, added to the HUD, [0x391D64] method +8), and the
+// Player's Run shows them every frame (0x256F6: the ammunition counter among them). None for the stand-in body: the
+// function does nothing for it, nor while it is being made (a Player's code passes over parts that are not there,
+// 0x25702).
+X86_EXTERN_FUNC(__imp__sub_0001DE10);
+X86_FUNC(sub_0001DE10) {
+    if (game_coop::g_double_spawning || game_coop::DoubleOf(ctx.ecx) >= 0) {
+        kernel::Return(ctx, 0, 0);
+        return;
+    }
+    __imp__sub_0001DE10(ctx, base);
+}
 
 // an object that touches a Player goes on his list of things to use (this = Player; the object, the touch's word)
 X86_EXTERN_FUNC(__imp__sub_0001ABC0);
@@ -4111,8 +4505,28 @@ static const int g_draw_variant_set = (gpu::g_draw_variant = DrawVariant, 0);
 // meanwhile are that object's. Player 2's are marked for the runtime (texture pack variant 1: his own outfit).
 X86_EXTERN_FUNC(__imp__sub_001D1970);
 X86_FUNC(sub_001D1970) {
+    {
+        using namespace game_coop;
+        // A stand-in body and what it holds: in every view but its owner's, and nowhere while it is put away or the
+        // picture is one view. Its owner's arms and what they hold, while it is out: in his own view only.
+        // (whose view is being drawn: Player 2's while the engine draws his view camera, else Player 1's)
+        uint32_t object = kernel::R32(ctx.esp + 4);
+        int view = g_screen_pass ? 2 : 1;
+        for (int which = 0; object && which < 2; which++) {
+            const Double& d = g_doubles[which];
+            if (!d.object) continue;
+            bool its = object == d.object || object == d.held[0] || object == d.held[1];
+            bool his = d.out && (object == (which ? g_second_object : g_player_object) || object == d.owner_held[0] || object == d.owner_held[1]);
+            if ((its && (!d.out || view == which + 1 || g_one_view)) || (his && view != which + 1 && !g_one_view)) {
+                kernel::Return(ctx, 0, 1);
+                return;
+            }
+        }
+    }
     bool before = game_coop::g_drawing_second;
-    game_coop::g_drawing_second = game_coop::g_second_object && kernel::R32(ctx.esp + 4) == game_coop::g_second_object;
+    // (Player 2's outfit: for his own object, and for his stand-in)
+    game_coop::g_drawing_second = game_coop::g_second_object && (kernel::R32(ctx.esp + 4) == game_coop::g_second_object ||
+                                                                 (game_coop::g_doubles[1].object && kernel::R32(ctx.esp + 4) == game_coop::g_doubles[1].object));
     __imp__sub_001D1970(ctx, base);
     game_coop::g_drawing_second = before;
 }

@@ -1,1 +1,1 @@
-51 2026-11-26 Online: the joined player's picture is as sharp as his window (up to 1080 rows by default) in play and in scenes, and gets smaller by itself when the connection loses pictures. The host needs about 20 to 40 Mbit/s of upload for 1080 rows.
+52 2026-11-26 Co-op: a player in first person is seen as his whole body by the other player, with his weapon in his hand (it was a pair of arms in the air). Works for both players, also with both in first person at once, in split screen and online.
