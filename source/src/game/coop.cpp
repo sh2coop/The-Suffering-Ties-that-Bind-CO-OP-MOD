@@ -2581,9 +2581,27 @@ void Frame(X86Context& ctx) {
         }
     }
     if (ViewCamera2() && !g_one_view && !g_stopped_now) {
-        // this frame's picture: a bar where the two views meet
+        // this frame's picture: a bar where the two views meet, unless one of the game's own pictures over the whole
+        // screen is up (a vision, a fade, the red picture after an innocent is killed: the screen flashes, this =
+        // 0x391C70, a list at +6 of 0x16-byte entries, their number at +0xE, the strength a float at +4). The game
+        // lays those over the whole frame, both halves as one picture, and the bar was drawn over them (the owner,
+        // 2026-11-27: "the overlay pictures should go over the split in the splitscreen"). A Player's own flash
+        // (when he is hurt) is in his half only and leaves the bar.
+        bool over_all = false;
+        {
+            constexpr uint32_t kFlashes = 0x391C70;
+            uint32_t list = kernel::R32(kFlashes) ? kernel::R32(kFlashes + 6) : 0, count = list ? kernel::R32(kFlashes + 0xE) : 0;
+            if (count > 32 || (count && !mem::IsCommitted(list + count * 0x16))) count = 0;
+            for (uint32_t i = 0; i < count && !over_all; i++) {
+                float strength = ReadF(list + i * 0x16 + 4);
+                uint32_t h = kernel::R16(list + i * 0x16 + 0x14), table = kernel::R32(kObjectManager + 0x0C);
+                uint32_t owner = table && h ? kernel::R32(table + h * 6) : 0;
+                bool players = owner && (owner == g_player_object || owner == g_second_object);
+                over_all = strength > 0.02f && strength < 100.0f && !players;
+            }
+        }
         gpu::g_split_vertical = true;
-        gpu::g_split_divider = 2;
+        if (!over_all) gpu::g_split_divider = 2;
         // ... and Player 2's health bar, drawn by the runtime where his half's HUD would have it (the game's HUD
         // keeps one set of values, Player 1's). A Player's health is the float at +0x16, of the most at +0x1A.
         // Player 2's most is Player 1's: the game's own difficulty (until 2026-11-27 it was Player 1's divided by
@@ -5210,7 +5228,14 @@ X86_FUNC(sub_00191070) {
         uint32_t package = sound >> 16;
         if (ctx.eax) started++;
         else if (!sound) {}  // (a call with no sound named: nothing was asked for)
-        else if (++refused, said < 6 && ++said) LOGI("sound: the sound %08X was asked for and not played (place %08X, flags %X, asked from %08X)", sound, place, flags, from);
+        else if (++refused, said < 6 && ++said) {
+            // why (notes 2026-11-26): the device off, the manager's +0x67E set, or its voice counts (+0x676 3D, +0x67A 2D)
+            // at the device's limits (+0x2E 3D, +0x32 2D)
+            uint32_t manager = kernel::R32(0x384BBC), device = kernel::R32(0x398CB0);
+            LOGI("sound: the sound %08X was asked for and not played (place %08X, flags %X, asked from %08X; voices 3D %u of %u, 2D %u of %u, +67E %u, device %08X)",
+                 sound, place, flags, from, manager ? kernel::R32(manager + 0x676) : 0, device ? kernel::R32(device + 0x2E) : 0,
+                 manager ? kernel::R32(manager + 0x67A) : 0, device ? kernel::R32(device + 0x32) : 0, manager ? kernel::R32(manager + 0x67E) : 0, device);
+        }
         bool known = false;
         for (uint32_t i = 0; i < kinds; i++) known |= packages[i] == package;
         if (!known && kinds < 8) packages[kinds++] = package;
@@ -5219,7 +5244,9 @@ X86_FUNC(sub_00191070) {
             char list[80] = "";
             int n = 0;
             for (uint32_t i = 0; i < kinds; i++) n += std::snprintf(list + n, sizeof list - size_t(n), " %X", packages[i]);
-            LOGI("sound: %u sounds started in the last 10 s, %u not played; from the packages%s", started, refused, list);
+            uint32_t manager = kernel::R32(0x384BBC);  // its voice counts as the last sound asked for left them (0x1909B0)
+            LOGI("sound: %u sounds started in the last 10 s, %u not played; from the packages%s; voices 3D %u, 2D %u", started,
+                 refused, list, manager ? kernel::R32(manager + 0x676) : 0, manager ? kernel::R32(manager + 0x67A) : 0);
             since = now, started = refused = kinds = said = 0;
         }
     }

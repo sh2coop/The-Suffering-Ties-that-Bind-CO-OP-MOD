@@ -691,6 +691,15 @@ void Render(float* out, uint32_t frames) {
     static std::vector<float> bins;  // the output thread alone renders
     bins.assign(size_t(frames) * kBins, 0.0f);
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    // [local change, The Suffering: Ties That Bind] how long the mix holds the lock (the game's sound calls wait)
+    struct Timed {
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        ~Timed() {
+            uint32_t us = uint32_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+            uint32_t old = audio::g_mix_longest_us.load();
+            while (us > old && !audio::g_mix_longest_us.compare_exchange_weak(old, us)) {}
+        }
+    } timed;
     for (auto& [obj, v] : g_voices) {
         if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
         MixVoice(v, bins.data(), frames);

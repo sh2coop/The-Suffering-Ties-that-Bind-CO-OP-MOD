@@ -295,6 +295,42 @@ int wmain(int argc, wchar_t** argv) {
         }
         return 0;
     }
+    // levels IMAGE DIR: every copy against its console wave: loudness and likeness (the HD wave taken at the console's
+    // frames); prints the ones that differ
+    if (!wcscmp(argv[1], L"levels") && argc >= 4) {
+        HsSet* s = Listed(argv[2]);
+        int bad = 0, seen = 0;
+        for (int i = 0; i < s->waves.count; i++) {
+            HsWave* w = &s->waves.w[i];
+            wchar_t path[MAX_PATH * 2];
+            _snwprintf(path, MAX_PATH * 2, L"%ls\\%016llX.hsw", argv[3], (unsigned long long)w->key);
+            HsHeader h;
+            int16_t* pcm = ReadHsw(path, &h);
+            if (!pcm) continue;
+            seen++;
+            const uint8_t* data = HsFileData(s, w->file) + w->at;
+            uint32_t ch = w->channels, blocks = w->bytes / (36 * ch), n = blocks * 64;
+            float* x = (float*)malloc(sizeof(float) * n);
+            float* var = (float*)malloc(sizeof(float) * n);
+            for (uint32_t c = 0; c < ch; c++) {
+                HsDecode(data, blocks, ch, c, x, var);
+                double ex = 0, ey = 0, exy = 0;
+                for (uint32_t f = 0; f < n; f++) {
+                    double a = x[f], b = (uint64_t)f * h.mult < h.frames ? pcm[((size_t)f * h.mult) * ch + c] / 32768.0 : 0;
+                    ex += a * a; ey += b * b; exy += a * b;
+                }
+                double db = 10 * log10((ey + 1e-12) / (ex + 1e-12)), corr = exy / sqrt(ex * ey + 1e-30);
+                if (ex > 1e-6 * n && (fabs(db) > 1.5 || corr < 0.9)) {
+                    bad++;
+                    wprintf(L"%5d %016llX ch%u %u Hz x%u %.2f s: level %+.1f dB, likeness %.3f, flags %u\n", i,
+                            (unsigned long long)w->key, c, w->rate, h.mult, (double)n / w->rate, db, corr, h.flags);
+                }
+            }
+            free(x); free(var); free(pcm);
+        }
+        wprintf(L"%d copies read, %d channels differ\n", seen, bad);
+        return 0;
+    }
     if (!wcscmp(argv[1], L"check")) {
         wchar_t pattern[MAX_PATH * 2], path[MAX_PATH * 2];
         _snwprintf(pattern, MAX_PATH * 2, L"%ls\\*.hsw", argv[2]);

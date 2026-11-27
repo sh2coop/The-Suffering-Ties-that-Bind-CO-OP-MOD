@@ -1343,6 +1343,13 @@ bool g_world_before = false;  // the frame before had some
 bool g_flat_draw = false;     // the draw being sent is squeezed
 bool g_flat_cover = false;    // ... a whole-picture one, into one half and covering it (gpu::g_flat2d.cover)
 float g_flat_middle = -1;     // ... and the height its vertices are about (-1: not known)
+// [local change, The Suffering: Ties That Bind] Two views side by side: a picture of the 2D layer that is most of the
+// screen (a chapter's title card, a vision's picture, drawn in tiles: each 30% of the width and height or more) is a picture
+// for both players, not one player's HUD. It goes across the whole frame, once: in the first view's pass laid out
+// as the layer is without halves, and left out of the second view's (g_flat_skip). (The owner, 2026-11-27: "the
+// overlay pictures should go over the split in the splitscreen"; they were squeezed into each half.)
+bool g_flat_big = false;
+bool g_flat_skip = false;
 uint64_t g_frames_shown = 0;  // frames shown
 
 // S2_2D_TRACE=<frame>: the ready-made draws of that frame (counted in presents), each with the box of its vertices,
@@ -1424,6 +1431,8 @@ void Trace2D(const uint8_t* vertices, uint32_t stride, uint32_t count) {
 void ClassifyDraw(const uint8_t* vertices, uint32_t stride, uint32_t count) {
     g_flat_draw = false;
     g_flat_cover = false;
+    g_flat_big = false;
+    g_flat_skip = false;
     bool ready_made = !(g_state.vs_handle & 1) && (g_state.vs_handle & 0xE) == 4;
     if (!ready_made) {
         g_world_draws++;
@@ -1452,6 +1461,9 @@ void ClassifyDraw(const uint8_t* vertices, uint32_t stride, uint32_t count) {
         }
         whole = x0 <= 1.0f && y0 <= 1.0f && x1 >= float(w) - 1.0f && y1 >= float(h) - 1.0f;
         g_flat_middle = (y0 + y1) * 0.5f;
+        static const bool halves_only = std::getenv("S2_NO_BIG_2D") != nullptr;  // tests: as before
+        g_flat_big = !whole && !halves_only && gpu::g_flat2d.half && x1 - x0 >= float(w) * 0.3f && y1 - y0 >= float(h) * 0.3f;
+        g_flat_skip = g_flat_big && gpu::g_flat2d.half == 2;
     }
     g_flat_cover = whole && gpu::g_flat2d.cover && gpu::g_flat2d.half;  // [local change, The Suffering: Ties That Bind]
     g_flat_draw = !whole || g_flat_cover;
@@ -1511,7 +1523,9 @@ const gpu::State& ForDraw() {
     gpu::SurfaceSize(g_state.rt, w, h);
     // the draw's positions go through x' = ax * x + bx, y' = ay * y + by
     float ax = flat.sx, bx = float(w) * 0.5f * (1 - flat.sx), ay = flat.sy, by = float(h) * 0.5f * (1 - flat.sy);
-    if (flat.half && g_split) {  // into one half (the layer of a frame with a world: see ClassifyDraw)
+    if (flat.half && g_split && g_flat_big) {  // a picture for both: the whole frame, as without halves
+        if (!flat.on) return base;
+    } else if (flat.half && g_split) {  // into one half (the layer of a frame with a world: see ClassifyDraw)
         float half = float(w) * 0.5f;
         ax = 0.5f * flat.half_sx;
         bx = float(flat.half - 1) * half + half * 0.5f * (1 - flat.half_sx);
@@ -1573,7 +1587,7 @@ HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     const uint8_t* flat_vertices = StreamVertices(a[1], flat_stride);
     ClassifyDraw(flat_vertices, flat_stride, a[2]);
     g_state.variant = gpu::g_draw_variant ? gpu::g_draw_variant(ctx, g_state) : 0;  // [local change, The Suffering: Ties That Bind]
-    if (g_backend) g_backend->Draw(ForDraw(), a[0], a[1], a[2], nullptr);
+    if (g_backend && !g_flat_skip) g_backend->Draw(ForDraw(), a[0], a[1], a[2], nullptr);
     return 0;
 }
 
@@ -1622,7 +1636,7 @@ void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride
     auto stream = g_state.streams[0];
     g_state.streams[0] = {UpVertices(vertices, count * stride), stride};
     ClassifyDraw(static_cast<const uint8_t*>(vertices), stride, count);
-    g_backend->Draw(ForDraw(), prim, 0, count, nullptr);
+    if (!g_flat_skip) g_backend->Draw(ForDraw(), prim, 0, count, nullptr);
     g_state.streams[0] = stream;
 }
 

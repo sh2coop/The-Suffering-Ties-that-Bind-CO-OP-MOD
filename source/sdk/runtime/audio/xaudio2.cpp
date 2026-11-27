@@ -46,6 +46,8 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
         constexpr uint32_t kSlots = kMaxQueued + 1;
         std::vector<float> bufs(kSlots * kFrames * 2);
         uint32_t depth = kMinQueued;
+        ULONGLONG waiting = 0;
+        bool said_stuck = false;
         for (uint32_t n = 0;;) {
             XAUDIO2_VOICE_STATE st;
             voice->GetState(&st, XAUDIO2_VOICE_NOSAMPLESPLAYED);
@@ -55,9 +57,20 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
                 LOGR("audio: output starved, queueing %u ms", depth * 10);
             }
             if (st.BuffersQueued >= depth) {
+                // [local change, The Suffering: Ties That Bind] the sound card taking nothing for a second is said once
+                // (a game whose sounds never end refuses new ones: the record must show whether the output stopped)
+                if (!waiting) waiting = GetTickCount64();
+                else if (!said_stuck && GetTickCount64() - waiting > 1000) {
+                    said_stuck = true;
+                    LOGW("audio: the output has taken nothing for a second (%u blocks queued)", st.BuffersQueued);
+                }
                 Sleep(2);
                 continue;
             }
+            if (said_stuck) LOGW("audio: the output takes blocks again after %llu ms", GetTickCount64() - waiting);
+            waiting = 0;
+            said_stuck = false;
+            if (n && n % 1000 == 0) LOGI("audio: %u blocks of 10 ms mixed so far", n);
             float* b = &bufs[(n % kSlots) * kFrames * 2];
             render(b, kFrames);
             if (g_tap) g_tap(b, kFrames);

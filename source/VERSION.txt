@@ -1,1 +1,1 @@
-59 2026-11-27 HD textures and HD sound, both made on your own PC from your own game image. Build Recomp asks; they are made in the background while the game builds and while you play. Options, Display and Co-op: HD textures (Off, Automatic, 2x, 4x) and HD sound. Videos stay as they are.
+60 2026-11-27 Split screen: the game's pictures over the whole screen go across both views. HD textures version 4 (cleaner soft edges). HD sound: several voices of one sound no longer decode it over and over; the logs now say why a sound is refused and whether the sound output stops.

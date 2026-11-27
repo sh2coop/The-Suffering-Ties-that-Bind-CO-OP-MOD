@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <atomic>
 #include <functional>
 
 namespace audio {
@@ -30,5 +31,6 @@ struct HdHooks {
 };
 inline const HdHooks* g_hd = nullptr;  // set while HD sound is on and a set is made
 inline bool g_cubic = false;           // every voice read with a cubic in place of straight lines (HD sound on)
+inline std::atomic<uint32_t> g_mix_longest_us{0};  // the longest mix of a block since the game layer last read it
 
 }  // namespace audio

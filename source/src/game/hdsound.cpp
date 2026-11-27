@@ -43,7 +43,8 @@ struct HdWave {
     HsHeader head{};
     const uint32_t* check = nullptr;  // blocks
     const uint32_t* chunk = nullptr;  // chunks + 1
-    int slot[2] = {-1, -1};           // the decoded chunks it read last
+    uint32_t id = 0;                  // its number in the set (the decoded chunks' key)
+    int last[2] = {-1, -1};           // (S2_HD_OLD_CHUNKS: version 59's lookup, its two last slots only)
 };
 }  // namespace audio
 
@@ -70,10 +71,16 @@ struct Slot {
     uint64_t used = 0;
     int16_t pcm[HS_CHUNK * 2];
 };
-constexpr int kSlots = 128;
+// Every decoded chunk is found by (copy, chunk) in g_held, whichever voice decoded it: several voices of one sound at
+// different places (footsteps, a crowd) share them. (Version 59 kept two chunks per copy: a third voice of the same
+// sound decoded a chunk at every sample, the mixer fell far behind and held its lock, the game thread waited on
+// every sound call: the game ran in slow motion and refused new sounds once its voices did not end.)
+constexpr int kSlots = 256;
 Slot g_slot[kSlots];
+std::unordered_map<uint64_t, int> g_held;  // (copy id << 32 | chunk) -> slot
 uint64_t g_clock = 0;
 int16_t g_scratch[HS_CHUNK];
+std::atomic<uint64_t> g_decodes{0};
 
 bool Open(HdWave& w) {
     if (w.open) return !w.broken;
@@ -113,15 +120,21 @@ bool Open(HdWave& w) {
 }
 
 const int16_t* Chunk(HdWave& w, uint32_t chunk) {
-    for (int s : w.slot)
-        if (s >= 0 && g_slot[s].wave == &w && g_slot[s].chunk == chunk) {
-            g_slot[s].used = ++g_clock;
-            return g_slot[s].pcm;
-        }
+    uint64_t key = uint64_t(w.id) << 32 | chunk;
+    static const bool old = std::getenv("S2_HD_OLD_CHUNKS") != nullptr;  // test switch: the bug back, to compare
+    auto held = g_held.find(key);
+    if (old && held != g_held.end() && held->second != w.last[0] && held->second != w.last[1]) held = g_held.end();
+    if (held != g_held.end()) {
+        g_slot[held->second].used = ++g_clock;
+        return g_slot[held->second].pcm;
+    }
     int pick = 0;
     for (int i = 1; i < kSlots; i++)
         if (g_slot[i].used < g_slot[pick].used) pick = i;
     Slot& s = g_slot[pick];
+    if (s.wave) g_held.erase(uint64_t(s.wave->id) << 32 | s.chunk);
+    s.wave = nullptr;
+    g_decodes++;
     uint32_t first = chunk * HS_CHUNK, n = w.head.frames - first < HS_CHUNK ? w.head.frames - first : HS_CHUNK;
     uint32_t at = w.chunk[chunk], end = w.chunk[chunk + 1];
     if (at > end || end > w.size || !HsDecodeChunk(w.base + at, end - at, n, w.head.channels, s.pcm, g_scratch)) {
@@ -131,8 +144,9 @@ const int16_t* Chunk(HdWave& w, uint32_t chunk) {
     s.wave = &w;
     s.chunk = chunk;
     s.used = ++g_clock;
-    w.slot[1] = w.slot[0];
-    w.slot[0] = pick;
+    g_held[key] = pick;
+    w.last[1] = w.last[0];
+    w.last[0] = pick;
     return s.pcm;
 }
 
@@ -249,6 +263,7 @@ void Load() {
         if (known) continue;
         auto w = std::make_unique<HdWave>();
         w->entry = x;
+        w->id = uint32_t(g_waves.size());
         g_first.emplace(x.first, w.get());
         g_waves.push_back(std::move(w));
     }
@@ -313,11 +328,12 @@ int State(int* made, int* total) {
 // one line for the session record: how voices were matched since the last call
 void Report() {
     uint64_t found = g_found.exchange(0), followed = g_followed.exchange(0), missed = g_missed.exchange(0),
-             low = g_missed_low.exchange(0);
+             low = g_missed_low.exchange(0), decodes = g_decodes.exchange(0);
+    uint32_t mix = audio::g_mix_longest_us.exchange(0);
     if (found || followed || missed || low)
         LOGI("HD sound: %llu sounds started from a copy, %llu stream packets followed one, %llu of 32 kHz and up (no copy "
-             "needed), %llu under 32 kHz without a copy; %zu copies open",
+             "needed), %llu under 32 kHz without a copy; %zu copies open; %llu chunks decoded; the longest mix %.2f ms",
              (unsigned long long)found, (unsigned long long)followed, (unsigned long long)missed,
-             (unsigned long long)low, g_opened);
+             (unsigned long long)low, g_opened, (unsigned long long)decodes, mix / 1000.0);
 }
 }  // namespace game_hdsound

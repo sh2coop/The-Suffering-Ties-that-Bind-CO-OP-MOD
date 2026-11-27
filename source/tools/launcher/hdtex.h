@@ -43,7 +43,7 @@
 #define STB_DXT_IMPLEMENTATION
 #include "third_party/stb_dxt.h"
 
-#define HD_VERSION 3           // bump when the making changes: textures made by an older version are made again
+#define HD_VERSION 4           // bump when the making changes: textures made by an older version are made again
 #define HD_PAD 8               // source pixels of padding on each side
 static int g_hd_background;    // "--hd": no window and no message boxes (the log only)
 
@@ -449,7 +449,8 @@ typedef struct {
 static float Cubic(float t, float a, float b, float c, float d) {   // Catmull-Rom
     return b + 0.5f * t * (c - a + t * (2 * a - 5 * b + 4 * c - d + t * (3 * (b - c) + d - a)));
 }
-static uint8_t BicubicAlpha(const HdJob* j, uint32_t X, uint32_t Y) {
+// channel ch (0 to 3) of the console texture at the 4x pixel (X, Y), bicubic
+static uint8_t Bicubic(const HdJob* j, uint32_t X, uint32_t Y, int ch) {
     float fx = (X + 0.5f) / 4 - 0.5f, fy = (Y + 0.5f) / 4 - 0.5f;
     int ix = (int)floorf(fx), iy = (int)floorf(fy);
     float tx = fx - ix, ty = fy - iy, row[4];
@@ -461,12 +462,30 @@ static uint8_t BicubicAlpha(const HdJob* j, uint32_t X, uint32_t Y) {
         for (int c = 0; c < 4; c++) {
             int x = ix - 1 + c;
             x = j->wrap_x ? (x % w + w) % w : x < 0 ? 0 : x >= w ? w - 1 : x;
-            v[c] = j->source[((size_t)y * w + x) * 4 + 3];
+            v[c] = j->source[((size_t)y * w + x) * 4 + ch];
         }
         row[r] = Cubic(tx, v[0], v[1], v[2], v[3]);
     }
     float a = Cubic(ty, row[0], row[1], row[2], row[3]);
     return (uint8_t)(a < 0 ? 0 : a > 255 ? 255 : a + 0.5f);
+}
+static uint8_t BicubicAlpha(const HdJob* j, uint32_t X, uint32_t Y) { return Bicubic(j, X, Y, 3); }
+// the least and the most alpha of the console texels around the 4x pixel (X, Y)
+static void NearAlpha(const HdJob* j, uint32_t X, uint32_t Y, int* least_out, int* most_out) {
+    int w = (int)j->t.w, h = (int)j->t.h, most = 0, least = 255;
+    float fx = (X + 0.5f) / 4 - 0.5f, fy = (Y + 0.5f) / 4 - 0.5f;
+    int ix = (int)floorf(fx), iy = (int)floorf(fy);
+    for (int dy = 0; dy < 2; dy++)
+        for (int dx = 0; dx < 2; dx++) {
+            int x = ix + dx, y = iy + dy;
+            x = j->wrap_x ? (x % w + w) % w : x < 0 ? 0 : x >= w ? w - 1 : x;
+            y = j->wrap_y ? (y % h + h) % h : y < 0 ? 0 : y >= h ? h - 1 : y;
+            int a = j->source[((size_t)y * w + x) * 4 + 3];
+            if (a > most) most = a;
+            if (a < least) least = a;
+        }
+    *least_out = least;
+    *most_out = most;
 }
 
 // one mip level into BC1 / BC3 blocks
@@ -517,13 +536,31 @@ static int FinishJob(HdJob* j) {
             o[0] = s[0]; o[1] = s[1]; o[2] = s[2];
             if (j->alpha == ALPHA_NONE) { o[3] = 255; continue; }
             uint8_t bic = BicubicAlpha(j, x, y);
-            if (j->alpha == ALPHA_FAINT || !j->up_a) { o[3] = bic; continue; }
-            float ai = j->up_a[((size_t)(y + oy) * PW + x + ox) * 4];
-            if (j->alpha == ALPHA_BINARY) { o[3] = ai >= 128 ? 255 : 0; continue; }
-            float t = (bic - 32) / 64.0f;   // faint: bicubic; solid: the upscaler's (sharp text and edges)
-            t = t < 0 ? 0 : t > 1 ? 1 : t;
-            float a = bic + t * (ai - bic);
+            float a;
+            if (j->alpha == ALPHA_FAINT || !j->up_a) a = bic;
+            else {
+                float ai = j->up_a[((size_t)(y + oy) * PW + x + ox) * 4];
+                if (j->alpha == ALPHA_BINARY) a = ai >= 128 ? 255 : 0;
+                else {
+                    float t = (bic - 32) / 64.0f;   // faint: bicubic; solid: the upscaler's (sharp text and edges)
+                    t = t < 0 ? 0 : t > 1 ? 1 : t;
+                    a = bic + t * (ai - bic);
+                }
+            }
+            // (version 4, 2026-11-27: the owner saw "weird white outlining" round the A and B buttons, and the buttons
+            // "circular completely") the alpha stays between the least and the most of the console texels around:
+            // the upscaler's alpha rang, out past the shapes and down inside them (between the B button's red and the
+            // light ring the console draws round it, 163 became 51: a see-through gap, so the ring stood apart as a
+            // white outline). Where it is partly see-through the colour is the console's own, bicubic.
+            int least, most;
+            NearAlpha(j, x, y, &least, &most);
+            if (most < 8) a = 0;
+            else if (j->alpha != ALPHA_BINARY) a = a < least ? least : a > most ? most : a;
             o[3] = (uint8_t)(a < 0 ? 0 : a > 255 ? 255 : a + 0.5f);
+            float k = (a - 96) / 128.0f;
+            k = k < 0 ? 0 : k > 1 ? 1 : k;
+            if (k < 1)
+                for (int c = 0; c < 3; c++) o[c] = (uint8_t)(Bicubic(j, x, y, c) + k * (s[c] - Bicubic(j, x, y, c)) + 0.5f);
         }
 
     // the levels: 4x, 2x, the console's own size, then the console's own extra ones (as the game had them); an on /
