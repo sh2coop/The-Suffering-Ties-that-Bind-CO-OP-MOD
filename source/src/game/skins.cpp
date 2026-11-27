@@ -85,10 +85,10 @@ uint32_t DoublePlayerOf(int who);            // the Player of that player's stan
 }
 
 namespace game_skins {
-uint32_t g_p1_body = 0, g_p2_body = 0;  // settings.toml p1_character, p2_character: 0 Torque, 1 Blackmore
+uint32_t g_p1_body = 0, g_p2_body = 0;  // settings.toml p1_character, p2_character: 0 Torque, 1 Blackmore, 2 Chief
 
 namespace {
-constexpr uint32_t kVersion = 6;  // the made files are made again when this changes
+constexpr uint32_t kVersion = 7;  // the made files are made again when this changes
 constexpr uint32_t kSetModel = 0x186030, kSwapModel = 0x26400, kResource = 0x1A21B0, kResourceManager = 0x384B90;
 
 std::mutex g_lock;
@@ -97,6 +97,15 @@ fs::path g_dir;                  // where they are
 std::string g_made_for;          // the folder (language\region) they were made for
 uint32_t g_blackmore = 0;        // his model's id in the Player package, 0: not there
 uint32_t g_skins = 0;            // his materials, each with its texture in skin_<n>.dds
+// Chief (the owner's own model, 2026-11-27: John.zip, "it can be named chief"): never shipped. Its body is made from
+// the owner's FBX and textures into characters\chief beside the exe: the mesh's chunks (chief_<kind>.bin, the game's
+// layout, skinned to Torque's skeleton) and one texture per place (chief_skin_<n>.dds).
+uint32_t g_chief = 0, g_chief_skins = 0;
+fs::path ChiefDir() { return app::ExeDir() / "characters" / "chief"; }
+bool ChiefThere() {
+    std::error_code ec;
+    return fs::exists(ChiefDir() / "chief_200.bin", ec);
+}
 std::set<uint32_t> g_torque;     // Torque's bodies: model ids
 thread_local bool g_reading = false;  // reading the disc's own files: no replacement
 
@@ -220,6 +229,60 @@ bool Slots(const std::vector<uint8_t>& t, size_t* first, uint32_t* count, uint32
 uint32_t Triangles(const Pack& mdu, uint16_t index) {
     const Chunk* c = mdu.Find(0x204, index);
     return c && c->size >= 4 ? U32(mdu.data, c->offset) : 0;
+}
+
+// A body's skeleton and skin (kind 0x208): 64 bytes of bounds, {u32 1, u32 vertices, u32 bones}, then per bone
+// {u32 name hash, 3 floats place, 9 floats turn (the inverse of its rest pose), u32 first child, u32 next sibling,
+// u16 weights, weights x {u32 vertex, float}}, then a tail (counts, a reference, distances). Blackmore's has 58 of
+// Torque's 64 bones: not the ones the game hangs carried things on (the owner, version 63: "some stuff was floating
+// in the air when i changed models" and "when i had the gun equipped as blackmore, the bat was between my legs").
+// So his skeleton is given Torque's 64, in Torque's order and tree: his own place, turn and weights for the bones he
+// has (found by name), Torque's for the others, with no weights. Empty when a skeleton is not laid out as expected.
+std::vector<uint8_t> FullSkeleton(const std::vector<uint8_t>& his, const std::vector<uint8_t>& torque) {
+    struct Bone {
+        size_t at = 0, size = 0;  // the record in its chunk, weights included
+        uint32_t hash = 0;
+    };
+    auto read = [](const std::vector<uint8_t>& b, std::vector<Bone>& bones) -> size_t {
+        if (b.size() < 76 || U32(b, 64) != 1) return 0;
+        uint32_t count = U32(b, 72);
+        size_t p = 76;
+        for (uint32_t k = 0; k < count && k < 256; k++) {
+            if (p + 62 > b.size()) return 0;
+            Bone bone;
+            bone.at = p, bone.hash = U32(b, p);
+            size_t n = U16(b, p + 60);
+            bone.size = 62 + 8 * n;
+            if (p + bone.size > b.size()) return 0;
+            p += bone.size;
+            bones.push_back(bone);
+        }
+        return bones.size() == count ? p : 0;
+    };
+    std::vector<Bone> mine, full;
+    size_t my_end = read(his, mine), full_end = read(torque, full);
+    if (!my_end || !full_end) return {};
+    std::map<uint32_t, const Bone*> by_hash;
+    for (const Bone& b : mine) by_hash[b.hash] = &b;
+    std::vector<uint8_t> out(his.begin(), his.begin() + 76);
+    Put32(out, 72, uint32_t(full.size()));
+    size_t kept = 0;
+    for (const Bone& t : full) {
+        auto it = by_hash.find(t.hash);
+        if (it != by_hash.end()) {
+            const Bone& m = *it->second;
+            out.insert(out.end(), his.begin() + m.at, his.begin() + m.at + 52);           // name, place, turn: his
+            out.insert(out.end(), torque.begin() + t.at + 52, torque.begin() + t.at + 60);  // the tree: Torque's
+            out.insert(out.end(), his.begin() + m.at + 60, his.begin() + m.at + m.size);  // his weights
+            kept++;
+        } else {
+            out.insert(out.end(), torque.begin() + t.at, torque.begin() + t.at + 60);
+            out.push_back(0), out.push_back(0);
+        }
+    }
+    if (kept != mine.size()) return {};  // a bone of his that Torque does not have
+    out.insert(out.end(), his.begin() + my_end, his.end());
+    return out;
 }
 
 // Makes the three copies. The parts are those of the Player file the game asked for.
@@ -360,6 +423,14 @@ bool Make(const std::vector<std::string>& asked) {
                 uint32_t v = U32(b, 12 + 4 * k);
                 if (ref_of(v)) Put32(b, 12 + 4 * k, ours_of(new_template[uint16_t(v)]));
             }
+        if (c.kind == 0x208 && !std::getenv("S2_SKIN_OLD_SKELETON")) {  // (tests: his own 58 bones, as in version 63)
+            std::vector<uint8_t> full = FullSkeleton(b, pm.Bytes(*pm.Find(0x208, 1)));
+            if (full.empty()) {
+                LOGR("skins: Blackmore's skeleton could not be given Torque's bones: Torque only");
+                return false;
+            }
+            b = std::move(full);
+        }
         Chunk n = c;
         n.id = (c.id & 0xFFFF0000) | new_mesh;
         mdu_more.push_back({n, std::move(b)});
@@ -457,6 +528,35 @@ bool Make(const std::vector<std::string>& asked) {
         LOGR("skins: Player templates' number %u -> %u", old, now);
     }
 
+    // Chief's body, when the owner's files are there: after everything else, Torque's materials in its head
+    uint16_t chief = 0;
+    uint32_t chief_places = 0;
+    if (ChiefThere()) {
+        const uint16_t kinds[] = {0x200, 0x203, 0x204, 0x208, 0x211, 0x216};
+        std::vector<std::pair<Chunk, std::vector<uint8_t>>> more;
+        bool whole = true;
+        chief = next++;
+        for (uint16_t kind : kinds) {
+            char name[32];
+            std::snprintf(name, sizeof name, "chief_%03x.bin", kind);
+            std::ifstream f(ChiefDir() / name, std::ios::binary);
+            std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            if (b.empty()) whole = false;
+            Chunk c;
+            c.kind = kind;
+            c.id = 0x00090000u | chief;
+            more.push_back({c, std::move(b)});
+        }
+        std::error_code ce;
+        while (chief_places < 8 && fs::exists(ChiefDir() / ("chief_skin_" + std::to_string(chief_places) + ".dds"), ce)) chief_places++;
+        if (whole && chief_places) {
+            for (auto& m : more) mdu_more.push_back(std::move(m));
+            LOGR("skins: Chief (%u places) added to the Player package as model %X", chief_places, ours_of(chief));
+        } else {
+            LOGR("skins: Chief's files in %s are not whole: left out", ChiefDir().string().c_str());
+            chief = 0;
+        }
+    }
     std::error_code ec;
     fs::create_directories(g_dir, ec);
     struct {
@@ -476,6 +576,7 @@ bool Make(const std::vector<std::string>& asked) {
     info << "version " << kVersion << "\nskins " << std::min<uint32_t>(materials, 8) << "\nblackmore " << std::hex << ours_of(new_mesh) << "\ntorque";
     for (uint32_t t : torque) info << " " << t;
     info << "\n";
+    if (chief) info << "chief " << std::hex << ours_of(chief) << std::dec << " " << chief_places << "\n";
     info.close();
     LOGR("skins: Blackmore (mesh %X of package %d, %u materials, %zu textures) added to the Player package as model %X",
          mesh, theirs, unsigned(order.size()), textures.size(), ours_of(new_mesh));
@@ -491,6 +592,7 @@ bool Known() {
     while (f >> word) {
         if (word == "version") f >> version;
         else if (word == "skins") f >> g_skins;
+        else if (word == "chief") f >> std::hex >> g_chief >> std::dec >> g_chief_skins;
         else if (word == "blackmore") f >> std::hex >> blackmore >> std::dec;
         else if (word == "torque") {
             std::string rest;
@@ -506,6 +608,7 @@ bool Known() {
     }
     std::error_code ec;
     if (version != kVersion || !blackmore || torque.empty() || !g_skins) return false;
+    if (ChiefThere() != (g_chief != 0)) return false;  // Chief's files came or went: made again
     for (uint32_t k = 0; k < g_skins; k++)
         if (!fs::exists(g_dir / ("skin_" + std::to_string(k) + ".dds"), ec)) return false;
     for (const char* n : {"Player.mdu", "Player.tdu", "Player.odu"})
@@ -529,7 +632,7 @@ fs::path Replace(const std::vector<std::string>& parts) {
     if (!g_tried || folder != g_made_for) {
         g_tried = true;
         g_made_for = folder;
-        g_blackmore = 0;
+        g_blackmore = 0, g_chief = 0, g_chief_skins = 0;
         g_torque.clear();
         g_dir = app::ExeDir() / "skins" / folder;
         if (!Known()) {
@@ -545,8 +648,8 @@ fs::path Replace(const std::vector<std::string>& parts) {
 // ---- the players' models --------------------------------------------------------------------------------------------
 uint32_t Want(int who) {
     static const char* env[2] = {std::getenv("S2_P1_CHARACTER"), std::getenv("S2_P2_CHARACTER")};
-    if (env[who]) return std::atoi(env[who]) ? 1 : 0;
-    return who ? g_p2_body : g_p1_body;
+    uint32_t c = env[who] ? uint32_t(std::atoi(env[who])) : who ? g_p2_body : g_p1_body;
+    return (c == 2 && !g_chief) || c > 2 ? 0 : c;
 }
 uint32_t g_blackmore_resource = 0;
 std::map<uint32_t, uint32_t> g_torque_resource;  // Torque's bodies asked for: id -> resource
@@ -576,6 +679,18 @@ uint32_t Blackmore(X86Context& ctx) {
     else LOGR("skins: Blackmore's model %X was asked for and not given", g_blackmore);
     return g_blackmore_resource;
 }
+uint32_t CharacterOf(uint32_t id) { return !id ? 0 : id == g_blackmore ? 1 : id == g_chief ? 2 : 0; }
+uint32_t g_chief_resource = 0;
+uint32_t Wear(X86Context& ctx, uint32_t character) {  // the model resource of that character
+    if (character == 1) return Blackmore(ctx);
+    if (character != 2 || !g_chief) return 0;
+    if (!g_chief_resource || ModelId(g_chief_resource) != g_chief) {
+        g_chief_resource = Resource(ctx, g_chief);
+        LOGR("skins: Chief's model %X is resource %08X", g_chief, g_chief_resource);
+    }
+    return g_chief_resource;
+}
+const char* kNames[3] = {"Torque", "Blackmore", "Chief"};
 uint32_t Torque(X86Context& ctx, uint32_t id) {
     uint32_t& r = g_torque_resource[id];
     if (!r || !mem::IsCommitted(r + 0x10) || kernel::R32(r + 4) != id) r = Resource(ctx, id);
@@ -599,14 +714,14 @@ void Frame(X86Context& ctx) {
             uint32_t now = kernel::R32(object + 0x64);
             bool first_person = (kernel::R32(player + 0xBC) & 0x8000) != 0;
             uint32_t want = Want(who);
-            uint32_t give = 0;
-            if (want && g_torque.count(now)) give = Blackmore(ctx);
-            else if (!want && now == g_blackmore) give = Torque(ctx, g_last_torque ? g_last_torque : *g_torque.begin());
+            uint32_t give = 0, wears = CharacterOf(now);
+            if (want && (g_torque.count(now) || (wears && wears != want))) give = Wear(ctx, want);
+            else if (!want && wears) give = Torque(ctx, g_last_torque ? g_last_torque : *g_torque.begin());
             if (first_person) {  // the body he gets back when first person ends
-                uint32_t kept = kernel::R32(player + 0x764), kept_id = ModelId(kept);
-                if (want && g_torque.count(kept_id)) {
-                    if (uint32_t b = Blackmore(ctx)) kernel::W32(player + 0x764, b);
-                } else if (!want && kept_id == g_blackmore) {
+                uint32_t kept = kernel::R32(player + 0x764), kept_id = ModelId(kept), kept_wears = CharacterOf(kept_id);
+                if (want && (g_torque.count(kept_id) || (kept_wears && kept_wears != want))) {
+                    if (uint32_t b = Wear(ctx, want)) kernel::W32(player + 0x764, b);
+                } else if (!want && kept_wears) {
                     if (uint32_t t = Torque(ctx, g_last_torque ? g_last_torque : *g_torque.begin())) kernel::W32(player + 0x764, t);
                 }
                 continue;
@@ -618,17 +733,20 @@ void Frame(X86Context& ctx) {
             kernel::CallGuest(ctx, kSwapModel, {give, set, set});
             ctx.ecx = ecx, ctx.eax = eax;
             LOGR("skins: player %d%s is now %s (model %X)", who + 1, player == game_coop::PlayerOf(who) ? "" : "'s stand-in",
-                 want ? "Blackmore" : "Torque", kernel::R32(object + 0x64));
+                 kNames[want], kernel::R32(object + 0x64));
         }
     }
 }
 
 bool Available() { return g_blackmore != 0; }
+bool ChiefAvailable() { return g_chief != 0; }
 
 // Is this engine object a player's body (or his stand-in) wearing Blackmore? 1 then, else 0.
+// (2 when he wears Chief)
 int BodySkin(uint32_t object) {
-    if (!g_blackmore || !object || !mem::IsCommitted(object + 0x110) || kernel::R32(object + 0x64) != g_blackmore) return 0;
-    return game_coop::BodyOwner(object) >= 0 ? 1 : 0;
+    if (!g_blackmore || !object || !mem::IsCommitted(object + 0x110)) return 0;
+    uint32_t c = CharacterOf(kernel::R32(object + 0x64));
+    return c && game_coop::BodyOwner(object) >= 0 ? int(c) : 0;
 }
 
 // The texture pack image for the draw of place k of a Blackmore body, whose texture (Torque's for that place) has
@@ -637,18 +755,20 @@ int BodySkin(uint32_t object) {
 // materials, Torque's, place by place (seen in the draws: his three groups came out in Torque's arms and hands,
 // head and trousers textures; changing the model's head, its triangles' places or the copy's material list
 // changed nothing). The runtime swaps the image by key for the draws marked as his.
-void SkinImage(uint64_t key, uint32_t k, uint32_t w, uint32_t h) {
-    if (k >= g_skins || !key) return;
-    static std::set<uint64_t> done;
-    if (!done.insert(key).second) return;
-    fs::path dir = app::ExeDir() / "textures" / "replacement" / "player3";
+// (Chief's: variant 3, textures\replacement\player4, from characters\chief\chief_skin_<k>.dds)
+void SkinImage(int character, uint64_t key, uint32_t k, uint32_t w, uint32_t h) {
+    if (character < 1 || character > 2 || k >= (character == 1 ? g_skins : g_chief_skins) || !key) return;
+    static std::set<uint64_t> done[3];
+    if (!done[character].insert(key).second) return;
+    fs::path dir = app::ExeDir() / "textures" / "replacement" / (character == 1 ? "player3" : "player4");
     char name[80];
-    std::snprintf(name, sizeof name, "%ux%u_%016llx_blackmore%u.dds", w, h, (unsigned long long)key, k);
+    std::snprintf(name, sizeof name, "%ux%u_%016llx_%s%u.dds", w, h, (unsigned long long)key, character == 1 ? "blackmore" : "chief", k);
     std::error_code ec;
     if (fs::exists(dir / name, ec)) return;
     fs::create_directories(dir, ec);
-    fs::copy_file(g_dir / ("skin_" + std::to_string(k) + ".dds"), dir / name, fs::copy_options::overwrite_existing, ec);
-    LOGR("skins: Blackmore's place %u is drawn over Torque's texture %ux%u_%016llx (%s)", k, w, h, (unsigned long long)key, ec ? "could not be written" : "written");
+    fs::path from = character == 1 ? g_dir / ("skin_" + std::to_string(k) + ".dds") : ChiefDir() / ("chief_skin_" + std::to_string(k) + ".dds");
+    fs::copy_file(from, dir / name, fs::copy_options::overwrite_existing, ec);
+    LOGR("skins: %s's place %u is drawn over Torque's texture %ux%u_%016llx (%s)", kNames[character], k, w, h, (unsigned long long)key, ec ? "could not be written" : "written");
 }
 }  // namespace game_skins
 
@@ -663,8 +783,8 @@ X86_FUNC(sub_00186030) {
         int who = g_torque.count(id) ? game_coop::BodyOwner(object) : -1;
         if (who >= 0) {
             g_last_torque = id;
-            if (Want(who)) {
-                if (uint32_t b = Blackmore(ctx)) kernel::W32(ctx.esp + 4, b);
+            if (uint32_t c = Want(who)) {
+                if (uint32_t b = Wear(ctx, c)) kernel::W32(ctx.esp + 4, b);
             }
         }
     }

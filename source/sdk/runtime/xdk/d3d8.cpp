@@ -1390,7 +1390,7 @@ void Trace2D(const uint8_t* vertices, uint32_t stride, uint32_t count) {
         most--;
     }
     auto simple = [](uint32_t method) { return g_state.simple[method >> 2]; };
-    LOGI("2d trace: %u vertices, box %.0f %.0f to %.0f %.0f, target %s, blend %u (source %X, destination %X, operation %X), alpha test %u, "
+    LOGI("2d trace: %u vertices, box %.2f %.2f to %.2f %.2f, target %s, blend %u (source %X, destination %X, operation %X), alpha test %u, "
          "depth test %u write %u, fog %u, texture %08X, called from%s",
          count, x0, y0, x1, y1, Dev(kDevRenderTarget) == PostBuffer() ? "shown buffer" : "other", simple(gpu::kMBlendEnable), simple(gpu::kMSrcBlend),
          simple(gpu::kMDestBlend), simple(gpu::kMBlendOp), simple(gpu::kMAlphaTestEnable), g_state.rs[gpu::kRsZEnable], simple(gpu::kMZWriteEnable),
@@ -1427,18 +1427,190 @@ void Trace2D(const uint8_t* vertices, uint32_t stride, uint32_t count) {
     }
 }
 
+// [local change, The Suffering: Ties That Bind] Even letter spacing. The title lays its letters out at whole pixels
+// of its 640 x 480 layout by the font's whole-number widths, and each letter's picture is a cell with empty columns
+// around the ink: "Select" came out with gaps of 0.4 to 2.3 layout pixels between letters, which show when the
+// picture is four to six times larger. Each letter is moved so that the gap between its ink and the ink of the
+// letter drawn before it in the same string is a tenth of its height. The ink is measured from the font texture's
+// alpha (decoded once per texture). The title draws a string's letters one after another (either direction); a
+// larger gap (a space) or a jump (another line, another pass of an outline) keeps the title's place, moved by what
+// the letters before were moved. g_letter_dx is the move of the draw being made.
+float g_letter_dx = 0;
+int g_ink_threshold = [] { const char* v = std::getenv("S2_INK"); return v ? std::atoi(v) : 64; }();
+namespace {
+struct InkTexture {
+    uint32_t w = 0, h = 0;
+    std::vector<uint8_t> alpha;
+};
+std::unordered_map<uint64_t, InkTexture> g_ink;
+struct Letter {
+    float x0, y0, y1, l, r, shift;
+};
+std::vector<Letter> g_letters;  // the string's letters, as its first run drew them (not drawn)
+bool g_letter_skip = false;     // the draw being made is one of the first run's
+
+const InkTexture* InkOf(uint32_t header) {
+    gpu::TextureDesc d;
+    if (!header || !gpu::Describe(header, d) || d.cube || d.width > 1024 || d.height > 1024) return nullptr;
+    const gpu::FormatInfo& fi = gpu::Format(d.format);
+    { static const bool tr = std::getenv("S2_TEXT_TRACE") != nullptr; static int n = 0; if (tr && n < 4) n++, LOGI("text: font texture %08X: %s %ux%u, host %d, compressed %d, swizzled %d", header, fi.name, d.width, d.height, int(fi.host), int(fi.compressed), int(fi.swizzled)); }
+    bool bc3 = fi.host == gpu::Host::BC3, bc2 = fi.host == gpu::Host::BC2;
+    if (fi.host != gpu::Host::BGRA8 && !bc3 && !bc2) return nullptr;
+    uint64_t key = uint64_t(d.data) << 16 ^ uint64_t(d.format) << 8 ^ d.width;
+    auto it = g_ink.find(key);
+    if (it != g_ink.end()) return it->second.alpha.empty() ? nullptr : &it->second;
+    InkTexture& t = g_ink[key];
+    uint32_t bytes = gpu::LevelSize(d, 0);
+    if (!bytes || !mem::IsCommitted(d.data) || !mem::IsCommitted(d.data + bytes - 1)) return nullptr;
+    std::vector<uint8_t> bgra;
+    uint32_t pitch = 0;
+    gpu::DecodeLevel(d, 0, 0, static_cast<const uint8_t*>(HostPtr(d.data)), nullptr, bgra, pitch);
+    t.w = d.width, t.h = d.height;
+    if (bc3 || bc2) {  // 4 x 4 blocks of 16 bytes, the alpha in their first 8 (rows of blocks pitch bytes apart)
+        uint32_t bw = (d.width + 3) / 4, bh = (d.height + 3) / 4;
+        if (pitch < bw * 16 || bgra.size() < size_t(pitch) * bh) return nullptr;
+        t.alpha.assign(size_t(t.w) * t.h, 0);
+        for (uint32_t by = 0; by < bh; by++)
+            for (uint32_t bx = 0; bx < bw; bx++) {
+                const uint8_t* blk = bgra.data() + size_t(by) * pitch + size_t(bx) * 16;
+                uint8_t a[16];
+                if (bc3) {
+                    uint32_t a0 = blk[0], a1 = blk[1], pal[8] = {a0, a1};
+                    for (uint32_t i = 2; i < 8; i++)
+                        pal[i] = a0 > a1 ? ((8 - i) * a0 + (i - 1) * a1) / 7 : i < 6 ? ((6 - i) * a0 + (i - 1) * a1) / 5 : i == 6 ? 0 : 255;
+                    uint64_t bits = 0;
+                    for (int i = 0; i < 6; i++) bits |= uint64_t(blk[2 + i]) << (8 * i);
+                    for (int i = 0; i < 16; i++) a[i] = uint8_t(pal[(bits >> (3 * i)) & 7]);
+                } else {
+                    for (int i = 0; i < 16; i++) a[i] = uint8_t(((blk[i / 2] >> ((i & 1) * 4)) & 15) * 17);
+                }
+                for (uint32_t i = 0; i < 16; i++) {
+                    uint32_t x = bx * 4 + (i & 3), y = by * 4 + (i >> 2);
+                    if (x < t.w && y < t.h) t.alpha[size_t(y) * t.w + x] = a[i];
+                }
+            }
+        return &t;
+    }
+    if (pitch < d.width * 4 || bgra.size() < size_t(pitch) * d.height) return nullptr;
+    t.alpha.resize(size_t(t.w) * t.h);
+    for (uint32_t y = 0; y < t.h; y++)
+        for (uint32_t x = 0; x < t.w; x++) t.alpha[size_t(y) * t.w + x] = bgra[size_t(y) * pitch + x * 4 + 3];
+    return &t;
+}
+
+// the draw's move, from its corners (x, y first; u, v the last two floats of each)
+void LetterShift(const uint8_t* vertices, uint32_t stride, uint32_t count) {
+    g_letter_dx = 0;
+    { static const bool tr = std::getenv("S2_TEXT_TRACE") != nullptr; static int n = 0; if (tr && gpu::g_letter_now && n < 10) n++, LOGI("text: a letter draw: spacing %d, vertices %p, stride %u, count %u, texture %08X", int(gpu::g_letter_spacing), (const void*)vertices, stride, count, g_state.textures[0]); }
+    g_letter_skip = gpu::g_letter_now && gpu::g_letter_pass == 1;  // (the first run draws nothing, letter or not)
+    if (!gpu::g_letter_now || !gpu::g_letter_spacing || !gpu::g_letter_pass || !vertices || stride < 24 || count < 3 || count > 6) return;
+    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f, u0 = 1e9f, u1 = -1e9f, v0 = 1e9f, v1 = -1e9f;
+    for (uint32_t i = 0; i < count; i++) {
+        float p[2], t[2];
+        std::memcpy(p, vertices + size_t(i) * stride, 8);
+        std::memcpy(t, vertices + size_t(i) * stride + stride - 8, 8);
+        x0 = std::min(x0, p[0]), x1 = std::max(x1, p[0]), y0 = std::min(y0, p[1]), y1 = std::max(y1, p[1]);
+        u0 = std::min(u0, t[0]), u1 = std::max(u1, t[0]), v0 = std::min(v0, t[1]), v1 = std::max(v1, t[1]);
+    }
+    const InkTexture* ink = InkOf(g_state.textures[0]);
+    if (!ink || !(x1 > x0) || !(y1 > y0) || x1 - x0 > 100 || !(u1 > u0)) return;
+    // the cell's texels: coordinates in texels, or 0 to 1 (then times the size)
+    bool unit = u1 <= 1.01f && v1 <= 1.01f;
+    float tu0 = unit ? u0 * ink->w : u0, tu1 = unit ? u1 * ink->w : u1, tv0 = unit ? v0 * ink->h : v0, tv1 = unit ? v1 * ink->h : v1;
+    int c0 = std::max(0, int(std::floor(tu0))), c1 = std::min(int(ink->w), int(std::ceil(tu1)));
+    int r0 = std::max(0, int(std::floor(tv0))), r1 = std::min(int(ink->h), int(std::ceil(tv1)));
+    // the ink's left and right: where the column sums of the alpha (less its faint glow) pass 4% and 96% of the
+    // cell's whole, so that a thin stroke and a soft edge count as much as they show
+    float cols[256] = {}, total = 0;
+    for (int c = c0; c < c1 && c - c0 < 256; c++) {
+        for (int r = r0; r < r1; r++) {
+            int a = ink->alpha[size_t(r) * ink->w + c] - g_ink_threshold;
+            if (a > 0) cols[c - c0] += float(a);
+        }
+        total += cols[c - c0];
+    }
+    if (total <= 0) return;  // (an empty cell: a space)
+    int first = c0, last = c1 - 1;
+    float run = 0;
+    for (int c = c0; c < c1 && c - c0 < 256; c++) {
+        run += cols[c - c0];
+        if (run >= 0.04f * total) { first = c; break; }
+    }
+    run = 0;
+    for (int c = std::min(c1, c0 + 256) - 1; c >= c0; c--) {
+        run += cols[c - c0];
+        if (run >= 0.04f * total) { last = c; break; }
+    }
+    float k = (x1 - x0) / (tu1 - tu0);
+    float l = x0 + (float(first) - tu0) * k, r = x0 + (float(last + 1) - tu0) * k;
+    // the first run of the string: the letter is noted and not drawn; the second: it is drawn where the plan puts it
+    if (gpu::g_letter_pass == 1) {
+        g_letter_skip = true;
+        if (g_letters.size() < 512) g_letters.push_back({x0, y0, y1, l, r, 0});
+        return;
+    }
+    for (const Letter& t : g_letters)
+        if (t.x0 == x0 && t.y0 == y0) {
+            g_letter_dx = t.shift;
+            break;
+        }
+    static int said = 0;
+    static const double trace_from = std::getenv("S2_TEXT_TRACE") ? std::atof(std::getenv("S2_TEXT_TRACE")) : -1;
+    if (said < 3000 && trace_from >= 0 && logx::Seconds() >= trace_from)
+        said++, LOGI("text: letter %.2f to %.2f (ink %.2f to %.2f), string %u, moved %.2f", x0, x1, l, r, gpu::g_letter_string, g_letter_dx);
+}
+}  // namespace
+
+// [local change, The Suffering: Ties That Bind] The plan for the string just collected: line by line (letters whose
+// tops are within a third of a letter's height), left to right by ink, each gap made a tenth of the letter's height,
+// a gap of more than a third of it (a space) kept; then the line is moved back by half of what it grew or shrank, so
+// that centred text stays centred.
+void LetterPlanNow() {
+    std::vector<size_t> order(g_letters.size());
+    for (size_t i = 0; i < order.size(); i++) order[i] = i;
+    std::sort(order.begin(), order.end(), [](size_t a, size_t b) {
+        const Letter &p = g_letters[a], &q = g_letters[b];
+        float h = std::max(p.y1 - p.y0, q.y1 - q.y0);
+        if (std::fabs(p.y0 - q.y0) > h / 3) return p.y0 < q.y0;
+        return p.l < q.l;
+    });
+    size_t i = 0;
+    while (i < order.size()) {
+        size_t j = i + 1;
+        float h = g_letters[order[i]].y1 - g_letters[order[i]].y0;
+        while (j < order.size() && std::fabs(g_letters[order[j]].y0 - g_letters[order[i]].y0) <= h / 3) j++;
+        float shift = 0, prev_r = 0, ours_r = 0;
+        for (size_t k = i; k < j; k++) {
+            Letter& t = g_letters[order[k]];
+            float th = t.y1 - t.y0;
+            if (k > i) {
+                float gap = t.l - prev_r;
+                if (gap < 0.33f * th && gap > -0.5f * th) shift = ours_r + 0.1f * th - t.l;
+            }
+            t.shift = shift;
+            prev_r = t.r, ours_r = t.r + shift;
+        }
+        float grew = j > i ? g_letters[order[j - 1]].shift : 0;
+        for (size_t k = i; k < j; k++) g_letters[order[k]].shift -= grew / 2;
+        i = j;
+    }
+}
+void LetterBeginNow() { g_letters.clear(); }
+
 // vertices: the draw's vertices where they are at hand (x and y lead each), else null
 void ClassifyDraw(const uint8_t* vertices, uint32_t stride, uint32_t count) {
     g_flat_draw = false;
     g_flat_cover = false;
     g_flat_big = false;
     g_flat_skip = false;
+    g_letter_skip = false;
     bool ready_made = !(g_state.vs_handle & 1) && (g_state.vs_handle & 0xE) == 4;
     if (!ready_made) {
         g_world_draws++;
         return;
     }
     Trace2D(vertices, stride, count);
+    LetterShift(vertices, stride, count);  // [local change, The Suffering: Ties That Bind]
     if (!gpu::g_flat2d.on && !gpu::g_flat2d.half) return;
     g_flat_middle = -1;
     uint32_t rt = Dev(kDevRenderTarget);
@@ -1513,7 +1685,17 @@ void FramePresented() {
 const gpu::State& ForDrawSplit();
 // the state a draw goes out with: as set, moved for a split-screen HUD (gpu::g_hud_split), squeezed for a 2D layer
 // that keeps its shape (gpu::g_flat2d)
+const gpu::State& ForDrawFlat();
+// [local change, The Suffering: Ties That Bind] the draw's state, a letter moved for even spacing (LetterShift)
 const gpu::State& ForDraw() {
+    const gpu::State& s = ForDrawFlat();
+    if (g_letter_dx == 0) return s;
+    static gpu::State t;
+    t = s;
+    t.screen_dx += g_letter_dx;
+    return t;
+}
+const gpu::State& ForDrawFlat() {
     const gpu::State& base = ForDrawSplit();
     if (!g_flat_draw) return base;
     static gpu::State f;
@@ -1587,7 +1769,7 @@ HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     const uint8_t* flat_vertices = StreamVertices(a[1], flat_stride);
     ClassifyDraw(flat_vertices, flat_stride, a[2]);
     g_state.variant = gpu::g_draw_variant ? gpu::g_draw_variant(ctx, g_state) : 0;  // [local change, The Suffering: Ties That Bind]
-    if (g_backend && !g_flat_skip) g_backend->Draw(ForDraw(), a[0], a[1], a[2], nullptr);
+    if (g_backend && !g_flat_skip && !g_letter_skip) g_backend->Draw(ForDraw(), a[0], a[1], a[2], nullptr);
     return 0;
 }
 
@@ -1636,7 +1818,7 @@ void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride
     auto stream = g_state.streams[0];
     g_state.streams[0] = {UpVertices(vertices, count * stride), stride};
     ClassifyDraw(static_cast<const uint8_t*>(vertices), stride, count);
-    if (!g_flat_skip) g_backend->Draw(ForDraw(), prim, 0, count, nullptr);
+    if (!g_flat_skip && !g_letter_skip) g_backend->Draw(ForDraw(), prim, 0, count, nullptr);
     g_state.streams[0] = stream;
 }
 
@@ -1931,3 +2113,7 @@ HLE_STDCALL(D3DDevice_End, 0) {
 
 // [local change, The Suffering: Ties That Bind]
 void gpu::SnapshotForStream() { d3d::SnapshotRenderTarget(); }
+
+// [local change, The Suffering: Ties That Bind] even letter spacing, for the title (see LetterPlanNow)
+void gpu::LetterBegin() { LetterBeginNow(); }
+void gpu::LetterPlan() { LetterPlanNow(); }

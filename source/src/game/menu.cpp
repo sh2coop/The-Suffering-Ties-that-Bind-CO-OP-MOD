@@ -70,6 +70,7 @@ int State(int* made, int* total);  // 0 off, 1 on, 2 on and being made
 namespace game_skins {  // skins.cpp: each player's character
 extern uint32_t g_p1_body, g_p2_body;  // 0 Torque, 1 Blackmore
 bool Available();  // Blackmore's model is in the Player package
+bool ChiefAvailable();  // ... and Chief's (the owner's own files, characters\chief)
 }
 namespace gpu::texturedumper {
 bool StartHdMaker();  // texturedumper.cpp: Build Recomp's HD textures maker, in the background
@@ -278,7 +279,15 @@ const char* HdNow(uint32_t setting) {
     return app::Output().height > 1080 ? "4x" : "2x";
 }
 
-const char* CharacterName(uint32_t body) { return body && game_skins::Available() ? "Blackmore" : "Torque"; }
+const char* CharacterName(uint32_t body) {
+    if (body == 2 && game_skins::ChiefAvailable()) return "Chief";
+    return body == 1 && game_skins::Available() ? "Blackmore" : "Torque";
+}
+// the next character a step left or right: Torque, Blackmore, then Chief when his files are there
+uint32_t NextCharacter(uint32_t body, int dir) {
+    uint32_t count = !game_skins::Available() ? 1 : game_skins::ChiefAvailable() ? 3 : 2;
+    return uint32_t((int(std::min(body, count - 1)) + dir + int(count)) % int(count));
+}
 
 // ---- what the rows say -----------------------------------------------------------------------------------------
 
@@ -395,7 +404,7 @@ std::string Help() {
             if (!game_skins::Available())
                 std::snprintf(text, sizeof text, "%s's character. Blackmore's model could not be read from this copy of the game, so Torque is the only one.", who);
             else
-                std::snprintf(text, sizeof text, "%s's character: Torque, or Blackmore in his red suit. Only how %s looks changes, nothing else.", who, who);
+                std::snprintf(text, sizeof text, game_skins::ChiefAvailable() ? "%s's character: Torque, Blackmore in his red suit, or Chief. Only how %s looks changes." : "%s's character: Torque, or Blackmore in his red suit. Only how %s looks changes, nothing else.", who, who);
             return text;
         }
         case kLook1: return "Player 1's up and down: Inverted turns the right stick round. It is the game's Invert Pitch Axis.";
@@ -447,8 +456,8 @@ void Step(int row, int dir) {
             break;
         case kLook1: SetGameInverted(!GameInverted()); break;
         case kLook: game_coop::g_p2_invert = game_coop::g_p2_invert ? 0 : 1; break;
-        case kChar1: game_skins::g_p1_body = game_skins::Available() && !game_skins::g_p1_body ? 1 : 0; break;
-        case kChar2: game_skins::g_p2_body = game_skins::Available() && !game_skins::g_p2_body ? 1 : 0; break;
+        case kChar1: game_skins::g_p1_body = NextCharacter(game_skins::g_p1_body, dir); break;
+        case kChar2: game_skins::g_p2_body = NextCharacter(game_skins::g_p2_body, dir); break;
         case kSpeed: {
             int percent = int(std::clamp<uint32_t>(game_coop::g_p2_speed, 40, 100)) + dir * 10;
             game_coop::g_p2_speed = uint32_t(percent > 100 ? 40 : percent < 40 ? 100 : percent);
@@ -1091,4 +1100,44 @@ X86_FUNC(sub_0014AE60) {
     uint32_t menu = ctx.ecx;
     __imp__sub_0014AE60(ctx, base);
     if (uint32_t entry = kernel::R32(menu + game_menu::kBrightnessEntry)) game_menu::SetText(ctx, entry, "Display and Co-op");
+}
+
+// ---- even spacing between letters -----------------------------------------------------------------------------
+// The owner, 2026-11-27: "some of the text is still not looking correct, in terms of spacing" (the button line's
+// "S elect"). The font's string drawer (0x1D5B60, this = the font) draws each letter as a sprite (0x1C6B20, called at
+// 0x1D5F76) placed at a whole pixel by the font's whole-number widths; the runtime moves each letter so that the gaps
+// between the letters' ink are even (xdk/d3d8.cpp LetterShift). The game says when a string begins and ends and
+// while a letter is drawn. Only on a picture larger than 1000 pixels across: at 640 x 480 the game's own whole
+// pixels are its look. S2_TEXT_GAPS=0: as the game has it.
+#include "gpu/backend.h"
+X86_EXTERN_FUNC(__imp__sub_001D5B60);
+X86_FUNC(sub_001D5B60) {  // a string (this = the font)
+    static const bool off = [] { const char* v = std::getenv("S2_TEXT_GAPS"); return v && *v == '0'; }();
+    gpu::g_letter_spacing = !off && app::Output().width > 1000;
+    gpu::g_letter_string++;
+    if (!gpu::g_letter_spacing || gpu::g_letter_pass) {  // (a string within a string: as the game has it)
+        __imp__sub_001D5B60(ctx, base);
+        return;
+    }
+    // twice: once to see where the letters go (nothing drawn), once to draw them where the plan puts them
+    X86Context saved = ctx;
+    uint32_t args[16];
+    for (int i = 0; i < 16; i++) args[i] = kernel::R32(ctx.esp + 4 + i * 4);
+    gpu::LetterBegin();
+    gpu::g_letter_pass = 1;
+    __imp__sub_001D5B60(ctx, base);
+    gpu::LetterPlan();
+    for (int i = 0; i < 16; i++) kernel::W32(saved.esp + 4 + i * 4, args[i]);
+    ctx = saved;
+    gpu::g_letter_pass = 2;
+    __imp__sub_001D5B60(ctx, base);
+    gpu::g_letter_pass = 0;
+}
+X86_EXTERN_FUNC(__imp__sub_001C6B20);
+X86_FUNC(sub_001C6B20) {  // a sprite: a letter when the string drawer calls it
+    bool letter = kernel::R32(ctx.esp) == 0x1D5F7B;
+    bool before = gpu::g_letter_now;
+    if (letter) gpu::g_letter_now = true;
+    __imp__sub_001C6B20(ctx, base);
+    gpu::g_letter_now = before;
 }

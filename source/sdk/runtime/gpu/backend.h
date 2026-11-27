@@ -133,6 +133,14 @@ struct Flat2D {
     bool cover = false;
 };
 inline Flat2D g_flat2d;
+// [local change, The Suffering: Ties That Bind] Even letter spacing (xdk/d3d8.cpp LetterShift): the title raises
+// g_letter_string when it begins and ends a string and holds g_letter_now while it draws one of its letters.
+inline uint32_t g_letter_string = 0;
+inline bool g_letter_now = false;
+inline bool g_letter_spacing = true;  // the title's switch (off: letters where the title puts them)
+inline int g_letter_pass = 0;  // 0 as drawn, 1 the string's letters noted and not drawn, 2 drawn where LetterPlan puts them
+void LetterBegin();  // xdk/d3d8.cpp
+void LetterPlan();
 // [local change, The Suffering: Ties That Bind] tests: the title asks for the ready-made draws of the frame being
 // drawn to be logged (xdk/d3d8.cpp Trace2D); counted down at each present
 inline std::atomic<int> g_trace_2d{0};

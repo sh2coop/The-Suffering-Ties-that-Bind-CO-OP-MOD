@@ -53,7 +53,7 @@ uint32_t Marks(std::string* why);
 
 namespace game_skins {  // skins.cpp: each player's character
 int BodySkin(uint32_t object);
-void SkinImage(uint64_t key, uint32_t place, uint32_t width, uint32_t height);
+void SkinImage(int character, uint64_t key, uint32_t place, uint32_t width, uint32_t height);
 }
 namespace game_coop {
 namespace {
@@ -2057,16 +2057,20 @@ float Facing(uint32_t object) {  // the "facing" of the position lines
     return std::atan2(ReadF(object + kMatrix + 0x20), ReadF(object + kMatrix + 0x28)) * 57.29578f;
 }
 
+// [the owner, 2026-11-27: Load Game from the pause menu crashed here] An object the game has freed while its address
+// is still ours: its first and its last bytes must both be in committed memory. A Player or a body can lie across a
+// page edge; Load Game freed the page of the Player's start (+0xB0 read) while the page of +0x490 stayed.
+bool Whole(uint32_t p, uint32_t size) { return p && mem::IsCommitted(p) && mem::IsCommitted(p + size - 1); }
 void DetailFrame(X86Context& ctx) {
     PassStats pass[2] = {g_pass[0], g_pass[1]};
     g_pass[0] = g_pass[1] = PassStats{};
     static bool was_in = false;
-    bool in = InLevel() && mem::IsCommitted(g_player + 0x490) && mem::IsCommitted(g_player_object + 0x110);
+    bool in = InLevel() && Whole(g_player, 0x494) && Whole(g_player_object, 0x114);
     static std::chrono::steady_clock::time_point before = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     float ms = std::chrono::duration<float, std::milli>(now - before).count();
     before = now;
-    bool second = g_second && g_second_object && mem::IsCommitted(g_second + 0x490) && mem::IsCommitted(g_second_object + 0x110);
+    bool second = Whole(g_second, 0x494) && Whole(g_second_object, 0x114);
     CameraNow c1 = CameraOf(kernel::R32(kGameCamera)), c2 = second ? CameraOf(g_camera2_object) : CameraNow{};
     // ---- Player 2's ammunition, for the display in his picture: what is in the weapon in his hand (Player +0x140),
     // what its clip holds (0x17400) and what he carries for it (0x174A0). The game's own HUD number is the sum of the
@@ -2412,6 +2416,23 @@ void Frame(X86Context& ctx) {
                 uint32_t r = kernel::R32(g_player + at);
                 if (r && mem::IsCommitted(r + 0x80)) Dump(at == 0x760 ? "fp probe +760" : "fp probe +764", r, 0x80);
             }
+        }
+    }
+    {   // tests: S2_TEST_GIVE_WEAPONS=<frame>: Player 1 is given every melee and ranged weapon the game has a template
+        // for (to see what hangs on his body: holsters, the bat on his back)
+        static const uint64_t give_at = std::getenv("S2_TEST_GIVE_WEAPONS") ? uint64_t(std::atoll(std::getenv("S2_TEST_GIVE_WEAPONS"))) : 0;
+        if (give_at && g_frames == give_at && g_player) {
+            uint32_t table = kernel::R32(0x384BA4), count = table ? kernel::R32(table + 0x18) : 0, given = 0;  // (the templates, kTemplates)
+            for (uint32_t i = 0; i < count && i < 20000; i++) {
+                uint32_t cls = ClassOfTemplate(i);
+                if (cls != 0x22E48520 && cls != 0x9710D816) continue;
+                uint32_t ecx = ctx.ecx, eax = ctx.eax;
+                ctx.ecx = g_player;
+                kernel::CallGuest(ctx, 0x153A0, {i, 1});
+                ctx.ecx = ecx, ctx.eax = eax;
+                given++;
+            }
+            LOGR("test: Player 1 is given %u weapons", given);
         }
     }
     {   // tests: S2_DRAW_TRACE=<frame> also asks the runtime for that frame's ready-made (2D) draws with their boxes
@@ -4950,6 +4971,7 @@ bool g_drawing_second = false;  // the engine is drawing Player 2's object (0x1D
 int g_draw_depth = 0;           // how many object draws (0x1D1970) are open, one inside another
 int g_skin_depth = -1;          // the depth of the open draw of a player's body that wears another character (skins.cpp)
 uint32_t g_skin_place = 0;      // ... and how many of its own textured draws went out: the place being drawn
+int g_skin_char = 0;            // ... and which character it wears (1 Blackmore, 2 Chief)
 
 // Player 2's outfit (decided 2026-11-24: blue trousers and a black tank top; straps, boots, skin and blood as they
 // are). His model is drawn with the same textures as Player 1's. Two of them are the clothes: the trousers
@@ -5104,9 +5126,9 @@ uint32_t DrawVariant(X86Context& ctx, const gpu::State& s) {
         if (s.textures[0] && gpu::Describe(s.textures[0], d) && d.width >= 64 && d.height >= 64) {
             const gpu::FormatInfo& fi = gpu::Format(d.format);
             uint64_t key = gpu::texturedumper::KeyOf(d, fi, static_cast<const uint8_t*>(kernel::HostPtr(d.data)), nullptr);
-            game_skins::SkinImage(key, g_skin_place++, d.width, d.height);
+            game_skins::SkinImage(g_skin_char, key, g_skin_place++, d.width, d.height);
         }
-        return 2;
+        return uint32_t(1 + g_skin_char);  // (variant 2 Blackmore, 3 Chief)
     }
     if (!g_drawing_second) return 0;
     {   // tests: S2_P2_DRAWS=<frame>: every draw of Player 2's model in that frame, with each stage's texture
@@ -5253,13 +5275,14 @@ void game_coop::DrawOne(X86Context& ctx, uint8_t* base) {
     }
     int skin_before = game_coop::g_skin_depth;
     uint32_t place_before = game_coop::g_skin_place;
-    if (game_skins::BodySkin(kernel::R32(ctx.esp + 4))) game_coop::g_skin_depth = game_coop::g_draw_depth, game_coop::g_skin_place = 0;
+    int char_before = game_coop::g_skin_char;
+    if (int c = game_skins::BodySkin(kernel::R32(ctx.esp + 4))) game_coop::g_skin_depth = game_coop::g_draw_depth, game_coop::g_skin_place = 0, game_coop::g_skin_char = c;
     else if (game_coop::g_skin_depth >= 0 && kernel::R32(ctx.esp + 4)) game_coop::g_skin_depth = -1;  // (something else drawn from inside it)
     game_coop::g_draw_depth++;
     __imp__sub_001D1970(ctx, base);
     game_coop::g_draw_depth--;
     game_coop::g_drawing_second = before;
-    game_coop::g_skin_depth = skin_before, game_coop::g_skin_place = place_before;
+    game_coop::g_skin_depth = skin_before, game_coop::g_skin_place = place_before, game_coop::g_skin_char = char_before;
 }
 
 // S2_SOUND_TRACE=1: every sound the game asks for (0x191070: the wave, the place, flags, a float), who asked and what
