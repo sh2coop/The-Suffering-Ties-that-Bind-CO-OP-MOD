@@ -49,4 +49,9 @@ private:
 void MountDisc(std::unique_ptr<Disc> disc);
 const Disc* MountedDisc();
 
+// [local change, The Suffering: Ties That Bind] A file of D: the game replaces: given the path under D: (its parts
+// as the title wrote them), the host file to open instead, or an empty path. Asked on every open of a D: path, from
+// any thread; null: none. (game: src\game\skins.cpp, a second character model added to the Player package.)
+extern std::filesystem::path (*g_replace_disc_file)(const std::vector<std::string>& parts);
+
 }  // namespace kernel

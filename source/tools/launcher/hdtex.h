@@ -43,7 +43,7 @@
 #define STB_DXT_IMPLEMENTATION
 #include "third_party/stb_dxt.h"
 
-#define HD_VERSION 4           // bump when the making changes: textures made by an older version are made again
+#define HD_VERSION 5           // bump when the making changes: textures made by an older version are made again
 #define HD_PAD 8               // source pixels of padding on each side
 static int g_hd_background;    // "--hd": no window and no message boxes (the log only)
 
@@ -470,6 +470,21 @@ static uint8_t Bicubic(const HdJob* j, uint32_t X, uint32_t Y, int ch) {
     return (uint8_t)(a < 0 ? 0 : a > 255 ? 255 : a + 0.5f);
 }
 static uint8_t BicubicAlpha(const HdJob* j, uint32_t X, uint32_t Y) { return Bicubic(j, X, Y, 3); }
+// the console texture's alpha at the 4x pixel (X, Y) as the console's own filter reads it (bilinear)
+static float BilinearAlpha(const HdJob* j, uint32_t X, uint32_t Y) {
+    int w = (int)j->t.w, h = (int)j->t.h;
+    float fx = (X + 0.5f) / 4 - 0.5f, fy = (Y + 0.5f) / 4 - 0.5f;
+    int ix = (int)floorf(fx), iy = (int)floorf(fy);
+    float tx = fx - ix, ty = fy - iy, v[2][2];
+    for (int dy = 0; dy < 2; dy++)
+        for (int dx = 0; dx < 2; dx++) {
+            int x = ix + dx, y = iy + dy;
+            x = j->wrap_x ? (x % w + w) % w : x < 0 ? 0 : x >= w ? w - 1 : x;
+            y = j->wrap_y ? (y % h + h) % h : y < 0 ? 0 : y >= h ? h - 1 : y;
+            v[dy][dx] = j->source[((size_t)y * w + x) * 4 + 3];
+        }
+    return (v[0][0] * (1 - tx) + v[0][1] * tx) * (1 - ty) + (v[1][0] * (1 - tx) + v[1][1] * tx) * ty;
+}
 // the least and the most alpha of the console texels around the 4x pixel (X, Y)
 static void NearAlpha(const HdJob* j, uint32_t X, uint32_t Y, int* least_out, int* most_out) {
     int w = (int)j->t.w, h = (int)j->t.h, most = 0, least = 255;
@@ -555,7 +570,27 @@ static int FinishJob(HdJob* j) {
             int least, most;
             NearAlpha(j, x, y, &least, &most);
             if (most < 8) a = 0;
-            else if (j->alpha != ALPHA_BINARY) a = a < least ? least : a > most ? most : a;
+            else if (j->alpha != ALPHA_BINARY) {
+                a = a < least ? least : a > most ? most : a;
+                // (version 5, the owner again: "still some fraying on the a and b buttons ... the white stuff on the
+                // edge") the menu's icons sit two texels apart in their texture: the A button's circle ends, two clear
+                // texels, then the white square's edge, which the A button's own picture reaches into. The console's
+                // filter smears that edge a whole texel into the clear ones (a faint white line in the original
+                // game); the upscaler made it a crisp one. In a clear console texel the alpha now stays clear but
+                // for the one 4x pixel on its edge towards a shown texel, which gets no more than the console's filter
+                // gives there: a quarter of the smear at most
+                float bil = BilinearAlpha(j, x, y);
+                a = a > bil + 24 ? bil + 24 : a < bil - 48 ? bil - 48 : a;
+                int tw = (int)j->t.w, th = (int)j->t.h, tx = (int)(x / 4), ty = (int)(y / 4), sx = (int)(x % 4), sy = (int)(y % 4);
+                if (j->source[((size_t)ty * tw + tx) * 4 + 3] < 8) {
+                    int nx = sx == 0 ? tx - 1 : sx == 3 ? tx + 1 : -1, ny = sy == 0 ? ty - 1 : sy == 3 ? ty + 1 : -1, edge = 0;
+                    if (nx >= 0 && nx < tw && j->source[((size_t)ty * tw + nx) * 4 + 3] >= 8) edge = 1;
+                    if (ny >= 0 && ny < th && j->source[((size_t)ny * tw + tx) * 4 + 3] >= 8) edge = 1;
+                    if (nx >= 0 && nx < tw && ny >= 0 && ny < th && j->source[((size_t)ny * tw + nx) * 4 + 3] >= 8) edge = 1;
+                    if (!edge) a = 0;
+                    else if (a > bil) a = bil;
+                }
+            }
             o[3] = (uint8_t)(a < 0 ? 0 : a > 255 ? 255 : a + 0.5f);
             float k = (a - 96) / 128.0f;
             k = k < 0 ? 0 : k > 1 ? 1 : k;
@@ -814,7 +849,12 @@ static int OpenUpscaler(void) {
 // -> 1 the disc's textures are all made, 0 stopped or failed (said why). In the background it keeps going while the
 // game runs, for the textures the game shows that are not on the disc's list.
 static int MakeHdTextures(void) {
-    HANDLE one = CreateMutexW(NULL, TRUE, L"Local\\Suffering2HdTextures");   // one maker at a time
+    // one maker at a time for this folder (another copy of the game elsewhere has its own)
+    wchar_t mutex_name[96];
+    uint32_t folder_hash = 2166136261u;
+    for (const wchar_t* c = g_root; *c; c++) folder_hash = (folder_hash ^ (uint32_t)towlower(*c)) * 16777619u;
+    _snwprintf(mutex_name, 96, L"Local\\Suffering2HdTextures_%08x", folder_hash);
+    HANDLE one = CreateMutexW(NULL, TRUE, mutex_name);
     if (one && GetLastError() == ERROR_ALREADY_EXISTS) { CloseHandle(one); return 0; }
     wchar_t assets[MAX_PATH * 2], hd_dir[MAX_PATH * 2], seen_dir[MAX_PATH * 2], marker[MAX_PATH * 2];
     Path(assets, MAX_PATH * 2, L"Game Files\\assets");

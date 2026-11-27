@@ -51,6 +51,10 @@ void Mark(const std::string& why);
 uint32_t Marks(std::string* why);
 }
 
+namespace game_skins {  // skins.cpp: each player's character
+int BodySkin(uint32_t object);
+void SkinImage(uint64_t key, uint32_t place, uint32_t width, uint32_t height);
+}
 namespace game_coop {
 namespace {
 constexpr uint32_t kPlayerClass = 0xC8BC44E1;
@@ -2890,6 +2894,16 @@ void Frame(X86Context& ctx) {
     }
     g_methods.clear();
 }
+
+// for the choice of character (skins.cpp): whose body an engine object is, and the players' Players
+int BodyOwner(uint32_t object) {
+    if (!object) return -1;
+    if (object == g_player_object) return 0;
+    if (object == g_second_object) return 1;
+    return DoubleObject(object);
+}
+uint32_t PlayerOf(int who) { return who ? (g_second_object ? g_second : 0) : g_player; }
+uint32_t DoublePlayerOf(int who) { return g_doubles[who & 1].object ? g_doubles[who & 1].player : 0; }
 }  // namespace game_coop
 
 // the class factory (this = registry, object, class id), returns the new class object
@@ -4934,6 +4948,8 @@ X86_FUNC(sub_0017C450) {
 namespace game_coop {
 bool g_drawing_second = false;  // the engine is drawing Player 2's object (0x1D1970)
 int g_draw_depth = 0;           // how many object draws (0x1D1970) are open, one inside another
+int g_skin_depth = -1;          // the depth of the open draw of a player's body that wears another character (skins.cpp)
+uint32_t g_skin_place = 0;      // ... and how many of its own textured draws went out: the place being drawn
 
 // Player 2's outfit (decided 2026-11-24: blue trousers and a black tank top; straps, boots, skin and blood as they
 // are). His model is drawn with the same textures as Player 1's. Two of them are the clothes: the trousers
@@ -5080,7 +5096,34 @@ uint32_t DrawVariant(X86Context& ctx, const gpu::State& s) {
         }
         LOGI("%s", line);
     }
+    // A body that wears another character (skins.cpp): its own draws (not those of what it holds, drawn by calls
+    // inside its own) are variant 2, and the image for each place's texture is made the first time it is seen. The
+    // small blood layers (32 x 32) are drawn as they are and do not count as a place.
+    if (g_skin_depth >= 0 && g_draw_depth == g_skin_depth + 1) {
+        gpu::TextureDesc d;
+        if (s.textures[0] && gpu::Describe(s.textures[0], d) && d.width >= 64 && d.height >= 64) {
+            const gpu::FormatInfo& fi = gpu::Format(d.format);
+            uint64_t key = gpu::texturedumper::KeyOf(d, fi, static_cast<const uint8_t*>(kernel::HostPtr(d.data)), nullptr);
+            game_skins::SkinImage(key, g_skin_place++, d.width, d.height);
+        }
+        return 2;
+    }
     if (!g_drawing_second) return 0;
+    {   // tests: S2_P2_DRAWS=<frame>: every draw of Player 2's model in that frame, with each stage's texture
+        static const uint64_t at = std::getenv("S2_P2_DRAWS") ? uint64_t(std::atoll(std::getenv("S2_P2_DRAWS"))) : 0;
+        if (at && g_frames == at) {
+            char line[400];
+            int n = std::snprintf(line, sizeof line, "p2 draw: view %d", int(g_screen_pass));
+            for (int stage = 0; stage < 4; stage++) {
+                gpu::TextureDesc d;
+                if (!s.textures[stage] || !gpu::Describe(s.textures[stage], d)) continue;
+                uint64_t key = gpu::texturedumper::Key(d, gpu::Format(d.format), static_cast<const uint8_t*>(kernel::HostPtr(d.data)), nullptr);
+                n += std::snprintf(line + n, sizeof line - n, " | stage %d %08X %ux%u_%016llx", stage, s.textures[stage], d.width, d.height, (unsigned long long)key);
+            }
+            n += std::snprintf(line + n, sizeof line - n, " | from %s", CallersOf(ctx).c_str());
+            LOGR("%s", line);
+        }
+    }
     Outfit(s);
     // S2_P2_TEXTURES=1: the textures Player 2's model is drawn with, each once, by the name the texture dumps give them
     static const bool list = std::getenv("S2_P2_TEXTURES") != nullptr;
@@ -5208,10 +5251,15 @@ void game_coop::DrawOne(X86Context& ctx, uint8_t* base) {
                      int(g_drawing_second), Callers(ctx, 5).c_str());
         }
     }
+    int skin_before = game_coop::g_skin_depth;
+    uint32_t place_before = game_coop::g_skin_place;
+    if (game_skins::BodySkin(kernel::R32(ctx.esp + 4))) game_coop::g_skin_depth = game_coop::g_draw_depth, game_coop::g_skin_place = 0;
+    else if (game_coop::g_skin_depth >= 0 && kernel::R32(ctx.esp + 4)) game_coop::g_skin_depth = -1;  // (something else drawn from inside it)
     game_coop::g_draw_depth++;
     __imp__sub_001D1970(ctx, base);
     game_coop::g_draw_depth--;
     game_coop::g_drawing_second = before;
+    game_coop::g_skin_depth = skin_before, game_coop::g_skin_place = place_before;
 }
 
 // S2_SOUND_TRACE=1: every sound the game asks for (0x191070: the wave, the place, flags, a float), who asked and what

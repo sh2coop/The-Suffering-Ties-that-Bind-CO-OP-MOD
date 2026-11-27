@@ -69,10 +69,12 @@ uint64_t Count() { return g_count.load(); }
 namespace game_view { void Frame(X86Context& ctx); }
 namespace game_coop { void Frame(X86Context& ctx); }
 namespace game_measure { void Frame(); }
+namespace game_skins { void Frame(X86Context& ctx); }
 HLE_STDCALL(D3DDevice_InsertCallback, 3) {
     game_frames::g_count++;
     game_view::Frame(ctx);  // the picture's shape, checked once a frame on the game's thread
     game_coop::Frame(ctx);  // co-op (coop.cpp)
+    game_skins::Frame(ctx);  // each player's character: Torque or Blackmore (skins.cpp)
     game_measure::Frame();  // tests: Player 1's place over time (measure.cpp)
     return 0;
 }

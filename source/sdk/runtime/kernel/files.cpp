@@ -227,6 +227,8 @@ std::string QuerySymbolicLink(const std::string& link) {
     return it == g_links.end() ? std::string() : it->second;
 }
 
+fs::path (*g_replace_disc_file)(const std::vector<std::string>& parts) = nullptr;  // [local change] disc.h
+
 namespace {
 
 struct Target {
@@ -241,7 +243,7 @@ Target Resolve(const std::string& xbox_path, uint32_t root_handle) {
         if (auto f = FileFromHandle(root_handle)) p = Normalize(f->xbox + "\\" + p);
     }
     if (p.size() >= 2 && p[1] == ':') p = "\\??\\" + p;
-    std::lock_guard<std::mutex> lock(g_links_lock);
+    std::unique_lock<std::mutex> lock(g_links_lock);  // [local change] unique: let go around g_replace_disc_file
     for (int depth = 0; depth < 8; depth++) {
         std::string up = Upper(p);
         bool changed = false;
@@ -272,6 +274,14 @@ Target Resolve(const std::string& xbox_path, uint32_t root_handle) {
     // no Xbox name holds ':', and fs::path would take "D:" as a host drive
     for (auto& part : parts)
         if (part.find(':') != std::string::npos) return {};
+    // [local change, The Suffering: Ties That Bind] kernel/disc.h g_replace_disc_file
+    if (best->first == kCdRom && g_replace_disc_file && !parts.empty()) {
+        // (it may read other files of D: itself, which comes back here: not under the lock)
+        lock.unlock();
+        fs::path other = g_replace_disc_file(parts);
+        lock.lock();
+        if (!other.empty()) return {other.string()};
+    }
     if (best->first == kCdRom)
         if (const Disc* disc = MountedDisc()) return {{}, true, disc->Find(parts)};
     return {MatchCase(best->second, parts).string()};

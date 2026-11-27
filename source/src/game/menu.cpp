@@ -7,14 +7,14 @@
 //               screen, Borderless, Windowed), Picture shape (Automatic, 4:3, 16:10, 16:9, 21:9, 32:9), Frame rate
 //               (60, 120, the monitor's, no limit), VSync, HD textures (Off, Automatic, 2x, 4x: the set made on this
 //               PC by tools\launcher\hdtex.h; switching it on the first time starts the making)
-//     Co-op     Co-op (Off, Split screen), Player 1 look and Player 2 look (Normal or Inverted, each player's own),
-//               Player 2 look speed
+//     Co-op     Co-op (Off, Split screen), Player 1 character and Player 2 character (Torque or Blackmore: skins.cpp),
+//               Player 1 look and Player 2 look (Normal or Inverted, each player's own), Player 2 look speed
 //     Sound     HD sound (Off, On: the set made on this PC by tools\launcher\hdsound.h; switching it on the first time
 //               starts the making, src\game\hdsound.cpp)
 // Up and down move between the slider and the rows, left and right (or A) change the row's value, and a change
 // takes effect at once and is saved. Before a new game starts the game shows its own brightness page, without
 // these rows (since 2026-11-26: the constructor's hook, below). The main menu's "Co-op" entry opens the page at its
-// Co-op section; Player 2's pause menu opens it as his own page, with his two rows only.
+// Co-op section; Player 2's pause menu opens it as his own page, with his three rows only (his character and his look).
 // (Online co-op was here until 2026-11-27, when the owner dropped it: "I want to abandon online co-op entirely".)
 //
 // How the game's menus work (read from the code; xbox\NOTES.md has the longer account):
@@ -67,6 +67,10 @@ extern uint32_t g_setting;  // settings.toml hd_sound
 void Apply();
 int State(int* made, int* total);  // 0 off, 1 on, 2 on and being made
 }
+namespace game_skins {  // skins.cpp: each player's character
+extern uint32_t g_p1_body, g_p2_body;  // 0 Torque, 1 Blackmore
+bool Available();  // Blackmore's model is in the Player package
+}
 namespace gpu::texturedumper {
 bool StartHdMaker();  // texturedumper.cpp: Build Recomp's HD textures maker, in the background
 }
@@ -85,8 +89,8 @@ constexpr uint32_t kHidden = 2, kIdle = 4, kHighlighted = 5;
 
 // The rows. The page shows one section at a time (the first row chooses it: Display, or Co-op), so that it is
 // never crowded: a section has at most five rows under its heading, 20 apart. Player 2's own page (he opened it
-// from his pause menu) has his two rows and nothing else.
-enum Row { kSection, kResolution, kWindow, kShape, kRate, kVsync, kHd, kCoop, kLook1, kLook, kSpeed, kHdSound, kRows };
+// from his pause menu) has his three rows and nothing else.
+enum Row { kSection, kResolution, kWindow, kShape, kRate, kVsync, kHd, kCoop, kChar1, kChar2, kLook1, kLook, kSpeed, kHdSound, kRows };
 int g_section = 0;  // 0 Display, 1 Co-op, 2 Sound
 constexpr int kSections = 3;
 constexpr const char* kSectionNames[kSections] = {"Display", "Co-op", "Sound"};
@@ -274,6 +278,8 @@ const char* HdNow(uint32_t setting) {
     return app::Output().height > 1080 ? "4x" : "2x";
 }
 
+const char* CharacterName(uint32_t body) { return body && game_skins::Available() ? "Blackmore" : "Torque"; }
+
 // ---- what the rows say -----------------------------------------------------------------------------------------
 
 // Player 2 opened this page from his own pause menu: it is his settings page, and only his rows are on it
@@ -312,6 +318,7 @@ std::string Value(int row) {
         }
         case kLook1: return GameInverted() ? "Inverted" : "Normal";
         case kLook: return game_coop::g_p2_invert ? "Inverted" : "Normal";
+        case kChar1: case kChar2: return CharacterName(row == kChar1 ? game_skins::g_p1_body : game_skins::g_p2_body);
         case kSpeed:
             std::snprintf(out, sizeof out, "%u%%", std::clamp<uint32_t>(game_coop::g_p2_speed, 40, 100));
             return out;
@@ -319,17 +326,17 @@ std::string Value(int row) {
     return "";
 }
 
-constexpr const char* kLabels[kRows] = {"Settings", "Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "HD textures", "Co-op", "Player 1 look", "Player 2 look", "Player 2 look speed", "HD sound"};
+constexpr const char* kLabels[kRows] = {"Settings", "Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "HD textures", "Co-op", "Player 1 character", "Player 2 character", "Player 1 look", "Player 2 look", "Player 2 look speed", "HD sound"};
 
-// What is on the page now: Player 2's own page, his two rows; otherwise the section's rows under the row that
+// What is on the page now: Player 2's own page, his three rows; otherwise the section's rows under the row that
 // chooses the section.
 void MoveFocusTo(int focus);
 bool Visible(int row) {
-    if (SecondsPage()) return row == kLook || row == kSpeed;
+    if (SecondsPage()) return row == kChar2 || row == kLook || row == kSpeed;
     switch (row) {
         case kSection: return true;
         case kResolution: case kWindow: case kShape: case kRate: case kVsync: case kHd: return g_section == 0;
-        case kCoop: case kLook1: case kLook: case kSpeed: return g_section == 1;
+        case kCoop: case kChar1: case kChar2: case kLook1: case kLook: case kSpeed: return g_section == 1;
         case kHdSound: return g_section == 2;
     }
     return false;
@@ -346,8 +353,8 @@ std::string RowText(int row, bool focused) {
 // The box holds five lines of about thirty characters.
 std::string Help() {
     int row = g_page.focus - 1;
-    if (SecondsPage() && row != kLook && row != kSpeed)
-        return "Player 2's own settings. Go down to change how you look around. Nothing here changes Player 1.";
+    if (SecondsPage() && row != kChar2 && row != kLook && row != kSpeed)
+        return "Player 2's own settings. Go down to choose your character and how you look around. Nothing here changes Player 1.";
     switch (row) {
         case kShape:
             return game_coop::g_mode_setting == 1 ? "The picture's shape. Split screen is on: the picture fills the whole screen whatever is chosen here."
@@ -381,6 +388,15 @@ std::string Help() {
                 return total ? text : "Being made in the background. The sounds made already play in HD.";
             }
             return "On: the treble of the low-rate sounds is made back and every sound is resampled smoothly. Off plays them as the console did.";
+        }
+        case kChar1: case kChar2: {
+            const char* who = row == kChar1 ? "Player 1" : "Player 2";
+            char text[220];
+            if (!game_skins::Available())
+                std::snprintf(text, sizeof text, "%s's character. Blackmore's model could not be read from this copy of the game, so Torque is the only one.", who);
+            else
+                std::snprintf(text, sizeof text, "%s's character: Torque, or Blackmore in his red suit. Only how %s looks changes, nothing else.", who, who);
+            return text;
         }
         case kLook1: return "Player 1's up and down: Inverted turns the right stick round. It is the game's Invert Pitch Axis.";
         case kLook: return "Player 2's up and down: Inverted turns his right stick round. It only changes Player 2.";
@@ -431,6 +447,8 @@ void Step(int row, int dir) {
             break;
         case kLook1: SetGameInverted(!GameInverted()); break;
         case kLook: game_coop::g_p2_invert = game_coop::g_p2_invert ? 0 : 1; break;
+        case kChar1: game_skins::g_p1_body = game_skins::Available() && !game_skins::g_p1_body ? 1 : 0; break;
+        case kChar2: game_skins::g_p2_body = game_skins::Available() && !game_skins::g_p2_body ? 1 : 0; break;
         case kSpeed: {
             int percent = int(std::clamp<uint32_t>(game_coop::g_p2_speed, 40, 100)) + dir * 10;
             game_coop::g_p2_speed = uint32_t(percent > 100 ? 40 : percent < 40 ? 100 : percent);
@@ -455,7 +473,7 @@ void Refresh(X86Context& ctx) {
     bool seconds = SecondsPage();
     if (seconds != g_page.seconds) {  // (the page is built once and can be either: who opened it decides)
         g_page.seconds = seconds;
-        if (seconds && (g_page.focus == 0 || !Visible(g_page.focus - 1))) MoveFocusTo(kLook + 1);
+        if (seconds && (g_page.focus == 0 || !Visible(g_page.focus - 1))) MoveFocusTo(kChar2 + 1);
         else if (!seconds && g_page.focus > 0 && !Visible(g_page.focus - 1)) MoveFocusTo(0);
     }
     std::string title = seconds ? "PLAYER 2 SETTINGS" : "DISPLAY AND CO-OP";

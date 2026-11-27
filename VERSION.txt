@@ -1,1 +1,1 @@
-62 2026-11-27 Footsteps, hits and other sounds in the level are heard again after Load Game (the game had nowhere to listen from and judged them all too far away).
+63 2026-11-27 Each player can now be Torque or Blackmore (Display and Co-op, Co-op section; Player 2 also in his pause menu). The white edges on the A and B buttons are gone with HD textures on.
