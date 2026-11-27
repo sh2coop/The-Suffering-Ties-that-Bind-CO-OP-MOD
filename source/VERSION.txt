@@ -1,1 +1,1 @@
-61 2026-11-27 Fixes a crash right at the start: pressing A just after skipping the logo films could stop the game.
+62 2026-11-27 Footsteps, hits and other sounds in the level are heard again after Load Game (the game had nowhere to listen from and judged them all too far away).
