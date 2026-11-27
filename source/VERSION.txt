@@ -1,1 +1,1 @@
-64 2026-11-27 Blackmore no longer leaves things floating or a bat between his legs, and guns fire (with their sound) after switching character. Menu letters are evenly spaced on large screens. Load Game from the pause menu no longer crashes.
+65 2026-11-27 A third character, Chief: put your John.zip in Game Files\characters and pick Chief for either player in Options (Display and Co-op, Co-op section). The game makes him from your own files; nothing of him is shipped.

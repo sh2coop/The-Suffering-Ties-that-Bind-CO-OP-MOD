@@ -84,6 +84,10 @@ uint32_t PlayerOf(int who);                  // the Player (class object) of pla
 uint32_t DoublePlayerOf(int who);            // the Player of that player's stand-in, 0 when none
 }
 
+namespace game_chief {  // chief.cpp: Chief's body from the owner's zip
+bool Make(const fs::path& zip, const fs::path& out, const std::vector<uint8_t>& c200, const std::vector<uint8_t>& c203, const std::vector<uint8_t>& c208);
+}
+
 namespace game_skins {
 uint32_t g_p1_body = 0, g_p2_body = 0;  // settings.toml p1_character, p2_character: 0 Torque, 1 Blackmore, 2 Chief
 
@@ -618,6 +622,26 @@ bool Known() {
     return true;
 }
 
+// Chief's body is made from the owner's zip in characters\ (the first zip there with a model in it) when its files are
+// not there yet or are older than the zip (chief.cpp)
+void MakeChief(const std::vector<std::string>& asked) {
+    std::error_code ec;
+    fs::path zip;
+    for (fs::directory_iterator it(app::ExeDir() / "characters", ec); !ec && it != fs::directory_iterator(); it.increment(ec))
+        if (it->is_regular_file(ec) && Upper(it->path().extension().string()) == ".ZIP") { zip = it->path(); break; }
+    if (zip.empty()) return;
+    fs::path made = ChiefDir() / "chief_200.bin";
+    if (fs::exists(made, ec) && fs::last_write_time(made, ec) >= fs::last_write_time(zip, ec)) return;
+    std::vector<std::string> mdu(asked.begin(), asked.end() - 1);
+    mdu.push_back("Player.mdu");
+    Pack pm;
+    if (!ReadDisc(mdu, pm.data) || !pm.Parse()) return;
+    const Chunk *h = pm.Find(0x200, 1), *p = pm.Find(0x203, 1), *k = pm.Find(0x208, 1);
+    if (!h || !p || !k) return;
+    LOGR("skins: making Chief from %s", zip.string().c_str());
+    game_chief::Make(zip, ChiefDir(), pm.Bytes(*h), pm.Bytes(*p), pm.Bytes(*k));
+}
+
 fs::path Replace(const std::vector<std::string>& parts) {
     if (g_reading || parts.size() < 5) return {};
     static const bool off = std::getenv("S2_NO_SKINS") != nullptr;
@@ -635,6 +659,7 @@ fs::path Replace(const std::vector<std::string>& parts) {
         g_blackmore = 0, g_chief = 0, g_chief_skins = 0;
         g_torque.clear();
         g_dir = app::ExeDir() / "skins" / folder;
+        MakeChief(parts);
         if (!Known()) {
             if (Make(parts)) Known();
         } else {
@@ -700,7 +725,11 @@ uint32_t ModelId(uint32_t resource) { return resource && mem::IsCommitted(resour
 
 }  // namespace
 
-void Install() { kernel::g_replace_disc_file = Replace; }
+void Install() {
+    kernel::g_replace_disc_file = Replace;
+    std::error_code ec;  // where the owner's own characters go (Chief: John.zip), so that it is there to find
+    fs::create_directories(app::ExeDir() / "characters", ec);
+}
 
 // once a frame: each player (and his stand-in) wears what he should, unless he is in first person (his body comes
 // back through the hook when it ends) or in another form
