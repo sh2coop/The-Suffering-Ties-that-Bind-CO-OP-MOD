@@ -23,6 +23,11 @@
 //
 // S2_ASPECT=<width/height, such as 2.4> forces a shape (tests). Without it the shape is that of the output: the
 // window in windowed mode, the monitor otherwise.
+//
+// The Display settings' Picture shape chooses another shape (the picture then has bars at the sides or above and
+// below). Not in split screen: there the picture always fills the output, the two views share all of it. (The owner,
+// 2026-11-27, with 16:9 chosen on a 3840 x 1600 monitor: "theres still black bars where there could be more camera
+// space for both players".)
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -81,6 +86,11 @@ void SetSplit(bool on) { g_share = on ? 0.5f : 1.0f; }
 
 // the Display Settings page's "Picture shape": width * 1000 / height, 0 for the output's own shape (settings.toml)
 uint32_t g_shape_setting = 0;
+}  // namespace game_view
+namespace game_coop {
+extern uint32_t g_mode_setting;  // 0 off, 1 split screen (coop.cpp)
+}
+namespace game_view {
 
 namespace {
 float Wanted() {
@@ -89,7 +99,7 @@ float Wanted() {
         return v ? float(std::atof(v)) : 0.0f;
     }();
     float a = forced;
-    if (a <= 0 && g_shape_setting) a = float(g_shape_setting) / 1000.0f;
+    if (a <= 0 && g_shape_setting && game_coop::g_mode_setting != 1) a = float(g_shape_setting) / 1000.0f;
     if (a <= 0) {
         app::Mode m = app::Output();
         a = m.height ? float(m.width) / float(m.height) : float(kSixteenNine);

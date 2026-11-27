@@ -1,1 +1,1 @@
-56 2026-11-26 Co-op: a player in first person is now also seen throwing and crouching by the other player. His body in first person now does all he does: jump, fire, reload, strike, throw, crouch.
+57 2026-11-27 Split screen only: online co-op is taken out. In split screen the picture fills the whole screen, the game has its own difficulty again, each player sets his own look, Player 2 picks up ammunition and has an ammo display, Co-op is in the pause menu, and the line between the views no longer shows over movies. Also a fix for garbled textures where the flashlight shines.

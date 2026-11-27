@@ -322,6 +322,18 @@ bool Changed(const Target& t) {
     return false;
 }
 
+// [local change, The Suffering: Ties That Bind] the GPU writes a colour target (a draw, a clear, a copy): it is the
+// title's picture (again), and the bytes that lie in its memory now are no news (see D3D12Backend::SamplesTarget)
+void DrawnInto(Target& t, uint64_t frame) {
+    if (t.depth) return;
+    if (t.taken) {
+        t.taken = false;
+        t.sig = MemSig(t.data, t.bytes);
+        t.epoch = DirtyEpoch(t.data);
+    }
+    t.rt_frame = frame;
+}
+
 // a lock alone proves nothing, reads lock too: only changed bytes mean the CPU wrote it
 bool LatchCpuWrite(Target& t) {
     uint64_t e = DirtyEpoch(t.data);
@@ -667,6 +679,7 @@ private:
     TargetSlot FindTargetSlot(const Surface& s, bool depth, uint64_t alt);
     uint64_t SizedTargetKey(uint32_t data, bool depth, uint32_t gw, uint32_t gh) const;
     bool TargetStale(uint32_t data) const;
+    bool SamplesTarget(Target& t, const TextureDesc& d, const FormatInfo& fi);  // [local change, The Suffering: Ties That Bind]
     void ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator it);
     bool CreateTargetResource(Target& t, const Surface& s);
     bool CreateTargetView(Target& t);
@@ -1214,6 +1227,15 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth) {
     if (depth) t.bytes = slot.gw * slot.gh * 4;
     t.epoch = DirtyEpoch(slot.data);
     t.sig = MemSig(slot.data, t.bytes);
+    {   // [local change, The Suffering: Ties That Bind] (see SamplesTarget)
+        TextureDesc sd;
+        if (DescribeSurface(s, sd)) t.guest_format = sd.format, t.guest_linear = sd.linear;
+        t.rt_frame = frame_;
+        static int said = 0;
+        if (said++ < 300)
+            LOGI("gpu: a new %s target: %u x %u at %08X (format %02X%s), %zu targets in all", depth ? "depth" : "render", t.gw, t.gh, t.data, t.guest_format,
+                 t.guest_linear ? ", plain rows" : "", targets_.size() + 1);
+    }
     auto& ref = targets_[slot.key] = std::move(t);
     return &ref;
 }
@@ -1232,6 +1254,7 @@ bool D3D12Backend::BindTargets(const State& s) {
     if (rt && ds && (rt->w != ds->w || rt->h != ds->h)) ds = nullptr;
     if (!rt && !ds) return false;
     if (rt) {
+        DrawnInto(*rt, frame_);  // [local change, The Suffering: Ties That Bind]
         if (LatchCpuWrite(*rt)) UploadTarget(*rt, s.rt);
         Transition(rt->res.Get(), rt->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         rt->drawn = true;
@@ -2041,6 +2064,49 @@ void D3D12Backend::ReleasePackTextures() {
     pack_textures_.clear();
 }
 
+// [local change, The Suffering: Ties That Bind] Is the texture a draw samples, whose bytes lie where a render target's
+// lie, that render target?
+// A colour target is known by the address of its bytes alone (TargetMapKey), and it stays in targets_ after the
+// title has let go of it: nothing tells the backend. When the title loads another texture into that memory, a
+// draw that samples the new texture was given the old target's picture: whatever was last rendered there, over
+// the new texture's place, whatever its size and format. (The owner's session of 2026-11-27, alone, in the
+// apartment level after five levels before it: after a vision his pipe and his guns were drawn in green and purple
+// dots, and after the scene that takes the flashlight away and gives it back, the flashlight's light was stripes
+// and dots wherever it fell. The levels render views into textures, for visions, television sets and the
+// flashlight's light, and let go of them with the level; the textures of weapons and lights are loaded as they are
+// needed.) The backend knew this already for compressed data ("DXT data loaded over a target's memory is not it").
+// A target is the title's own picture as long as the GPU draws into it, and its bytes in guest memory do not move
+// while it is one: the GPU's picture is on the host, and the backend notes what it writes there itself (read-backs)
+// and what the processor writes with a lock (LatchCpuWrite). So the memory holds something else when both hold:
+//   - nothing has drawn into the target (BindTargets, a clear, a copy) for more than kStaleFrames frames; and
+//   - its bytes are not those the backend last knew there (the signature of when it was made, read back or
+//     uploaded): something was written there without a lock, as a level's textures are loaded.
+// That texture is then drawn from its own bytes like any other, until the GPU draws into a surface at that address
+// again. The session log says so, once for each target (warn: "gpu: a texture ... where a render target ... was").
+//   S2_GPU_OLD_TARGETS=1: the old target's picture all the same, as before (tests; the log line is written anyway)
+bool D3D12Backend::SamplesTarget(Target& t, const TextureDesc& d, const FormatInfo& fi) {
+    static const bool old = std::getenv("S2_GPU_OLD_TARGETS") != nullptr;
+    if (t.depth) return true;
+    if (t.taken) return old;
+    if (frame_ - t.rt_frame <= kStaleFrames) return true;
+    if (t.now_frame != frame_) {
+        t.now_frame = frame_;
+        t.now_sig = MemSig(t.data, t.bytes);
+    }
+    if (t.now_sig == t.sig) return true;
+    t.taken = true;
+    const FormatInfo& tf = Format(t.guest_format);
+    bool same_layout = d.width == t.gw && d.height == t.gh && d.linear == t.guest_linear && fi.bits == tf.bits;
+    static int said = 0;
+    if (said++ < 200)
+        LOGW("gpu: a texture of %u x %u (format %02X%s, %u levels) is at %08X, where a render target of %u x %u (format %02X%s) was, last drawn into %llu frames ago, and "
+             "its bytes have changed since: the game has let go of that target and loaded this texture there%s. It is drawn from its own bytes, not as the old target's picture",
+             d.width, d.height, d.format, d.linear ? ", plain rows" : "", d.levels, d.data, t.gw, t.gh, t.guest_format, t.guest_linear ? ", plain rows" : "",
+             static_cast<unsigned long long>(frame_ - t.rt_frame), same_layout ? " (laid out as the target was)" : "");
+    if (old) LOGW("gpu: (S2_GPU_OLD_TARGETS: it is drawn as the old target's picture all the same, as before 2026-11-27)");
+    return old;
+}
+
 ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTextures& stages) {
     TexInfo& info = stages.info[stage];
     D3D12_SHADER_RESOURCE_VIEW_DESC& sv = stages.sv[stage];
@@ -2064,7 +2130,7 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     bool box = true;
     if (ext_) ext_->Sample(d.data, fi.depth, stage, alt, stages.k[stage], box);
     auto tit = targets_.find(SizedTargetKey(d.data, fi.depth, d.width, d.height) | alt);
-    if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
+    if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed && SamplesTarget(tit->second, d, fi)) {
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
     return BindGuestTexture(s, stage, d, fi, stages);
@@ -2984,6 +3050,7 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
         }
     }
     t.drawn = true;
+    DrawnInto(t, frame_);  // [local change, The Suffering: Ties That Bind]
 }
 
 // ClearChannels' pipeline for the target format and channel mask, kept in blit_psos_; null when it can't be made
@@ -3146,6 +3213,7 @@ void D3D12Backend::CopyByDraw(const Target& src_t, ID3D12Resource* src_res, D3D1
         Blit(src_res, src_t.fmt, uv, o);
     }
     dst_t.drawn = true;
+    DrawnInto(dst_t, frame_);  // [local change, The Suffering: Ties That Bind]
     bound_rt_ = bound_ds_ = nullptr;
 }
 
@@ -3183,6 +3251,7 @@ void D3D12Backend::CopyByRegion(const Target& src_t, ID3D12Resource* src_res, D3
         cl_->CopyTextureRegion(&dl, dx, dy, 0, &sl, &b);
     }
     dst_t.drawn = true;
+    DrawnInto(dst_t, frame_);  // [local change, The Suffering: Ties That Bind]
     bound_rt_ = bound_ds_ = nullptr;
 }
 
@@ -3353,7 +3422,7 @@ void D3D12Backend::BlitFrame(Target& t, D3D12_CPU_DESCRIPTOR_HANDLE rh) {
     // for Player 2, the title's red for Player 1.
     {
         float h1 = g_first_health.load(), h2 = g_second_health.load();
-        bool halves = split > 0 && g_split_vertical.load(), whole = g_partner_whole.load() && !halves;
+        bool halves = split > 0 && g_split_vertical.load();
         float edge = std::max(1.0f, std::round(vh / 540.0f));
         auto rect = [&](float l, float t, float r, float b, float red, float green, float blue) {
             D3D12_RECT q{LONG(std::lround(l)), LONG(std::lround(t)), LONG(std::lround(r)), LONG(std::lround(b))};
@@ -3385,18 +3454,14 @@ void D3D12Backend::BlitFrame(Target& t, D3D12_CPU_DESCRIPTOR_HANDLE rh) {
             }
         };
         if (halves) {
-            float down = g_flat2d.half_sy;
-            bar(320.0f, 0.5f, down, 40.0f, 1.0f, h2, true);   // Player 2's own, in his half
+            // (each half's layout as the title's 2D goes into it, xdk/d3d8.cpp ForDraw: half as wide, squeezed by
+            // half_sx across about the half's middle, by half_sy down from the top)
+            float down = g_flat2d.half_sy, across = g_flat2d.half_sx, inset = 160.0f * (1.0f - across);
+            bar(320.0f + inset, 0.5f * across, down, 40.0f, 1.0f, h2, true);   // Player 2's own, in his half
             // (the title's insanity meter sits right under its health bar, to about row 80 (its scratchy line is taller than the bar): the partner's bar is
             // below that, so that it never covers the meter)
-            bar(320.0f, 0.5f, down, 86.0f, 0.65f, h1, false);  // ... and his partner's under it
-            bar(0.0f, 0.5f, down, 86.0f, 0.65f, h2, true);     // Player 1's partner, under the title's bar and meter
-        } else if (whole) {
-            // the 2D layer keeps its 4:3 shape in the middle of a wide picture (g_flat2d)
-            float sx = g_flat2d.on ? g_flat2d.sx : 1.0f, sy = g_flat2d.on ? g_flat2d.sy : 1.0f;
-            float from = 320.0f - 320.0f * sx;
-            (void)sy;
-            bar(from, sx, 1.0f, 86.0f, 0.65f, h2, true);
+            bar(320.0f + inset, 0.5f * across, down, 86.0f, 0.65f, h1, false);  // ... and his partner's under it
+            bar(inset, 0.5f * across, down, 86.0f, 0.65f, h2, true);             // Player 1's partner, under the title's bar and meter
         }
         // (the arrows above the partners' heads are drawn smooth in the ImGui layer: the title's GameInfo::ui)
     }

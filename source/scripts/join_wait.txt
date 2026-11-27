@@ -1,4 +1,0 @@
-# the joining copy: main menu, left to Co-op, A, down to Join a friend (the code is pasted by S2_KEYS)
-28 LEFT
-31 A
-36 DOWN

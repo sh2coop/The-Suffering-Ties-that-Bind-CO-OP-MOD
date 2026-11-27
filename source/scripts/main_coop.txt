@@ -1,0 +1,6 @@
+# main menu (focus starts on Continue): left twice to Co-op (the old Friends entry), A opens the Display and Co-op page at its Co-op section; right: split screen on; B
+28 LEFT
+29.2 LEFT
+31 A
+35 RIGHT
+38 B

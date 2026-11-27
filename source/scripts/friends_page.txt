@@ -1,9 +1,0 @@
-# main menu: left to Co-op (the old Friends entry), A opens Play with a Friend; A on Invite a friend; down, A on Join a friend, B
-28 LEFT
-31 A
-36 A
-42 DOWN
-43 DOWN
-44 UP
-46 A
-50 B

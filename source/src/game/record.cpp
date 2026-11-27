@@ -37,10 +37,10 @@
 
 #include "app/app.h"
 #include "core/log.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION  // (built here: detail.cpp uses its deflate too)
 #define STBI_WRITE_NO_STDIO
-#include "third_party/stb_image_write.h"  // (built in net.cpp)
+#include "third_party/stb_image_write.h"
 
-namespace game_menu { bool AddressOnScreen(); }  // menu.cpp: a row with an internet address is up
 namespace game_detail {  // detail.cpp
 bool On();
 std::string PicturesDir();
@@ -280,6 +280,18 @@ void Pictures() {
         bool f9 = GetForegroundWindow() == hwnd && (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
         if (f9 && !f9_before) marks.push_back("F9 was pressed");
         f9_before = f9;
+        {   // tests: S2_TEST_MARK_AT=<seconds>[,<seconds>...] asks for a mark at those times of the session (the times
+            // of a controller script: menus, where the game's frames are not counted)
+            static std::vector<double> at = [] {
+                std::vector<double> list;
+                for (const char* e = std::getenv("S2_TEST_MARK_AT"); e && *e; e = std::strchr(e, ',') ? std::strchr(e, ',') + 1 : nullptr)
+                    list.push_back(std::atof(e));
+                return list;
+            }();
+            double t = logx::Seconds();
+            for (double& s : at)
+                if (s > 0 && t >= s) marks.push_back("a test asked at " + std::to_string(int(s)) + " s"), s = 0;
+        }
         {
             std::lock_guard l(g_mark_lock);
             for (auto& m : g_mark_asked) marks.push_back(std::move(m));
@@ -288,19 +300,6 @@ void Pictures() {
         Clock::time_point now = Clock::now();
         bool due = every > 0 && now - last >= std::chrono::seconds(every);
         if (marks.empty() && !due) continue;
-        // (no picture of a screen that shows an internet address: the folder is sent to other people)
-        if (game_menu::AddressOnScreen()) {
-            static int said = 0;
-            if (said++ < 2) LOGI("pictures: none while the screen shows an internet address");
-            for (const auto& m : marks) LOGR("mark: %s (no picture: the screen shows an internet address)", m.c_str());
-            if (!marks.empty()) {
-                std::lock_guard l(g_mark_lock);
-                g_mark_why = marks.back();
-                g_marks++;
-            }
-            if (due) last = now;
-            continue;
-        }
         Shot full;
         double at = logx::Seconds();
         if (!Grab(hwnd, full)) {

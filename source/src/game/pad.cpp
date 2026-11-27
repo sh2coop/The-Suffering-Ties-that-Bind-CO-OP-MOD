@@ -39,19 +39,11 @@ namespace game_coop {
 void Controller2(input::Pad& p);  // coop.cpp
 bool SecondStart();               // Player 2 is pressing START: the pause is both players'
 void SecondLook(input::Pad& p);   // Player 2's own look settings, on his right stick
-void RemoteLook(input::Pad& p);   // ... a joined player's, applied on the host
 bool PausedBySecond();            // the pause menu is up and Player 2 opened it: it is his to use
 input::Pad SecondRaw();
 }
 namespace game_menu {
-bool Typing();
 bool PauseItemP1Only();  // Player 2 has the pause menu and its focus is on Save, Load or Quit
-}
-namespace game_net {  // net.cpp
-void Init();
-bool RemotePad(input::Pad& p);
-void ClientPad(const input::Pad& p);
-bool PadTaken(const input::Pad& p);
 }
 namespace game_pad {
 namespace {
@@ -122,21 +114,19 @@ void Keyboard(input::Pad& p) {
     if (Key(VK_LEFT)) p.buttons |= 4;
     if (Key(VK_RIGHT)) p.buttons |= 8;
     if (Key(VK_RETURN)) p.buttons |= 16;
-    if (Key(VK_BACK) && !game_menu::Typing()) p.buttons |= 32;  // (it deletes while an address is typed)
-    // (while a code is typed the letters are letters: WOLF-4271)
-    const bool letters = !game_menu::Typing();
-    if (Key(VK_SPACE) || (letters && Key('J'))) p.analog[0] = 255;
-    if (letters && Key('K')) p.analog[1] = 255;
-    if (letters && Key('U')) p.analog[2] = 255;
-    if (letters && Key('I')) p.analog[3] = 255;
-    if (letters && Key('P')) p.analog[4] = 255;
-    if (letters && Key('O')) p.analog[5] = 255;
-    if (letters && Key('Q')) p.analog[6] = 255;
-    if (letters && Key('E')) p.analog[7] = 255;
-    if (letters && Key('W')) p.ly = 32767;
-    if (letters && Key('S')) p.ly = -32767;
-    if (letters && Key('A')) p.lx = -32767;
-    if (letters && Key('D')) p.lx = 32767;
+    if (Key(VK_BACK)) p.buttons |= 32;
+    if (Key(VK_SPACE) || Key('J')) p.analog[0] = 255;
+    if (Key('K')) p.analog[1] = 255;
+    if (Key('U')) p.analog[2] = 255;
+    if (Key('I')) p.analog[3] = 255;
+    if (Key('P')) p.analog[4] = 255;
+    if (Key('O')) p.analog[5] = 255;
+    if (Key('Q')) p.analog[6] = 255;
+    if (Key('E')) p.analog[7] = 255;
+    if (Key('W')) p.ly = 32767;
+    if (Key('S')) p.ly = -32767;
+    if (Key('A')) p.lx = -32767;
+    if (Key('D')) p.lx = 32767;
     if (Key(VK_NUMPAD8)) p.ry = 32767;
     if (Key(VK_NUMPAD2)) p.ry = -32767;
     if (Key(VK_NUMPAD4)) p.rx = -32767;
@@ -208,26 +198,31 @@ void Init() {
 uint64_t Polls() { return g_polls.load(); }
 
 void Hook(int port, input::Pad& p) {
-    static const bool net = (game_net::Init(), true);  // online co-op starts with the first poll
-    (void)net;
+    // A hidden test run (XBE_TEST_HIDDEN, tools/run.ps1) plays its scripts and nothing else: the
+    // controllers plugged into this PC are the owner's, in his hands for whatever he is doing meanwhile. (Found
+    // 2026-11-27: his presses of START, A, B and Y reached a hidden test of the apartment level and paused it.)
+    static const bool hidden = std::getenv("XBE_TEST_HIDDEN") != nullptr;
+    if (hidden) {
+        static bool said = false;
+        if (!said && (p.buttons || p.analog[0] || p.analog[1] || p.analog[2] || p.analog[3] || p.analog[6] || p.analog[7]))
+            said = true, LOGR("pad: a hidden test run: the controllers plugged into this PC are left out (a button was pressed on port %d)", port);
+        p = {};
+    }
     if (port == 1) {
         // a second controller for tests: pad_script2.txt beside the exe plugs one in on port 1 and plays it
         static const std::vector<Press> script2 = LoadScript("pad_script2.txt");
-        if (game_net::RemotePad(p)) {
-            // hosting online with a player in: his controller, from the network, is controller 2 (his own look
-            // settings were applied on his PC)
-        } else if (!script2.empty()) {
+        if (!script2.empty()) {
             p.connected = true;
             double t = Now();
             for (const Press& s : script2)
                 if (t >= s.at && t < s.at + s.len) Apply(s.buttons, p);
         }
-        if (game_net::RemotePad(p)) game_coop::RemoteLook(p);
-        else game_coop::SecondLook(p);
+        game_coop::SecondLook(p);
         game_coop::Controller2(p);  // co-op takes Player 2's teleport hold, START and BACK for itself
         return;
     }
     if (port != 0) return;
+    // (S2_PAD_SCRIPT=<file> names another script file than pad_script.txt)
     static const std::vector<Press> script = LoadScript(std::getenv("S2_PAD_SCRIPT") ? std::getenv("S2_PAD_SCRIPT") : "pad_script.txt");
     g_polls++;
     double t = Now();
@@ -248,13 +243,6 @@ void Hook(int port, input::Pad& p) {
         if (game_menu::PauseItemP1Only()) p.analog[0] = 0;  // an item that is Player 1's is in focus: A does nothing there
     } else if (game_coop::SecondStart()) {
         p.buttons |= 16;  // Player 2's START pauses for both
-    }
-    // Joined to a game online: this controller (and keyboard) goes to the host and this game sees none of it.
-    // S2_PAD_SCRIPT=<file> names another script file than pad_script.txt (two games from one folder in tests).
-    game_net::ClientPad(p);
-    if (game_net::PadTaken(p)) {
-        p = {};
-        p.connected = true;
     }
 }
 }  // namespace game_pad

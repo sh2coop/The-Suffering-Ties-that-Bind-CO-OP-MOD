@@ -1,0 +1,27 @@
+# pause, Options, Display and Co-op; down to Picture shape; up to the section row, right: Co-op; Player 1 look and Player 2 look inverted, Player 2's speed one step down; back to the pause menu
+20 START
+21.5 DOWN
+22.3 DOWN
+23.1 DOWN
+23.9 DOWN
+25 A
+28 DOWN
+29.5 DOWN
+31 A
+34 DOWN
+35 DOWN
+36 DOWN
+37 DOWN
+40 UP
+41 UP
+42 UP
+43.5 RIGHT
+46 DOWN
+47.5 DOWN
+49 RIGHT
+50.5 DOWN
+52 RIGHT
+53.5 DOWN
+55 LEFT
+58 B
+60 B

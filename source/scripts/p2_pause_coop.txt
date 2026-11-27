@@ -1,0 +1,9 @@
+# second controller: Player 2 pauses, down to Co-op (Options, Archives, Co-op), A: his settings page, right: his look inverted; B, B
+40 START 0.2
+42 DOWN
+43 DOWN
+44 DOWN
+45.5 A 0.2
+48.5 RIGHT
+51 B 0.2
+53 B 0.2

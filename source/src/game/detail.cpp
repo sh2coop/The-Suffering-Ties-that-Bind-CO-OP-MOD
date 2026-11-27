@@ -27,7 +27,7 @@
 
 #include "core/log.h"
 
-// (third_party/stb_image_write.h, built in net.cpp: its deflate)
+// (third_party/stb_image_write.h, built in record.cpp: its deflate)
 extern "C" unsigned char* stbi_zlib_compress(unsigned char* data, int data_len, int* out_len, int quality);
 
 namespace game_detail {

@@ -1,4 +1,0 @@
-# the joined player walks forward and turns round
-8 LS 1.5
-9.6 LSR 1.0
-10.8 RSR 1.3

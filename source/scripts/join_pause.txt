@@ -1,2 +1,0 @@
-# the joined player pauses soon after joining and moves down
-7.5 START 0.2

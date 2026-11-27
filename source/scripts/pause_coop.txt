@@ -1,0 +1,12 @@
+# pause, down to the last entry (Co-op), A: the page; B back to the pause menu; B resumes
+20 START
+21.5 DOWN
+22.3 DOWN
+23.1 DOWN
+23.9 DOWN
+24.7 DOWN
+25.5 DOWN
+26.3 DOWN
+27.5 A
+31 B
+34 B

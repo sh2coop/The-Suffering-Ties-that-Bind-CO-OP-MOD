@@ -148,10 +148,8 @@ inline std::atomic<int> g_split_divider{0};
 inline std::atomic<float> g_second_health{-1.0f};
 // ... and the partner's health for each player (decided 2026-11-24: each player sees his partner's health, marked as
 // the partner's; Player 2's bar is blue): a thin bar under the player's own. g_first_health is Player 1's, for the
-// thin bar in Player 2's view. g_partner_whole: one view fills the frame and it is Player 1's while Player 2 plays
-// from another PC: his thin bar goes under the title's own bar of the whole frame.
+// thin bar in Player 2's view.
 inline std::atomic<float> g_first_health{-1.0f};
-inline std::atomic<bool> g_partner_whole{false};
 // The title's own health bar art, for those bars: the part of its HUD texture (256 x 256, DXT5) that holds the bar's
 // strips, columns 0 to 99 and rows 208 to 255, decoded when the game uploads that texture. Rows 0 to 47: as the
 // title has it (red); rows 48 to 95: the same with red and blue swapped (Player 2's). In it the filled strip is

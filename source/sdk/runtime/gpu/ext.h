@@ -36,6 +36,14 @@ struct Target {
     DXGI_FORMAT fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
     float range = 1;         // colour held divided by it until the extension resolves the target
     uint64_t tag = ~0ull;    // the extension's
+    // [local change, The Suffering: Ties That Bind] the surface it was made for (its format, and whether its rows
+    // are plain rows), the frame the GPU last drew into it, the guest bytes' signature as looked at once a frame, and
+    // whether another texture has been found on its memory since (D3D12Backend::SamplesTarget)
+    uint32_t guest_format = 0;
+    bool guest_linear = false;
+    uint64_t rt_frame = 0;
+    uint64_t now_frame = ~0ull, now_sig = 0;
+    bool taken = false;
 };
 
 // what the renderer lends an extension, on the render thread

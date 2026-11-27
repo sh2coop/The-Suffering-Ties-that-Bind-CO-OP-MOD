@@ -1,4 +1,0 @@
-# the joining copy: its controller is Player 2 in the host game (times are this copy's own)
-16 LS 2.5
-21 RSR 1.0
-24 RT 0.8

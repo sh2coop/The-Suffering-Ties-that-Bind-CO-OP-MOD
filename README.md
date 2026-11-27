@@ -1,4 +1,4 @@
-# The Suffering: Ties That Bind - PC port with co-op
+# The Suffering: Ties That Bind - PC port with split-screen co-op
 
 ## [⬇ Download the PC port builder + co-op mod (you need your own Xbox ISO)](https://github.com/sh2coop/The-Suffering-Ties-that-Bind-CO-OP-MOD/archive/refs/heads/main.zip)
 
@@ -7,8 +7,8 @@ The green **Code** button, then "Download ZIP", gives the same thing.
 **This is not the game.** It is the tool that turns your own Xbox disc image of *The Suffering: Ties That Bind* into a
 PC version with the co-op mod, on your PC. No game data is in here, and every player needs his own Xbox image.
 
-An unofficial native PC port of the original Xbox version of *The Suffering: Ties That Bind*, with split-screen and
-online co-op for two players. It is made with the [Xbox XBE Recomp](https://github.com/TGP482/XboxXBE-Recomp) tool:
+An unofficial native PC port of the original Xbox version of *The Suffering: Ties That Bind*, with split-screen
+co-op for two players on one PC. It is made with the [Xbox XBE Recomp](https://github.com/TGP482/XboxXBE-Recomp) tool:
 the game's own code is translated for the PC, on your PC, from your own copy of the game.
 
 > [!NOTE]
@@ -34,38 +34,23 @@ Press **F9** when something looks wrong on the screen: the game saves a full pic
 moment. Only the game's own window is ever pictured, and the keyboard is not recorded. The crash reports are in the
 same folder.
 
-## Co-op
+## Co-op (split screen)
 
-On the main menu, **Co-op** opens "Play with a Friend". (In a game: Options, then "Display and Co-op".)
+Two players on one PC, their views side by side. Controller 1 is Player 1, controller 2 is Player 2.
 
-- **Split screen**: two controllers on one PC. Controller 1 is Player 1.
-- **Online, no port forwarding needed:**
-  1. The host picks "Invite a friend". His screen shows a short code such as `WOLF-4271`. He sends it to his
-     friend, for example over Discord (X or Ctrl+C copies it).
-  2. The friend picks "Join a friend" and enters the code (Y or Ctrl+V pastes it). A few seconds later he is in.
-     While the host is still in his menus, the friend watches them.
+- Turn it on with **Co-op** on the main menu, or in a game: pause, then **Co-op**. The same page has each player's
+  own look: *Player 1 look* and *Player 2 look* (Normal or Inverted) and *Player 2 look speed*. In Player 2's own
+  pause menu, **Co-op** opens his settings.
+- The picture fills the whole screen in split screen, whatever *Picture shape* is set to, so both players get the
+  full width of a wide monitor.
+- Player 1 opens doors, uses things, picks up story items, sets off scenes and saves. Player 2 fights alongside,
+  picks up ammunition and guns (whatever one player picks up of those, the other gets too), has his own health
+  and ammunition on his half of the screen, and comes back beside Player 1 after scenes and level changes.
+- Player 2 stuck or left behind? He holds A+B+X+Y for five seconds and is beside Player 1.
+- Either player can pause; the pause menu says who did, and that player uses it.
+- The game's own difficulty: enemies are as tough as with one player, and the players cannot hurt each other.
 
-  The host's PC runs the game and sends Player 2 his picture and sound. The picture is as sharp as the friend's
-  window, up to 1080 rows, and gets smaller by itself when the connection loses pictures. The limit is
-  `friend_picture_rows` in `Game Files\settings.toml` on the host's PC (480 to 2160); a picture of 1080 rows needs
-  about 20 to 40 Mbit/s of the host's upload.
-
-  When the meeting point cannot be reached, the screens offer address codes instead (numbers like
-  `203.0.113.7:27025`): each player sends the other his code. If a screen says the router gives every connection
-  a new port, codes cannot work for that router: forward UDP port 27025 on the host's router instead, or use a
-  virtual LAN such as Hamachi, and enter the plain address.
-
-What the game sends when you host online: it asks your router to open its port (UPnP), asks a public web service
-for your internet address so it can show it to you, asks two public STUN servers (Google's and Cloudflare's) how
-your connection looks from outside, and tells this project's meeting point (a small service on Cloudflare, its code
-is in `source/meeting-point`) your internet address with the game's port and your PC's address on your own
-network. The meeting point hands those to the friend who types your code, and his address to you, and forgets a
-code 15 minutes after the game stops asking. Picture, sound and controls go straight from one PC to the other.
-
-Player 1 opens doors, uses things, picks up story items, triggers scenes and saves. Player 2 fights alongside, comes
-back beside Player 1 after scenes and level changes, and is brought to Player 1 by holding A+B+X+Y for five seconds
-(keyboard: T). Either player can pause; the pause menu says who did, and that player uses it. While two players
-are in, enemies have 30% more health and hit 30% harder, and the players cannot hurt each other.
+There is no online play: it was tried and taken out again, split screen is the co-op of this port.
 
 ## Also in this port
 

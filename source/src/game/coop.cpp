@@ -42,13 +42,6 @@ namespace game_view {
 void SetSplit(bool on);  // view.cpp
 float Aspect();          // width / height of the picture the frame is shown in
 }
-namespace game_net {  // net.cpp
-int PictureInterval();  // ms between two pictures for the joined player, less a frame's play
-bool Host(bool on);
-bool Hosting();
-bool HostHasPlayer();
-int JoinState();
-}
 namespace game_detail {  // detail.cpp: the record of every frame and object
 bool On();
 void Line(const char* fmt, ...);
@@ -251,21 +244,16 @@ bool OfDouble(const Double& d, uint32_t object);  // its body, or one of the thi
 uint32_t g_no_texture = 0;      // the stand-in texture of Player 2's view camera
 extern const char* g_scene_why;
 bool g_one_view = false;        // a scene: the picture is one view, Player 1's (see Views)
-// Online, Player 2 is somebody else's: his view is not for this screen. Both view cameras then have the whole frame.
-// The engine draws the cameras last to first, each clearing its rectangle: Player 2's view is drawn, the runtime
-// takes the frame as it is then for the stream (gpu::SnapshotForStream at the end of his pass), and Player 1's
-// view is drawn over it. The host plays on a whole screen and the joiner gets a whole picture.
-bool g_stream_view = false;
 extern uint64_t g_down_until;
 extern uint64_t g_spare_at;  // (Spare, below)
 extern bool g_paused_now;
+extern bool g_stopped_now;
 extern std::map<uint32_t, int> g_hurt_us;
 void Downs(X86Context& ctx);
 bool g_screen_pass = false;     // the engine is drawing Player 2's view camera
-void StreamLayer(X86Context& ctx);  // online: the menu system's 2D layer for Player 2, drawn over his view before it is taken
-bool StreamHasLayer();              // ... and whether it was, in the frame's picture for him
 uint32_t FlashlightOf(uint32_t player);  // a Player's Flashlight (the class object; 0: he has none)
 void Flashlights();                      // ... and both players', looked at once a frame for the log
+void TestTorchAgain(X86Context& ctx);
 uint64_t Frames() { return g_frames; }
 
 // Player 2's view camera, wherever it is in the list now (0: none)
@@ -278,24 +266,23 @@ uint32_t ViewCamera2() {
     return 0;
 }
 
-// The two view cameras' rectangles for the state now: side by side; one view (a scene: Player 2's is left out, its
-// texture's word says "nothing shows it"); or both the whole frame (online, see g_stream_view).
+// The two view cameras' rectangles for the state now: side by side, or one view (a scene: Player 2's is left out,
+// its texture's word says "nothing shows it").
 void Rects(X86Context& ctx) {
     uint32_t view = kernel::R32(kViewPointer), second = ViewCamera2();
     if (!view || !second) return;
     uint32_t w = kernel::R32(view + 0xA4), h = kernel::R32(view + 0xA8);
-    bool whole = g_one_view || g_stream_view;
+    bool whole = g_one_view;
     uint32_t first = kernel::R32(view + kViewCameras), ecx = ctx.ecx;
     ctx.ecx = first;
     kernel::CallGuest(ctx, kernel::R32(kernel::R32(first)), {0, 0, whole ? w : w / 2, h});
     ctx.ecx = second;
-    kernel::CallGuest(ctx, kernel::R32(kernel::R32(second)), {g_stream_view ? 0 : w / 2, 0, g_stream_view ? w : w / 2, h});
+    kernel::CallGuest(ctx, kernel::R32(kernel::R32(second)), {w / 2, 0, w / 2, h});
     ctx.ecx = ecx;
     kernel::W16(g_no_texture + 8, g_one_view ? 1 : 2);
     game_view::SetSplit(!whole);
-    gpu::g_stream_snapshot = g_stream_view && !g_one_view;
     if (g_one_view) LOGI("coop: one view because: %s", g_scene_why);
-    LOGI("coop: views: %s", g_one_view ? "one (a scene)" : g_stream_view ? "Player 2's for the stream, Player 1's on the screen" : "side by side");
+    LOGI("coop: views: %s", g_one_view ? "one (a scene)" : "side by side");
 }
 
 void SplitOn(X86Context& ctx) {
@@ -524,23 +511,18 @@ void Dump(const char* what, uint32_t at, uint32_t bytes) {
 //   S2_COOP=1             on, whatever the setting (tests)
 //   S2_COOP_SPAWN=<frame> on from that frame (tests with timed controller scripts)
 uint32_t g_mode_setting = 0;  // 0 off, 1 split screen on this PC
-// Player 2's own look (decided 2026-11-25: each player's settings are his own). The game has one "invert look" and
-// one sensitivity for everybody, the host's. These two belong to Player 2 and are applied to his right stick before
-// the game sees it, on the PC his controller is plugged into (so a joined player's are in his own settings file):
-// up and down swapped or not, and how fast he turns, as a share of the game's own speed.
-uint32_t g_p2_invert = 0;   // 0 as the game has it, 1 the other way up
+// Player 2's own look (decided 2026-11-25: each player's settings are his own; since 2026-11-27 both players set
+// theirs in the menus: "both players need to be able to change inverted options"). The game has one Invert Pitch
+// Axis and one sensitivity, and applies them to every Player: the Pitch state's update (0x2D460) turns the stick's
+// value round when bit 0x10 of the options' switches ([0x392158] +0x50) is set. That one is Player 1's (the game's
+// Controller Settings, or the Player 1 look row of the Display and Co-op page). Player 2's two are applied to his
+// right stick before the game sees it: inverted or not, his own whatever Player 1 has (so his stick is turned round
+// when his choice and the game's differ), and how fast he turns, as a share of the game's own speed.
+uint32_t g_p2_invert = 0;   // 1: Player 2's up and down are inverted
 uint32_t g_p2_speed = 100;  // per cent, 40 to 100
-// A joined player's two settings come with his controller (net.cpp) and are applied here, on the host, so that he
-// can change them from his pause menu while he plays (the menu he sees is the host's): g_remote_* are his for this
-// session; once he has changed one in the menu (g_remote_edited) what his PC sends no longer replaces them.
-uint32_t g_remote_invert = 0, g_remote_speed = 100;
-// A joined player's own volume (per cent, 0 to 100): how loud the host's sound is on HIS PC. g_p2_volume is this
-// PC's setting (used when this PC joins someone); g_remote_volume is the joined player's, as the host's menu shows
-// it. Split screen has one sound for both players, so there it is not shown.
-uint32_t g_p2_volume = 100, g_remote_volume = 100;
-bool g_remote_edited = false;
-void RemoteVolumeFrom(uint32_t volume) {
-    if (!g_remote_edited) g_remote_volume = std::min<uint32_t>(volume, 100);
+bool GameInverted() {
+    constexpr uint32_t kOptions = 0x392158, kSwitches = kOptions + 0x50, kInverted = 0x10, kOptionsMethods = 0x347C44;
+    return mem::IsCommitted(kSwitches) && kernel::R32(kOptions) == kOptionsMethods && (kernel::R32(kSwitches) & kInverted) != 0;
 }
 void LookWith(input::Pad& p, uint32_t invert, uint32_t speed) {
     float k = float(std::clamp<uint32_t>(speed, 40, 100)) / 100.0f;
@@ -548,31 +530,13 @@ void LookWith(input::Pad& p, uint32_t invert, uint32_t speed) {
     p.rx = int16_t(std::clamp(rx, -32767.0f, 32767.0f));
     p.ry = int16_t(std::clamp(ry, -32767.0f, 32767.0f));
 }
-void SecondLook(input::Pad& p) { LookWith(p, g_p2_invert, g_p2_speed); }          // controller 2 on this PC
-void RemoteLook(input::Pad& p) { LookWith(p, g_remote_invert, g_remote_speed); }  // a joined player's, on the host
-void RemoteLookFrom(uint32_t invert, uint32_t speed) {  // what his PC's settings file says (with every pad packet)
-    if (g_remote_edited) return;
-    g_remote_invert = invert ? 1 : 0;
-    g_remote_speed = std::clamp<uint32_t>(speed, 40, 100);
-}
-void RemoteLookForget() { g_remote_edited = false, g_remote_invert = 0, g_remote_speed = 100, g_remote_volume = 100; }
-// Host online (a joiner is sent Player 2's view): the menu's choice for this run. It is not kept in the settings
-// file: a game that opens a port on the router and looks its address up each time it starts, because of a choice
-// made weeks ago, is not what a player expects.
-bool g_host_setting = false;
+void SecondLook(input::Pad& p) { LookWith(p, (g_p2_invert != 0) != GameInverted() ? 1 : 0, g_p2_speed); }  // controller 2
 bool g_wanted = false;  // co-op is on now (the setting, or a test's switch)
-bool g_host_failed = false;  // hosting could not start (the port is taken): not tried again until the setting changes
 
-// net.cpp asks and tells
-bool InLevel() { return g_player_object != 0 && g_player != 0; }  // a level is in play on this PC (it has its Player)
-void RemotePlayer(bool connected) { LOGI("coop: the remote player %s", connected ? "is in" : "is gone"); }
-bool SplitActive() { return g_second_object && ViewCamera2() && !g_one_view && !g_stream_view; }
-bool SceneNow() { return g_second_object && g_one_view; }  // (net.cpp tells a joined player)
-// While the game is paused the joined player is sent the finished frame, the host's whole screen with the pause
-// menu on it, and not his own view: until 2026-11-25 he was sent his view all the time and never saw a pause
-// menu (run pause_join), so he could neither see who had paused nor use the menu when the pause was his.
-bool g_paused_now = false;
-bool StreamView() { return g_second_object && ViewCamera2() && !g_one_view && g_stream_view && !g_paused_now; }
+bool InLevel() { return g_player_object != 0 && g_player != 0; }  // a level is in play (it has its Player)
+bool SplitActive() { return g_second_object && ViewCamera2() && !g_one_view; }
+bool g_paused_now = false;   // the pause menu is up (someone paused)
+bool g_stopped_now = false;  // the game's time is stopped: the pause menu, a movie, a level exit (see the pause, below)
 constexpr uint32_t kPlayerMethods = 0x3381D0;
 constexpr uint32_t kObjectEnd = 0x1849B0;  // (this = engine object)
 
@@ -599,7 +563,6 @@ void SecondGone(X86Context& ctx, const char* why) {
     g_down_until = 0;
     g_one_view = false;
     game_view::SetSplit(false);
-    gpu::g_stream_snapshot = false;
     uint32_t first = view ? kernel::R32(view + kViewCameras) : 0;
     if (first && kernel::R32(view + kViewCount) && kernel::R32(first + 0x2A4) != kernel::R32(view + 0xA4)) {
         uint32_t ecx = ctx.ecx;
@@ -1240,8 +1203,8 @@ void Session(X86Context& ctx, bool wanted) {
 }
 
 // The teleport: Player 2 holds A, B, X and Y together for five seconds and is put beside Player 1 (never the other
-// way). The rule as decided on 2026-11-24 (a keyboard: T for five seconds, which net.cpp turns into the four
-// buttons for a joined player); until 2026-11-25 it was a press of BACK, which is too easy to hit. While all four
+// way). The rule as decided on 2026-11-24 (a keyboard's T for five seconds did the same for a joined player while
+// online co-op existed); until 2026-11-25 it was a press of BACK, which is too easy to hit. While all four
 // are down the game does not see them (no jump, use and reload at once). His START pauses for both players: the
 // game takes START from controller 1 only, so pad.cpp passes it on there. His BACK the game does not see (the map
 // is Player 1's).
@@ -2065,7 +2028,8 @@ struct PassStats {
 };
 PassStats g_pass[2];       // [0] Player 1's view and all else, [1] Player 2's view (filled by DrawVariant)
 PassStats g_pass_last[2];  // ... of the frame before (for the marks)
-std::atomic<int> g_ammo2_rounds{-1}, g_ammo2_clip{0}, g_ammo2_more{0};  // Player 2's ammunition, for his picture (net.cpp)
+std::atomic<int> g_ammo2_rounds{-1}, g_ammo2_clip{0}, g_ammo2_more{0};  // Player 2's ammunition, for his display (Ui)
+std::atomic<int> g_ammo2_shells{0};  // ... 1: his weapon is the shotgun (template 3572), whose rounds the game shows as shells
 
 struct CameraNow {
     float eye[3] = {0, 0, 0}, way[3] = {0, 0, 0};
@@ -2113,6 +2077,8 @@ void DetailFrame(X86Context& ctx) {
         ctx.ecx = ecx;
         bool creature = (kernel::R32(g_second + 0xBC) & 0xC0000) != 0;
         g_ammo2_clip = clip, g_ammo2_more = more, g_ammo2_rounds = clip > 0 && !creature && !Down() ? rounds : -1;
+        uint32_t weapon = Named(g_second, 0x3AC);
+        g_ammo2_shells = weapon && (kernel::R32(weapon + kTemplateWord) & 0xFFFF) == 3572 ? 1 : 0;
         static int said[3] = {-9, -9, -9};
         static uint64_t said_at = 0;
         if ((rounds != said[0] || clip != said[1] || more != said[2]) && g_frames - said_at > 120) {
@@ -2162,7 +2128,7 @@ void DetailFrame(X86Context& ctx) {
         if (n != marks) {
             marks = n;
             LOGR("mark: state at the mark (%s): frame %llu, %s, %s", why.c_str(), (unsigned long long)g_frames,
-                 !in ? "no level in play" : g_one_view ? "one view (a scene)" : g_stream_view ? "Player 2's view goes to the stream" : second ? "split screen" : "one player",
+                 !in ? "no level in play" : g_one_view ? "one view (a scene)" : second ? "split screen" : "one player",
                  g_paused_now ? "paused" : "not paused");
             if (in) {
                 LOGR("mark: Player 1 at %.2f %.2f %.2f facing %.0f, state %08X flags %08X health %.0f; his camera at %.2f %.2f %.2f looking %.2f %.2f %.2f, mode %u (%u on its stack), flags %08X",
@@ -2206,7 +2172,7 @@ void DetailFrame(X86Context& ctx) {
             }
             return std::sqrt(d);
         };
-        bool playing1 = (kernel::R32(g_player + 0xB0) & 1) && !g_one_view && !g_paused_now && !(kernel::R32(g_player + 0xBC) & 0x600000);
+        bool playing1 = (kernel::R32(g_player + 0xB0) & 1) && !g_one_view && !g_stopped_now && !(kernel::R32(g_player + 0xBC) & 0x600000);
         float d1 = c1.there ? apart(c1.eye, g_player_object) : 0;
         // A camera that stays where it is while its player walks off: he has moved more than 3 m in two seconds and
         // it has not moved a hand's breadth. (A following camera moves whenever he does; "far from him" alone needs
@@ -2242,7 +2208,7 @@ void DetailFrame(X86Context& ctx) {
             game_record::Mark("check: Player 1's camera is far from him");
         }
         if (second) {
-            bool playing2 = (kernel::R32(g_second + 0xB0) & 1) && !g_one_view && !g_paused_now && !Down() && !(kernel::R32(g_second + 0xBC) & 0x600000);
+            bool playing2 = (kernel::R32(g_second + 0xB0) & 1) && !g_one_view && !g_stopped_now && !Down() && !(kernel::R32(g_second + 0xBC) & 0x600000);
             float d2 = c2.there ? apart(c2.eye, g_second_object) : 0;
             static uint64_t said5 = 0;
             if (trail2.Still(g_frames, g_second_object, c2, playing2) && g_frames - said5 > 600) {
@@ -2279,14 +2245,14 @@ void DetailFrame(X86Context& ctx) {
     static bool told = false;
     if (!told) {
         told = true;
-        game_detail::Line("f fields: frame, ms since the frame before, views (A one player, S split, T Player 2's goes to the stream, O one view: a scene; p paused) | "
+        game_detail::Line("f fields: frame, ms since the frame before, views (A one player, S split, O one view: a scene; p paused, m the game's time stopped without its pause menu: a movie or a level exit) | "
                           "1 = Player 1: x y z, facing, flags +B0, state +BC, health, insanity meter, class of what he uses (0 none) | c1 = his camera: eye x y z, "
                           "looking x y z, mode, modes on its stack, flags | 2 and c2 = Player 2 and his camera (- when there is none) | d1 = what Player 1's view drew "
                           "(with the 2D): draws, draws with fog, fog on, fog colour, fog start, fog end, ambient, lights, a mark of all its draws' fog and light "
                           "(changes when any changes), target size | d2 = the same for Player 2's view (- in frames it was not drawn) | s = the screen "
                           "flashes (pictures over the whole screen, the red one after an innocent is killed among them): how many, then of up to three "
                           "of them: strength, colour, texture (0 none), class of the object that owns it (P1 or P2: that Player's own, the flash when he is "
-                          "hurt, drawn for him only); L when the game's 2D was drawn into Player 2's picture | t = the flashlights, Player 1's then "
+                          "hurt, drawn for him only) | t = the flashlights, Player 1's then "
                           "Player 2's: flags (1 on, 2 the battery is giving out, 4 the battery is dead) and charge in seconds (- he has none)");
     }
     char line[1200];
@@ -2299,7 +2265,7 @@ void DetailFrame(X86Context& ctx) {
                            c.flags);
     };
     n += std::snprintf(line + n, sizeof line - size_t(n), "f %llu %.1f %c%s", (unsigned long long)g_frames, ms,
-                       g_one_view ? 'O' : g_stream_view && second ? 'T' : second ? 'S' : 'A', g_paused_now ? "p" : "");
+                       g_one_view ? 'O' : second ? 'S' : 'A', g_paused_now ? "p" : g_stopped_now ? "m" : "");
     player(1, g_player, g_player_object, c1);
     if (second) player(2, g_second, g_second_object, c2);
     else n += std::snprintf(line + n, sizeof line - size_t(n), " | 2 - | c2 -");
@@ -2337,9 +2303,8 @@ void DetailFrame(X86Context& ctx) {
             owners.push_back(h);
             // (a Player keeps his entry for good, at strength 0 between hits: his are not announced)
             if (!whose && std::find(owners_before.begin(), owners_before.end(), h) == owners_before.end())
-                LOGI("coop: a picture over the whole screen begins (%u now): strength %.2f, colour %08X, texture %X, owned by an object of class %08X%s", count, strength,
-                     kernel::R32(e + 0x0C), kernel::R32(e + 0x10), cls,
-                     !(g_stream_view && second) ? "" : StreamHasLayer() ? "; the joined player's picture gets it too" : "; the joined player's picture does not get it");
+                LOGI("coop: a picture over the whole screen begins (%u now): strength %.2f, colour %08X, texture %X, owned by an object of class %08X", count, strength,
+                     kernel::R32(e + 0x0C), kernel::R32(e + 0x10), cls);
             // tests: S2_TEST_FLASH_MARK=1 asks for a full-size picture when a Player's own flash comes up (three for each)
             static const bool flash_mark = std::getenv("S2_TEST_FLASH_MARK") != nullptr;
             static float strength_before[3] = {};
@@ -2354,7 +2319,6 @@ void DetailFrame(X86Context& ctx) {
             }
         }
         owners_before.swap(owners);
-        if (g_stream_view && second && StreamHasLayer()) n += std::snprintf(line + n, sizeof line - size_t(n), " L");
     }
     {   // the flashlights: each player's, its flags (1 on, 2 its battery is giving out, 4 the battery is dead) and charge
         n += std::snprintf(line + n, sizeof line - size_t(n), " | t");
@@ -2463,18 +2427,7 @@ void Frame(X86Context& ctx) {
     }
     static const uint64_t off_at = std::getenv("S2_COOP_OFF") ? uint64_t(std::atoll(std::getenv("S2_COOP_OFF"))) : 0;  // tests
     bool test_on = (forced || (spawn_at && g_frames + 61 >= spawn_at)) && !(off_at && g_frames >= off_at);
-    // Hosting online: the game listens while the setting says so, and Player 2 is in while a player is connected.
-    static const bool host_test = std::getenv("S2_COOP_HOST") != nullptr;
-    bool host = g_host_setting || host_test;
-    // (Until 2026-11-26 this read "g_host_failed = host && !Host(host)": with host false the call was never made, so
-    // hosting, once on, stayed on until the game closed. "Stop inviting" and a change to split screen did nothing,
-    // and the invite code went on working: the owner's log suffering2_011 has no "hosting off" after either.)
-    if (host != game_net::Hosting() && !(host && g_host_failed)) {
-        bool done = game_net::Host(host);
-        g_host_failed = host && !done;
-    }
-    if (!host) g_host_failed = false;
-    g_wanted = test_on || (g_mode_setting == 1 && !host) || (host && game_net::HostHasPlayer());
+    g_wanted = test_on || g_mode_setting == 1;
     Session(ctx, g_wanted);
     // tests: S2_TEST_GOD=1: nothing hurts Player 1 (the game's own mark, +0x1E of anything with health), for long
     // scripted runs into a level
@@ -2483,6 +2436,7 @@ void Frame(X86Context& ctx) {
     TestEnemy(ctx);
     TestLineup(ctx);
     TestPut(ctx);
+    TestTorchAgain(ctx);
     TestSpot(ctx);
     TestFace(ctx);
     TestExit(ctx);
@@ -2544,14 +2498,6 @@ void Frame(X86Context& ctx) {
     TestClasses(ctx);
     HitsSecond();
     OrderViews();
-    // (S2_COOP_STREAM_SPLIT=1: the first online build's way, the host's screen split and its right half sent)
-    static const bool stream_split = std::getenv("S2_COOP_STREAM_SPLIT") != nullptr;
-    bool stream = host && game_net::HostHasPlayer() && !stream_split;
-    if (stream != g_stream_view) {
-        g_stream_view = stream;
-        Rects(ctx);
-    }
-    if (!ViewCamera2()) gpu::g_stream_snapshot = false;
     // tests: S2_COOP_HURT2=<frame>,<health> sets Player 2's health at that frame (0: what his death does)
     static const char* hurt2 = std::getenv("S2_COOP_HURT2");
     if (hurt2 && g_second && g_frames == uint64_t(std::atoll(hurt2))) {
@@ -2586,21 +2532,23 @@ void Frame(X86Context& ctx) {
                  kernel::R32(cam + 0x38) & 0xFFFF, count, modes.c_str());
         }
     }
-    {   // the pause menu came up or went: timer flag bit 0 is "the game's time is stopped"
-        uint32_t timer = kernel::R32(0x384B78);
-        // (for more than a moment: the game also stops its time for a frame or two at a security monitor and when
-        // a level starts, which read as "Player 1 paused the game" for 10 to 30 ms in suffering2_011.log)
+    {   // The game's time stops (timer flag bit 0) for its pause menu (flags 0x5081: bit 0x4000 is the menu's), for a
+        // movie (0x1081: the visions; the owner's session 015 at 1393.9 s, a Movie Player's black picture over the
+        // screen and then the film), at a level exit (0x1481), and for a frame or two at a security monitor and when a
+        // level starts (which read as "Player 1 paused the game" for 10 to 30 ms in suffering2_011.log: so only a stop
+        // of more than a moment counts). Until 2026-11-27 every stop was a pause: a movie read as "Player 1 paused the
+        // game", and the line between the two views was drawn over the film ("sometimes the split screen thing shows
+        // over cutscenes when it shouldnt (the line)", the owner). While the time is stopped the views behind are
+        // still pictures: no line between them, no partner bars, no arrow, no ammunition for Player 2 (below).
+        uint32_t timer = kernel::R32(0x384B78), flags = timer ? kernel::R32(timer + 0xA0) : 0;
         static int stopped = 0;
-        stopped = timer && (kernel::R32(timer + 0xA0) & 1) && g_second_object ? stopped + 1 : 0;
-        bool paused = stopped >= 6;
-        if (paused != g_paused_now) {
-            g_paused_now = paused;
-            if (g_stream_view) gpu::g_stream_snapshot = !paused && !g_one_view && ViewCamera2();
-        }
-        // In a scene the joined player's picture is this PC's finished frame. The renderer's read-back of a finished
-        // frame is the console's 640 x 480; when his picture is a large one (gpu::g_stream_snapshot_rows, net.cpp) it
-        // is taken at that size instead, at the end of the camera loop (0x1B83E0, below).
-        if (g_stream_view && ViewCamera2() && !paused) gpu::g_stream_snapshot = !g_one_view || gpu::g_stream_snapshot_rows.load() > 0;
+        stopped = timer && (flags & 1) && g_second_object ? stopped + 1 : 0;
+        bool still = stopped >= 6, paused = still && (flags & 0x4000);
+        static bool told = false;  // (a stop without the pause menu was told: its end is told too)
+        if (still && !g_stopped_now && !paused) told = true, LOGI("coop: the game's time stops without its pause menu: a movie, or a level exit (timer flags %X)", flags);
+        if (!still && g_stopped_now && told) told = false, LOGI("coop: the game's time goes on (timer flags %X)", flags);
+        g_stopped_now = still;
+        g_paused_now = paused;
         int before = g_pauser.load();
         if (paused && !before) {
             bool second = std::chrono::steady_clock::now() - g_start2_at < std::chrono::milliseconds(700);
@@ -2632,26 +2580,23 @@ void Frame(X86Context& ctx) {
             LOGR("test: a mode 0 is put on Player 2's Camera: nobody moves it now");
         }
     }
-    if (ViewCamera2() && !g_one_view) {
-        if (!g_stream_view) {  // this frame's picture: a bar where the two views meet
-            gpu::g_split_vertical = true;
-            gpu::g_split_divider = 2;
-        }
+    if (ViewCamera2() && !g_one_view && !g_stopped_now) {
+        // this frame's picture: a bar where the two views meet
+        gpu::g_split_vertical = true;
+        gpu::g_split_divider = 2;
         // ... and Player 2's health bar, drawn by the runtime where his half's HUD would have it (the game's HUD
-        // keeps one set of values, Player 1's); online it is drawn into the picture sent (net.cpp). A Player's
-        // health is the float at +0x16, of the most at +0x1A.
-        // Player 1 has 30% more health than Player 2 (decided 2026-11-25, with "Player 1's death always ends it"):
-        // Player 2's most is Player 1's divided by 1.3, so that nothing of Player 1's (his saves, his HUD, his
-        // pickups) changes and playing alone stays as it was. Kept so every frame: the game sets a Player's most
-        // itself at times.
+        // keeps one set of values, Player 1's). A Player's health is the float at +0x16, of the most at +0x1A.
+        // Player 2's most is Player 1's: the game's own difficulty (until 2026-11-27 it was Player 1's divided by
+        // 1.3; the owner then: "lets bring that back down to 0 and just have the game be regular difficulty"). Kept
+        // so every frame: the game sets a Player's most itself at times, and Player 1's grows with the story.
         if (g_second && g_player) {
-            float most1 = ReadF(g_player + 0x1A), most2 = ReadF(g_second + 0x1A), want = most1 / 1.3f;
+            float most1 = ReadF(g_player + 0x1A), most2 = ReadF(g_second + 0x1A), want = most1;
             if (most1 > 0 && std::fabs(most2 - want) > 0.5f) {
                 float health = ReadF(g_second + 0x16);
                 if (most2 > 0 && !g_down_until) health = std::min(want, health * want / most2);  // the same share of it
                 std::memcpy(kernel::HostPtr(g_second + 0x1A), &want, 4);
                 if (!g_down_until) std::memcpy(kernel::HostPtr(g_second + 0x16), &health, 4);
-                LOGI("coop: Player 2's most health is %.0f (Player 1's %.0f / 1.3)", want, most1);
+                LOGI("coop: Player 2's most health is %.0f (Player 1's)", want);
             }
         }
         float most = g_second ? ReadF(g_second + 0x1A) : 0;
@@ -2659,7 +2604,6 @@ void Frame(X86Context& ctx) {
         // ... and each player's partner's, thin, under his own (Player 2's blue): Player 1's health for Player 2's view
         float most1 = g_player ? ReadF(g_player + 0x1A) : 0;
         gpu::g_first_health = most1 > 0 ? std::clamp(ReadF(g_player + 0x16) / most1, 0.0f, 1.0f) : -1.0f;
-        gpu::g_partner_whole = g_stream_view && !g_paused_now;
         // The arrow above the partner's head (decided 2026-11-24: tiny, the game's orange, through walls, no name
         // tags). Where the partner's head is in each player's view: the view camera's object gives the eye
         // (matrix at +0x14: right, up, forward, place), its distance at +0x280 the angle (half the picture's width
@@ -2670,7 +2614,7 @@ void Frame(X86Context& ctx) {
             uint32_t view = kernel::R32(kViewPointer), cameras = view ? kernel::R32(view + kViewCameras) : 0;
             uint32_t cams[2] = {cameras, ViewCamera2()};
             uint32_t partner[2] = {g_second_object, g_player_object};
-            float shape = game_view::Aspect() * (g_stream_view ? 1.0f : 0.5f);
+            float shape = game_view::Aspect() * 0.5f;
             for (int v = 0; v < 2; v++) {
                 float x = -1, y = -1;
                 uint32_t eye = cams[v] && mem::IsCommitted(cams[v] + 0x284) ? kernel::R32(cams[v] + 0xA0) : 0;
@@ -2726,7 +2670,6 @@ void Frame(X86Context& ctx) {
         gpu::g_partner_arrow[0].x = gpu::g_partner_arrow[1].x = -1.0f;
         gpu::g_second_health = -1.0f;
         gpu::g_first_health = -1.0f;
-        gpu::g_partner_whole = false;
     }
     {   // the record: what each player is doing, when it changes (the Player's state word, +0xBC)
         static uint32_t before[2] = {0, 0};
@@ -2827,7 +2770,7 @@ void Frame(X86Context& ctx) {
             std::snprintf(two, sizeof two, "; Player 2 %08X %08X meter %.0f", kernel::R32(g_second + 0xB0), kernel::R32(g_second + 0xBC), ReadF(g_second + 0x48A));
         LOGI("state: Player 1 %08X %08X meter %.0f morality %.0f%s; %u view cameras, %s", kernel::R32(g_player + 0xB0), kernel::R32(g_player + 0xBC),
              ReadF(g_player + 0x48A), ReadF(g_player + 0x482), two, view ? kernel::R32(view + kViewCount) : 0,
-             g_one_view ? "one view" : g_stream_view ? "a view for the stream" : g_second_object ? "split" : "alone");
+             g_one_view ? "one view" : g_second_object ? "split" : "alone");
     }
     if (g_frames % 60 == 0 && !g_second_object && g_player_object && g_player && InLevel()) {  // (alone: one line a second too)
         LOGI("coop: player 1 at %.2f %.2f %.2f facing %.0f health %.0f, alone", ReadF(g_player_object + kPosition), ReadF(g_player_object + kPosition + 4),
@@ -3137,49 +3080,17 @@ X86_FUNC(sub_001FB290) {
     if (game_coop::g_screen_pass && !kernel::R32(ctx.ecx + 0xE0)) {
         game_coop::g_screen_pass = false;
         // (S2_DRAW_TRACE: where in the frame's draws Player 2's pass ends)
-        if (gpu::g_trace_2d.load() > 0) LOGI("draw trace: -- Player 2's pass ends here (the renderer goes back to the screen); stream view %d", int(game_coop::g_stream_view));
-        if (game_coop::g_stream_view && !game_coop::g_one_view && !game_coop::g_paused_now) {
-            game_coop::StreamLayer(ctx);  // the menu system's 2D for Player 2, over his view
-            gpu::SnapshotForStream();     // (Player 1's view comes over it)
-        }
+        if (gpu::g_trace_2d.load() > 0) LOGI("draw trace: -- Player 2's pass ends here (the renderer goes back to the screen)");
         kernel::Return(ctx, 0, 0);
         return;
     }
     __imp__sub_001FB290(ctx, base);
 }
 
-// The camera loop (0x1B83E0: the view's cameras from the last to the first, the screen). Online, Player 2's view is
-// drawn for the stream alone, which carries about thirty pictures a second: it is drawn when the next picture is due
-// and left out of the other frames (the view then reads as one camera for the length of the loop).
-// Why: the host draws the world twice a frame while a player is joined. Measured 2026-11-25 on the kitchen level,
-// uncapped: 4.3 ms a frame alone, 6.8 ms hosting, the same 2 ms more at 1280 x 720 as at 3840 x 1600 (the game's own
-// work for the second view, not the picture's size). In a busy scene that took a host under his 120 frames a second
-// and the frames came unevenly ("I was stuttering a little bit too"). S2_COOP_EVERY_FRAME=1: as before.
+// The camera loop (0x1B83E0: the view's cameras from the last to the first, the screen).
 X86_EXTERN_FUNC(__imp__sub_001B83E0);
 X86_FUNC(sub_001B83E0) {
     using namespace game_coop;
-    static const bool every = std::getenv("S2_COOP_EVERY_FRAME") != nullptr;
-    uint32_t view = kernel::R32(kViewPointer);
-    uint32_t cameras = view ? kernel::R32(view + kViewCameras) : 0, count = view ? kernel::R32(view + kViewCount) : 0;
-    bool streams = !every && StreamView() && g_no_texture && cameras && count == 2 &&
-                   kernel::R32(cameras + kViewCameraBytes + kVcTexture) == g_no_texture;
-    if (streams) {
-        using StreamClock = std::chrono::steady_clock;
-        // (net.cpp sends one at most that often: thirty a second until 2026-11-27, sixty since, when the setting says so)
-        const auto kPictureEvery = std::chrono::milliseconds(game_net::PictureInterval() + 1);
-        static StreamClock::time_point drawn{};
-        static uint32_t skipped = 0, drew = 0;
-        StreamClock::time_point now = StreamClock::now();
-        if (now - drawn < kPictureEvery) {
-            skipped++;
-            kernel::W32(view + kViewCount, 1);
-            __imp__sub_001B83E0(ctx, base);
-            if (kernel::R32(kViewPointer) == view && kernel::R32(view + kViewCount) == 1) kernel::W32(view + kViewCount, count);
-            return;
-        }
-        drawn = now;
-        if (++drew % 600 == 1) LOGI("coop: Player 2's view for the stream: drawn %u times, left out of %u frames", drew, skipped);
-    }
     // The stand-in bodies that are out, exactly where their owners are now. Once for each time Doubles has looked
     // them over: a frame drawn while a level is taken down or loaded must not touch what may be gone.
     if (game_coop::g_doubles_fresh) {
@@ -3187,17 +3098,6 @@ X86_FUNC(sub_001B83E0) {
         PinDoubles(ctx);
     }
     __imp__sub_001B83E0(ctx, base);
-    // a scene online with a large picture for the joined player: this frame, finished, as often as his pictures go
-    if (g_stream_view && g_one_view && !g_paused_now && ViewCamera2() && gpu::g_stream_snapshot.load() && gpu::g_stream_snapshot_rows.load() > 0) {
-        static std::chrono::steady_clock::time_point taken{};
-        static uint32_t count = 0;
-        auto now = std::chrono::steady_clock::now();
-        if (now - taken >= std::chrono::milliseconds(game_net::PictureInterval() + 1)) {
-            taken = now;
-            gpu::SnapshotForStream();
-            if (++count % 900 == 1) LOGI("coop: a scene: the joined player's picture is this PC's finished frame, taken at his picture's size (%u so far)", count);
-        }
-    }
 }
 
 // A view camera ends (this = view camera): it releases its texture. Player 2's has none to release.
@@ -3207,7 +3107,6 @@ X86_FUNC(sub_001BB8C0) {
         kernel::W32(ctx.ecx + game_coop::kVcTexture, 0);
         LOGI("coop: Player 2's view camera %08X ends", ctx.ecx);
         game_view::SetSplit(false);
-        gpu::g_stream_snapshot = false;
     }
     __imp__sub_001BB8C0(ctx, base);
 }
@@ -3274,7 +3173,7 @@ constexpr uint32_t kTimer = 0x384B78, kTimerFlags = 0xA0, kTimeStopped = 1;
 
 bool TwoLayers() {
     uint32_t timer = kernel::R32(kTimer);
-    return g_second && ViewCamera2() && !g_one_view && !g_stream_view && timer && !(kernel::R32(timer + kTimerFlags) & kTimeStopped);
+    return g_second && ViewCamera2() && !g_one_view && timer && !(kernel::R32(timer + kTimerFlags) & kTimeStopped);
 }
 
 struct Layer {
@@ -3296,68 +3195,7 @@ struct Layer {
 };
 bool g_layer_inside = false;  // the second pass is running (it comes back into the hooks)
 
-// Online, the joined player's picture is his view taken inside the frame, at the end of his pass, before any 2D is
-// drawn: nothing of the game's 2D reached him. Reported 2026-11-26: "player 2 didn't get the overlay when moral
-// decisions are made like when u kill an innocent person". That overlay is a red picture over the screen for about
-// three seconds, one of the game's screen flashes, which the game draws once over the finished frame (so with two
-// views side by side it lies across both halves as one picture, and the host alone had it online). Now two things
-// are drawn for Player 2 over his view right before that view is taken: the screen flashes, and the menu system's
-// 2D (the manager's method +0x20: the crosshair, the messages and hints, the prompts) with him as the player, as
-// for the right half of a split screen. The overlay with Player 1's health and ammunition (0x22B560) is not:
-// Player 2's own are drawn into his picture by net.cpp.
-//   S2_COOP_NO_STREAM_LAYER=1: as before (tests)
-std::atomic<bool> g_stream_layer{false};
-bool StreamHasLayer() { return g_stream_layer.load(); }
-bool g_flash_for_second = false;  // the screen flashes are being drawn into the picture for a joined Player 2
-bool g_flash_inside = false;      // one of them is being drawn into a half by the hook of 0x1131F0
-void StreamLayer(X86Context& ctx) {
-    static const bool off = std::getenv("S2_COOP_NO_STREAM_LAYER") != nullptr;
-    uint32_t manager = kernel::R32(0x391D64);
-    if (off || !manager || !g_second || !mem::IsCommitted(g_second + 0x490) || g_layer_inside) {
-        g_stream_layer = false;
-        return;
-    }
-    uint32_t ecx = ctx.ecx, eax = ctx.eax;
-    uint32_t draw = kernel::R32(kernel::R32(manager) + 0x20);
-    g_layer_inside = true;
-    {
-        AsSecond as(g_second);
-        Layer whole(0);
-        // (these draws are the 2D layer's although the world's are all around them: the runtime squeezes them like
-        // the layer when the picture is not 4:3, so that the letters keep their shape on a wide screen)
-        gpu::g_flat2d.layer_now = true;
-        // While a view is drawn the second texture stage is on: its colour operation is "add" (7), written straight
-        // into the XDK's stage states at 0x286C80 with the "stages changed" bit 0x800 of 0x286BC8, at the start of
-        // each view (0x1B848F). The game's 2D routines set the first stage only and count on the second being off
-        // (1), which the post step does before the frame's own 2D (0x1E6ABB; the sprites inside a view do the same
-        // around their draws, 0x1ECFE7 and 0x1ED00F). Drawn here without that, the red picture came out half again
-        // as bright as on Player 1's screen: the second stage added its grey to it (found by setting every render
-        // state of the two draws side by side, S2_DRAW_TRACE).
-        constexpr uint32_t kStagesChanged = 0x286BC8, kStage1ColourOp = 0x286C80;
-        uint32_t stage1 = kernel::R32(kStage1ColourOp);
-        kernel::W32(kStagesChanged, kernel::R32(kStagesChanged) | 0x800);
-        kernel::W32(kStage1ColourOp, 1);
-        // First the pictures over the screen, as in the game's own order: the screen flashes (this = 0x391C70, their
-        // list at +6, 0x16 bytes each, count at +0xE; 0x1134C0 drops the entries whose owner is gone, which it would
-        // do later in the frame anyway, and draws each of the rest as one picture across the whole view, 0x1131F0,
-        // which changes nothing). The game draws them once, over the finished frame (its method at 0x114D30, when
-        // [0x393364] bit 1 is set): the red picture after an innocent is killed is one of them.
-        if (kernel::R32(0x393364) & 2) {
-            g_flash_for_second = true;  // (Player 1's own flash is left out: the hook of 0x1131F0 below)
-            ctx.ecx = 0x391C70;
-            kernel::CallGuest(ctx, 0x1134C0, {});
-            g_flash_for_second = false;
-        }
-        ctx.ecx = manager;
-        kernel::CallGuest(ctx, draw, {});
-        gpu::g_flat2d.layer_now = false;
-        kernel::W32(kStagesChanged, kernel::R32(kStagesChanged) | 0x800);
-        kernel::W32(kStage1ColourOp, stage1);
-    }
-    g_layer_inside = false;
-    ctx.ecx = ecx, ctx.eax = eax;
-    if (!g_stream_layer.exchange(true)) LOGI("coop: online: the game's 2D is drawn for Player 2 over his view before it is taken (the screen flashes, and the menu system's layer: crosshair, messages, prompts)");
-}
+bool g_flash_inside = false;      // a screen flash is being drawn into a half by the hook of 0x1131F0
 }  // namespace game_coop
 
 // The screen flashes, each player's own. A screen flash is a picture or a colour across the whole view (this =
@@ -3370,8 +3208,6 @@ void StreamLayer(X86Context& ctx) {
 // two players the one's hurt flash lay over the other's view as well.
 //   - Two views side by side: a Player's own flash goes into his half only (the runtime puts the whole-picture
 //     draw onto the half: gpu::g_flat2d.half with cover). The game's own stay across the whole frame.
-//   - Online: the host's screen leaves out Player 2's flash, and the picture taken for Player 2 (StreamLayer)
-//     leaves out Player 1's.
 //   S2_COOP_FLASH_ALL=1: as the game has it (tests)
 namespace game_coop {
 // 1 or 2: the entry is that Player's own flash; 0: the game's
@@ -3397,13 +3233,7 @@ X86_FUNC(sub_001131F0) {
     static bool told[3] = {};
     if (!told[whose]) {
         told[whose] = true;
-        LOGI("coop: Player %d's own screen flash (when he is hurt) is drawn for him only: %s", whose,
-             g_stream_view ? "online, on the host's screen for Player 1 and in the joined player's picture for Player 2" : "in his half of the screen");
-    }
-    if (g_stream_view) {  // online: the screen is Player 1's view, the picture taken inside the frame is Player 2's
-        if (whose == (g_flash_for_second ? 2 : 1)) __imp__sub_001131F0(ctx, base);
-        else kernel::Return(ctx, 0, 1);
-        return;
+        LOGI("coop: Player %d's own screen flash (when he is hurt) is drawn for him only, in his half of the screen", whose);
     }
     if (!TwoLayers()) {  // a menu has the screen: as the game has it
         __imp__sub_001131F0(ctx, base);
@@ -3567,7 +3397,11 @@ X86_FUNC(sub_00108120) {
 // lists what he can use that way. Touches between Player 2 and these classes are not delivered, either way round:
 // he sets off no trigger and picks nothing up (the rule of 2026-11-23: only Player 1 opens doors, uses and picks up,
 // sets off triggers and scenes). Since 2026-11-26 he climbs ladders, vaults ledges and pushes boxes: see "what Player
-// 2 can use", below. (A solid thing also tells its touch a second way, 0x1706F0, which is not filtered: that is how
+// 2 can use", below. Since 2026-11-27 he picks up ammunition ("player 2 couldnt pick up ammo", the owner): the guns
+// that lie about or that enemies drop (Ranged Weapon: picking one up gives its rounds, a shotgun 16 shells of item
+// 3587, class Missile Item, and the gun when it is new to him), the rounds and grenades that lie about (Missile
+// Item), and the boxes things are kept in (Ammo Box: guns, rounds, a flashlight). Player 1 is given whatever Player 2
+// picks up (pickups, below), as Player 2 is given what Player 1 picks up: nothing is Player 2's alone. (A solid thing also tells its touch a second way, 0x1706F0, which is not filtered: that is how
 // he has opened doors and climbed ladders all along.)
 namespace game_coop {
 constexpr uint32_t kTemplates = 0x384BA4;  // the template table: chunks of 1024 at +0, entry size +0x14, count +0x18
@@ -3592,9 +3426,8 @@ bool NotForSecond(uint32_t cls) {
         case 0x96144939:  // Health Threshold Trigger
         case 0x4286A498:  // Edge Passage
         case 0xE66D645E:  // Teleport Pad
-        // things to pick up
-        case 0x202383E5:  // Ammo Box
-        case 0x9710D816:  // Ranged Weapon
+        // things to pick up (Ammo Box 0x202383E5, Ranged Weapon 0x9710D816 and Missile Item 0xFE9F718D were here until
+        // 2026-11-27: Player 2 picks up ammunition)
         case 0x22E48520:  // Melee Weapon
         case 0x5ED5D552:  // Quest Item Pickup
         case 0x19F64171:  // Health Bonus Item
@@ -3606,7 +3439,6 @@ bool NotForSecond(uint32_t cls) {
         case 0x8AE7D2D4:  // Note Item
         case 0xA2C3F6A6:  // Map Item
         case 0xCF3A3FA5:  // Flashlight
-        case 0xFE9F718D:  // Missile Item
         // things to use
         // (Ladder 0x671882A1, Clamber Point 0xEC32498A = a ledge to vault, and Pushable 0x5FEBD8E9 were here until
         // 2026-11-26: see "what Player 2 can use", below)
@@ -3714,7 +3546,9 @@ X86_FUNC(sub_001706F0) {
 // 0x153A0 (this = Player, item's template, how many) gives a Player an item: the inventory entry (0x11540), and for
 // a weapon he has no better use for, the weapon in his hands. Every pickup comes through it (13 callers). When it
 // is Player 1 who gets a combat item, Player 2 is given the same (the rule of 2026-11-23); keys, notes, maps and
-// archive pages stay Player 1's.
+// archive pages stay Player 1's. When it is Player 2 who picks something up (ammunition, since 2026-11-27: see "Player
+// 1 only" above), Player 1 is given the same, whatever it is (a box can hold more than rounds, and nothing may be
+// lost to Player 1, whose game is the one that is saved): whoever gets to it first, both have it.
 namespace game_coop {
 uint32_t ClassOfTemplate(uint32_t index) {
     uint32_t table = kernel::R32(kTemplates);
@@ -3739,8 +3573,23 @@ bool ForBoth(uint32_t cls) {
 X86_EXTERN_FUNC(__imp__sub_000153A0);
 X86_FUNC(sub_000153A0) {
     uint32_t player = ctx.ecx, item = kernel::R32(ctx.esp + 4), count = kernel::R32(ctx.esp + 8);
+    // (the co-op code's own gives, the copies of Player 1's things for Player 2, come through here too: a call from the
+    // runtime returns to 0xFFFFFFF0, cpu/dispatch.cpp CallGuest; the game's own return into its code)
+    bool ours = kernel::R32(ctx.esp) == 0xFFFFFFF0u;
     __imp__sub_000153A0(ctx, base);
     static bool inside = false;
+    if (!inside && !ours && game_coop::g_second && game_coop::g_player && player == game_coop::g_second) {
+        uint32_t cls = game_coop::ClassOfTemplate(item);
+        inside = true;
+        uint32_t ecx = ctx.ecx, eax = ctx.eax;
+        ctx.ecx = game_coop::g_player;
+        kernel::CallGuest(ctx, 0x153A0, {item, count});
+        ctx.ecx = ecx;
+        ctx.eax = eax;
+        inside = false;
+        LOGI("coop: Player 2 picks up item %u (class %08X) x%d; Player 1 is given the same", item, cls, int32_t(count));
+        return;
+    }
     if (inside || !game_coop::g_second || player != game_coop::g_player) return;
     uint32_t cls = game_coop::ClassOfTemplate(item);
     bool both = game_coop::ForBoth(cls);
@@ -3857,18 +3706,17 @@ X86_FUNC(sub_00028E00) {
                  game_coop::CallersOf(ctx).c_str());
         }
     }
-    // Co-op rules (decided 2026-11-24): the two players do not hurt each other, and what is not a Player hurts
-    // them 30% more while both are in (S2_COOP_NO_HARDER=1 leaves the amounts alone, for tests).
-    static const bool plain = std::getenv("S2_COOP_NO_HARDER") != nullptr;
+    // Co-op rules (decided 2026-11-24): the two players do not hurt each other. What is not a Player hurts them as
+    // it does in the game alone (until 2026-11-27 it was 30% more while both were in; the owner then: "lets bring
+    // that back down to 0 and just have the game be regular difficulty").
     if (game_coop::g_second_object && mem::IsCommitted(ctx.esp + 8)) {
         uint32_t by = game_coop::g_hit_by;
         bool partner = by && (by == game_coop::g_player_object || by == game_coop::g_second_object) &&
                        mem::IsCommitted(ctx.ecx + 8) && kernel::R32(ctx.ecx + 4) != by;
-        float amount;
-        std::memcpy(&amount, kernel::HostPtr(ctx.esp + 4), 4);
-        if (partner || game_coop::DoublesThing(by)) amount = 0;  // (nor does a stand-in body hurt anybody: its blows are for show)
-        else if (!plain && amount > 0) amount *= 1.3f;
-        std::memcpy(kernel::HostPtr(ctx.esp + 4), &amount, 4);
+        if (partner || game_coop::DoublesThing(by)) {  // (nor does a stand-in body hurt anybody: its blows are for show)
+            float none = 0;
+            std::memcpy(kernel::HostPtr(ctx.esp + 4), &none, 4);
+        }
     }
     __imp__sub_00028E00(ctx, base);
     game_coop::g_hit_by = before;
@@ -3889,17 +3737,8 @@ X86_FUNC(sub_0016AF00) {
                  by && mem::IsCommitted(by + 0x110) ? game_coop::WhoIs(by).c_str() : "nothing named", by, game_coop::CallersOf(ctx).c_str());
         }
     }
-    // ... and enemies have 30% more health while both players are in: what a Player takes off anything that is not
-    // a Player is divided by 1.3 (the same thing, without touching every enemy's health and its bars)
+    // (Enemies had 30% more health while both players were in, until 2026-11-27: the game's own difficulty since.)
     {
-        static const bool plain = std::getenv("S2_COOP_NO_HARDER") != nullptr;
-        uint32_t victim = mem::IsCommitted(ctx.ecx + 8) ? kernel::R32(ctx.ecx + 4) : 0;
-        bool by_player = by && (by == game_coop::g_player_object || by == game_coop::g_second_object);
-        bool is_player = victim == game_coop::g_player_object || victim == game_coop::g_second_object;
-        if (!plain && game_coop::g_second_object && by_player && victim && !is_player && amount > 0) {
-            amount /= 1.3f;
-            std::memcpy(kernel::HostPtr(ctx.esp + 4), &amount, 4);
-        }
         // nothing is hurt by a stand-in body or by what it holds
         if (amount > 0 && game_coop::DoublesThing(by ? by : game_coop::g_hit_by)) {
             amount = 0;
@@ -4878,23 +4717,98 @@ void TestCall(X86Context& ctx) {
 }
 }  // namespace game_coop
 
-// ---- the arrow above the partner's head, on the screen ------------------------------------------------------------
+// ---- the arrow above the partner's head, and Player 2's ammunition, on the screen -----------------------------------
 // Drawn in the runtime's ImGui layer, over the finished frame (through walls), as a smooth triangle at the window's
 // own resolution (the first version was six stacked bars and looked pixelated). Orange with a dark edge; kArrowAlpha
-// is how solid it is. The joined player's is drawn into his picture by net.cpp.
+// is how solid it is.
 #include <imgui.h>
 namespace game_coop {
 constexpr float kArrowAlpha = 0.6f;  // (decided 2026-11-25: orange, see-through at 60%)
+ImFont* g_number_font = nullptr;     // the numbers of Player 2's ammunition (Fonts, below)
+
+// The font for the numbers: Windows' own Arial, digits only, large enough to be drawn smaller and stay sharp. Made
+// once, before the first frame (GameInfo::window): the renderer builds its font texture with the first frame.
+void Fonts() {
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.Fonts->Fonts.empty()) io.Fonts->AddFontDefault();  // (the first font stays the runtime's own, for its overlay)
+    static const ImWchar digits[] = {0x0020, 0x0020, 0x0030, 0x0039, 0};
+    char path[512] = {};
+    const char* windir = std::getenv("WINDIR");
+    std::snprintf(path, sizeof path, "%s\\Fonts\\arial.ttf", windir ? windir : "C:\\Windows");
+    if (FILE* f = std::fopen(path, "rb")) {
+        std::fclose(f);
+        g_number_font = io.Fonts->AddFontFromFileTTF(path, 64.0f, nullptr, digits);
+    }
+    LOGI("coop: the font for Player 2's ammunition: %s", g_number_font ? path : "none (the runtime's own, larger)");
+}
+
+// Player 2's ammunition in his half, where the game's own HUD has Player 1's in the left half (asked for
+// 2026-11-26, "he also doesnt have an ammo hud", and again 2026-11-27 for split screen: the game's HUD keeps one set
+// of numbers, Player 1's, and these are read from Player 2 himself, DetailFrame): a mark for each round in his
+// weapon, the clip's empty places faint, and in a box the number the game shows there, what is in the weapon and
+// what he carries for it. Placed and sized as the game's own for Player 1, measured in the owner's picture of
+// 2026-11-27 (mark_00170.4 of session 015, 3840 x 1600, the shotgun) and in a test's (split_ammo5, 1920 x 800, the
+// pistol), in the 640 x 480 layout of a half: the box from 525 to 553 across and 39 to 56 down, its number's digits
+// half its height, 2.7 from its left edge; the rounds end 2 short of the box. A shotgun's are red shells with a
+// brass base, 8.1 apart, 5.6 wide, 40.5 to 60.6 down; the others' silver rounds, 4.8 apart, 2.7 wide, 39 to 57 down.
+void AmmoOfSecond(ImDrawList* draw, float left, float top, float vw, float vh) {
+    int rounds = g_ammo2_rounds.load(), clip = g_ammo2_clip.load(), more = g_ammo2_more.load();
+    bool shells = g_ammo2_shells.load() != 0;
+    if (rounds < 0 || clip <= 0) return;
+    constexpr float kOverscan = 2.0f, kRows = 480.0f - 2 * kOverscan;
+    float down = gpu::g_flat2d.half_sy, across = gpu::g_flat2d.half_sx;
+    // (the right half's layout: put into the half as the runtime puts the game's 2D, xdk/d3d8.cpp ForDraw)
+    auto X = [&](float lx) { return left + (320.0f + 160.0f * (1.0f - across) + lx * 0.5f * across) / 640.0f * vw; };
+    auto Y = [&](float ly) { return top + (ly * down - kOverscan) / kRows * vh; };
+    float edge = std::max(1.0f, std::round(vh / 800.0f));
+    // the box with the number
+    int total = std::clamp(rounds + std::max(more, 0), 0, 9999);
+    char text[8];
+    std::snprintf(text, sizeof text, "%d", total);
+    float box_t = Y(39.2f), box_b = Y(55.9f), box_r = X(553.3f), box_h = box_b - box_t;
+    ImFont* font = g_number_font ? g_number_font : ImGui::GetFont();
+    // (a font of size s has its digits 0.64 s high and their baseline 0.81 s under the top of its line: Arial's)
+    float size = box_h * 0.78f;
+    ImVec2 text_size = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+    float pad = X(2.7f) - X(0.0f), box_w = std::max(X(553.3f) - X(525.3f), text_size.x + 2 * pad);
+    float box_l = box_r - box_w;
+    draw->AddRectFilled(ImVec2(box_l, box_t), ImVec2(box_r, box_b), IM_COL32(0, 0, 0, 235));
+    draw->AddRect(ImVec2(box_l, box_t), ImVec2(box_r, box_b), IM_COL32(100, 100, 100, 255), 0.0f, 0, edge * 1.5f);
+    float baseline = (box_t + box_b) / 2 + 0.32f * size;
+    draw->AddText(font, size, ImVec2(box_l + pad, baseline - 0.81f * size), IM_COL32(238, 238, 238, 255), text);
+    // the rounds, right to left from the box (a big clip: at most twenty marks, each for several rounds)
+    int each = (clip + 19) / 20, places = (clip + each - 1) / each, full = (rounds + each - 1) / each;
+    float pitch = X(shells ? 8.1f : 4.8f) - X(0.0f), wide = X(shells ? 5.6f : 2.7f) - X(0.0f), gap = X(2.0f) - X(0.0f);
+    float mark_t = Y(shells ? 40.5f : 39.2f), mark_b = Y(shells ? 60.6f : 56.8f), round = wide * (shells ? 0.35f : 0.5f);
+    float base = (mark_b - mark_t) * (shells ? 0.16f : 0.22f);
+    float x1 = box_l - gap;
+    for (int i = 0; i < places; i++, x1 -= pitch) {
+        float x0 = x1 - wide;
+        if (i >= full) {  // an empty place
+            draw->AddRect(ImVec2(x0, mark_t), ImVec2(x1, mark_b), IM_COL32(110, 104, 96, 120), round, 0, edge);
+            continue;
+        }
+        draw->AddRectFilled(ImVec2(x0 - edge, mark_t - edge), ImVec2(x1 + edge, mark_b + edge), IM_COL32(8, 6, 4, 190), round);
+        if (shells) {  // a shell: red, a brass base
+            draw->AddRectFilled(ImVec2(x0, mark_t), ImVec2(x1, mark_b - base), IM_COL32(205, 72, 84, 255), round, ImDrawFlags_RoundCornersTop);
+            draw->AddRectFilled(ImVec2(x0, mark_b - base), ImVec2(x1, mark_b), IM_COL32(222, 190, 112, 255), round * 0.5f, ImDrawFlags_RoundCornersBottom);
+        } else {  // a round: a silver bullet, a darker case
+            draw->AddRectFilled(ImVec2(x0, mark_t), ImVec2(x1, mark_b - base), IM_COL32(196, 190, 180, 255), round, ImDrawFlags_RoundCornersTop);
+            draw->AddRectFilled(ImVec2(x0, mark_b - base), ImVec2(x1, mark_b), IM_COL32(150, 140, 126, 255), round * 0.3f, ImDrawFlags_RoundCornersBottom);
+        }
+    }
+}
+
 void Ui(double) {
-    bool halves = SplitActive(), whole = StreamView();
-    if (!halves && !whole) return;
+    if (!SplitActive() || g_stopped_now) return;
     float left = gpu::g_picture[0].load(), top = gpu::g_picture[1].load(), vw = gpu::g_picture[2].load(), vh = gpu::g_picture[3].load();
     if (vw < 16 || vh < 16) return;
     ImDrawList* draw = ImGui::GetForegroundDrawList();
+    AmmoOfSecond(draw, left, top, vw, vh);
     for (int view = 0; view < 2; view++) {
         float ax = gpu::g_partner_arrow[view].x.load(), ay = gpu::g_partner_arrow[view].y.load();
-        if (ax < 0 || (whole && view == 1)) continue;
-        float x0 = halves ? left + vw * 0.5f * float(view) : left, width = halves ? vw * 0.5f : vw;
+        if (ax < 0) continue;
+        float x0 = left + vw * 0.5f * float(view), width = vw * 0.5f;
         float cx = x0 + std::clamp(ax, 0.03f, 0.97f) * width, tip = top + std::clamp(ay, 0.06f, 0.97f) * vh;
         float h = vh / 48.0f, w = h * 0.95f, edge = std::max(1.5f, vh / 540.0f);
         ImVec2 a(cx - w, tip - h), b(cx + w, tip - h), c(cx, tip);
@@ -5362,6 +5276,46 @@ float PropertyF(X86Context& ctx, uint32_t object, uint32_t number, float otherwi
     return at && mem::IsCommitted(at + 4) ? ReadF(at) : otherwise;
 }
 // the players' flashlights, once a frame: what they are doing, into the log when it changes
+// S2_TEST_TORCH_AGAIN=<frame>[,<frames between>[,<times>]]: Player 1's flashlight is ended at that frame and he is
+// given a new one <frames between> (120) later, switched on; <times> times over (1), each time <frames between>
+// after the last. What a scripted scene of the apartment level does (it takes his things and gives them back):
+// after it the flashlight's light was stripes and dots in the owner's session of 2026-11-27. (Tests of the
+// renderer's targets; see the SDK's D3D12Backend::SamplesTarget.)
+void TestTorchAgain(X86Context& ctx) {
+    static const char* v = std::getenv("S2_TEST_TORCH_AGAIN");
+    if (!v || !g_player || !g_player_object) return;
+    static uint64_t at = 0;
+    static int gap = 120, times = 1, parsed = 0, done = 0;
+    static uint32_t item = 0xFFFF;
+    static uint64_t give_at = 0;
+    if (!parsed) parsed = 1, std::sscanf(v, "%llu,%d,%d", reinterpret_cast<unsigned long long*>(&at), &gap, &times);
+    uint32_t ecx = ctx.ecx, eax = ctx.eax;
+    if (done < times && !give_at && g_frames >= at + uint64_t(done) * uint64_t(gap) * 2) {
+        uint32_t table = kernel::R32(kObjectManager + 0x0C), h = kernel::R16(g_player + 0x16C);
+        uint32_t object = table && h ? kernel::R32(table + h * 6) : 0;
+        if (object && mem::IsCommitted(object + 0x110) && ClassOf(object) == kFlashlightClass && int32_t(kernel::R32(object + 8)) >= 0) {
+            item = kernel::R32(object + kTemplateWord) & 0xFFFF;
+            ctx.ecx = object;
+            kernel::CallGuest(ctx, kObjectEnd, {});
+            give_at = g_frames + uint64_t(gap);
+            LOGR("test: Player 1's flashlight (object %08X, item %u) is ended at frame %llu; he gets a new one in %d frames", object, item, static_cast<unsigned long long>(g_frames), gap);
+        } else if (g_frames == at) {
+            LOGR("test: Player 1 has no flashlight to end at frame %llu", static_cast<unsigned long long>(g_frames));
+        }
+    }
+    if (give_at && g_frames >= give_at && item != 0xFFFF) {
+        give_at = 0, done++;
+        ctx.ecx = g_player;
+        kernel::CallGuest(ctx, 0x153A0, {item, 1});
+        uint32_t light = FlashlightOf(g_player);
+        if (light) {
+            ctx.ecx = light;
+            kernel::CallGuest(ctx, kernel::R32(kernel::R32(light) + 0x98), {});  // (its method "on")
+        }
+        LOGR("test: Player 1 is given a flashlight again (item %u): %s", item, light ? "he has one, switched on" : "HE HAS NONE");
+    }
+    ctx.ecx = ecx, ctx.eax = eax;
+}
 void Flashlights() {
     {   // (once: where the game's message manager is, for the notes)
         static bool said = false;

@@ -61,7 +61,7 @@ if (-not $Publish) { "not published (no -Publish): $rel"; exit 0 }
 # the source: the tracked files of this commit, as one commit in a clone of the repository
 $ErrorActionPreference = "Continue"   # git writes its remarks to the error stream; each step is checked by hand
 & git -C $proj add -A VERSION.txt
-& git -C $proj commit -q -m "Version $number" -m "Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>" 2>$null
+& git -C $proj commit -q -m "Version $number" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" 2>$null
 $clone = Join-Path $xbox "release\repo (working copy - do not edit)"
 if (-not (Test-Path "$clone\.git")) {
     & git clone -q "https://github.com/$Repo.git" $clone 2>$null
@@ -120,7 +120,7 @@ Set-Content -Encoding ascii (Join-Path $clone ".gitignore") @"
 /Update.old.exe
 "@
 & git -C $clone add -A
-& git -C $clone -c user.name="sh2coop" -c user.email="sh2coop@users.noreply.github.com" commit -q -m "Version $number`: $Note" -m "Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>"
+& git -C $clone -c user.name="sh2coop" -c user.email="sh2coop@users.noreply.github.com" commit -q -m "Version $number`: $Note" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 & git -C $clone branch -M main
 & git -C $clone push -q -u origin main
 if ($LASTEXITCODE -ne 0) { throw "the push failed" }
