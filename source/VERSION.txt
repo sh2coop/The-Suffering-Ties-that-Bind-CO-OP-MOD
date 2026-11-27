@@ -1,1 +1,1 @@
-55 2026-11-26 Co-op: a player in first person is now seen jumping, firing, reloading and striking by the other player (throwing and using things come next). Online: the joined player gets 60 pictures a second instead of 30, at the size of his window.
+56 2026-11-26 Co-op: a player in first person is now also seen throwing and crouching by the other player. His body in first person now does all he does: jump, fire, reload, strike, throw, crouch.
