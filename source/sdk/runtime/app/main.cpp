@@ -111,9 +111,20 @@ void ApplyNow() {
     // whoever is using the PC. It still draws, and can be captured (PrintWindow).
     static const bool hidden = std::getenv("XBE_TEST_HIDDEN") != nullptr;
     if (hidden) {
+        // (S2_TEST_WINDOW=<width>x<height>: the window that size whatever the resolution says, as a Borderless window is
+        // on a monitor of another size)
+        uint32_t ww = out.width, wh = out.height;
+        if (const char* size = std::getenv("S2_TEST_WINDOW")) {
+            uint32_t a = 0, b = 0;
+            const char* c = size;
+            while (*c >= '0' && *c <= '9') a = a * 10 + uint32_t(*c++ - '0');
+            if (*c == 'x') c++;
+            while (*c >= '0' && *c <= '9') b = b * 10 + uint32_t(*c++ - '0');
+            if (a >= 64 && b >= 64) ww = a, wh = b;
+        }
         SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_POPUP | visible);
         SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
-        SetWindowPos(g_hwnd, HWND_BOTTOM, -30000, -30000, int(out.width), int(out.height), SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        SetWindowPos(g_hwnd, HWND_BOTTOM, -30000, -30000, int(ww), int(wh), SWP_FRAMECHANGED | SWP_NOACTIVATE);
         return;
     }
     if (s.display_mode == DisplayMode::Windowed) {

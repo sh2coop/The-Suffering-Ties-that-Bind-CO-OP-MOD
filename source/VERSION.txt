@@ -1,1 +1,1 @@
-57 2026-11-27 Split screen only: online co-op is taken out. In split screen the picture fills the whole screen, the game has its own difficulty again, each player sets his own look, Player 2 picks up ammunition and has an ammo display, Co-op is in the pause menu, and the line between the views no longer shows over movies. Also a fix for garbled textures where the flashlight shines.
+58 2026-11-27 Split screen uses the whole window at every screen shape, also when Borderless is set to a resolution smaller than the monitor.

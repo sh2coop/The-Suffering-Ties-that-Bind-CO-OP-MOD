@@ -27,7 +27,16 @@
 // The Display settings' Picture shape chooses another shape (the picture then has bars at the sides or above and
 // below). Not in split screen: there the picture always fills the output, the two views share all of it. (The owner,
 // 2026-11-27, with 16:9 chosen on a 3840 x 1600 monitor: "theres still black bars where there could be more camera
-// space for both players".)
+// space for both players", and then "make sure that splitscreen uses as much space on the screen as possible in all
+// resolutions".) In split screen the shape is the game window's own: Borderless puts the window over the whole
+// monitor whatever the resolution says (a 1920 x 1080 resolution on a 3840 x 1600 monitor had bars at the sides),
+// Windowed is the resolution's size until the player drags its edges, Full screen is the resolution.
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -99,7 +108,16 @@ float Wanted() {
         return v ? float(std::atof(v)) : 0.0f;
     }();
     float a = forced;
-    if (a <= 0 && g_shape_setting && game_coop::g_mode_setting != 1) a = float(g_shape_setting) / 1000.0f;
+    bool split = game_coop::g_mode_setting == 1;
+    if (a <= 0 && g_shape_setting && !split) a = float(g_shape_setting) / 1000.0f;
+#ifdef _WIN32
+    if (a <= 0 && split) {  // (the window's picture area; not while it is minimized)
+        HWND hwnd = static_cast<HWND>(app::Window());
+        RECT rc{};
+        if (hwnd && !IsIconic(hwnd) && GetClientRect(hwnd, &rc) && rc.right - rc.left >= 64 && rc.bottom - rc.top >= 64)
+            a = float(rc.right - rc.left) / float(rc.bottom - rc.top);
+    }
+#endif
     if (a <= 0) {
         app::Mode m = app::Output();
         a = m.height ? float(m.width) / float(m.height) : float(kSixteenNine);
