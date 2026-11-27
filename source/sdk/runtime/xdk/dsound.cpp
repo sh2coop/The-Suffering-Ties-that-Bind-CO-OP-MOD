@@ -795,6 +795,8 @@ uint32_t NewBuffer(uint32_t desc, uint32_t out) {
         v.bytes = v.play_len = v.loop_len = bytes;
     }
     W32(out, obj);
+    if (std::getenv("S2_DS_TRACE"))
+        LOGI("dsound trace: new buffer %08X (%u Hz %u ch tag %X, %u bytes, flags %X)", obj, v.rate, v.channels, v.tag, bytes, flags);
     return 0;
 }
 
@@ -1059,7 +1061,46 @@ BUFFER(SetBufferData, 3) {
     HdBuffer(v);
     return 0;
 }
+// [local change, The Suffering: Ties That Bind] what the title does with its buffers: a 10 s summary always, every
+// call with S2_DS_TRACE=1 (what the console's voice processor does that this mixer leaves out is in the summary)
+struct CallCount {
+    uint32_t play = 0, stop = 0, stopex = 0, stopex_release = 0, eg = 0, filter = 0, i3dl2 = 0, freq = 0;
+};
+CallCount g_calls;
+int64_t g_calls_since = 0;
+bool DsTrace() {
+    static const bool on = std::getenv("S2_DS_TRACE") != nullptr;
+    return on;
+}
+void CallSummary() {
+    int64_t now = NowMs();
+    if (!g_calls_since) g_calls_since = now;
+    if (now - g_calls_since < 10000) return;
+    const CallCount& c = g_calls;
+    if (c.play || c.stop || c.stopex || c.eg || c.filter)
+        LOGI("dsound: last 10 s: %u plays, %u stops, %u StopEx (%u with a release time), %u envelopes set, %u filters set, %u I3DL2 sources, %u pitch changes",
+             c.play, c.stop, c.stopex, c.stopex_release, c.eg, c.filter, c.i3dl2, c.freq);
+    g_calls = {};
+    g_calls_since = now;
+}
+void TraceCall(const char* what, const Voice& v, const Args& a, int n) {
+    CallSummary();
+    if (!DsTrace()) return;
+    const uint8_t* d = v.data ? static_cast<const uint8_t*>(HostPtr(v.data)) : nullptr;
+    // how much of the data is zero (a sound whose data never arrived plays silence)
+    uint32_t nonzero = 0;
+    for (uint32_t i = 0; d && i < v.bytes; i++) nonzero += d[i] != 0;
+    char bins[160] = "";
+    int k = 0;
+    for (uint32_t i = 0; i < v.nbins && k < 150; i++) k += std::snprintf(bins + k, sizeof bins - size_t(k), " %u:%d", v.bin[i], v.bin_mb[v.bin[i]]);
+    LOGI("dsound trace: %s %08X (%u Hz %u ch tag %X, %u bytes, first %02X%02X%02X%02X, %u bytes not zero, pos %.0f, freq %u, volume %.3f, %s, bins%s) args %08X %08X %08X",
+         what, v.obj, v.rate, v.channels, v.tag, v.bytes, d ? d[0] : 0, d ? d[1] : 0, d ? d[2] : 0, d ? d[3] : 0, nonzero, v.pos, v.freq, v.volume,
+         v.is3d ? "3D" : "2D", bins, n > 1 ? a[1] : 0, n > 2 ? a[2] : 0, n > 3 ? a[3] : 0);
+}
+
 BUFFER(Play, 4) {
+    g_calls.play++;
+    TraceCall("Play", v, a, 4);
     HdBuffer(v);  // [local change] its memory may hold another sound since SetBufferData (the same place and size)
     v.has_gain = false;  // a new sound does not ramp from the last one's levels
     v.playing = true;
@@ -1069,11 +1110,16 @@ BUFFER(Play, 4) {
     return 0;
 }
 BUFFER(Stop, 1) {
+    g_calls.stop++;
+    TraceCall("Stop", v, a, 1);
     v.playing = false;
     return 0;
 }
 // (this, time low, time high, flags): stops now, the release envelope is not reproduced
 BUFFER(StopEx, 4) {
+    g_calls.stopex++;
+    if (a[1] || a[2] || a[3]) g_calls.stopex_release++;
+    TraceCall("StopEx", v, a, 4);
     v.playing = false;
     return 0;
 }
@@ -1084,7 +1130,15 @@ BUFFER(Pause, 2) {
     return 0;
 }
 // envelopes are not played
-BUFFER(SetEG, 2) { return 0; }
+BUFFER(SetEG, 2) {
+    g_calls.eg++;
+    TraceCall("SetEG", v, a, 2);
+    if (DsTrace() && a[1]) {  // DSENVELOPEDESC: mode, eg, delay, attack, hold, decay, release, sustain, pitch scale, filter cutoff
+        LOGI("dsound trace:   envelope %u %u delay %u attack %u hold %u decay %u release %u sustain %u", R32(a[1]), R32(a[1] + 4),
+             R32(a[1] + 8), R32(a[1] + 12), R32(a[1] + 16), R32(a[1] + 20), R32(a[1] + 24), R32(a[1] + 28));
+    }
+    return 0;
+}
 // (this, start, length) in bytes, 0 length plays to the end. The loop becomes the whole region.
 BUFFER(SetPlayRegion, 3) {
     if (a[1] > v.bytes || a[2] > v.bytes - a[1]) return 0x88780032u;  // DSERR_INVALIDCALL
@@ -1132,10 +1186,16 @@ BUFFER(SetVolume, 2) {
     return 0;
 }
 BUFFER(SetFrequency, 2) {
+    g_calls.freq++;
+    TraceCall("SetFrequency", v, a, 2);
     v.freq = a[1];
     return 0;
 }
-BUFFER(SetFilter, 2) { return 0; }
+BUFFER(SetFilter, 2) {
+    g_calls.filter++;
+    TraceCall("SetFilter", v, a, 2);
+    return 0;
+}
 BUFFER(SetHeadroom, 2) {
     v.headroom = Db(-int32_t(a[1]));
     return 0;
@@ -1161,7 +1221,11 @@ BUFFER(SetPosition, 5) {
     return 0;
 }
 BUFFER(SetVelocity, 5) { return 0; }
-BUFFER(SetI3DL2Source, 3) { return 0; }
+BUFFER(SetI3DL2Source, 3) {
+    g_calls.i3dl2++;
+    TraceCall("SetI3DL2Source", v, a, 3);
+    return 0;
+}
 // (this, DS3DBUFFER, apply): position at +4, distances at +0x34 and +0x38, mode at +0x3C
 BUFFER(SetAllParameters, 3) {
     for (int i = 0; i < 3; i++) v.p[i] = F32(R32(a[1] + 4 + i * 4));
@@ -1279,6 +1343,17 @@ STREAM(Process, 3) {
     if (pk.completed_ptr) W32(pk.completed_ptr, 0);
     if (pk.status_ptr) W32(pk.status_ptr, kPacketPending);
     HdPacket(v, pk);  // [local change, The Suffering: Ties That Bind]
+    if (DsTrace()) {
+        static int64_t last = 0;
+        static uint32_t count = 0;
+        count++;
+        if (NowMs() - last > 1000) {  // one line a second per stream would be too many: a second's count
+            LOGI("dsound trace: stream %08X packet %u bytes (%u Hz %u ch tag %X), %u packets in the last second", v.obj, pk.size, v.rate,
+                 v.channels, v.tag, count);
+            last = NowMs();
+            count = 0;
+        }
+    }
     v.packets.push_back(pk);
     if (!v.active) v.has_gain = false;  // after going quiet a stream starts its levels fresh
     v.active = true;

@@ -1402,6 +1402,22 @@ void Trace2D(const uint8_t* vertices, uint32_t stride, uint32_t count) {
          g_state.tss[0][gpu::kTssColorArg2], g_state.tss[0][gpu::kTssAlphaOp], g_state.tss[0][gpu::kTssAlphaArg1], g_state.tss[0][gpu::kTssAlphaArg2],
          g_state.tss[1][gpu::kTssColorOp], g_state.rs[gpu::kRsTextureFactor], g_state.rs[gpu::kRsLighting], simple(gpu::kMAlphaFunc), simple(gpu::kMAlphaRef),
          simple(gpu::kMColorWriteEnable));
+    // [local change, The Suffering: Ties That Bind] the first vertices as words (position, colour, texture
+    // coordinates: which part of a texture a 2D piece is cut from)
+    for (uint32_t i = 0; i < count && i < 4 && stride <= 64; i++) {
+        std::string words;
+        char w[24];
+        for (uint32_t k = 0; k + 4 <= stride; k += 4) {
+            float f;
+            uint32_t u;
+            std::memcpy(&f, vertices + size_t(i) * stride + k, 4);
+            std::memcpy(&u, vertices + size_t(i) * stride + k, 4);
+            if (std::fabs(f) > 1e-6f && std::fabs(f) < 1e6f) std::snprintf(w, sizeof w, " %.4f", f);
+            else std::snprintf(w, sizeof w, " %08X", u);
+            words += w;
+        }
+        LOGI("2d trace:   vertex %u:%s", i, words.c_str());
+    }
     if (count <= 4 && x0 <= 1.0f && y0 <= 1.0f && x1 >= 600.0f && y1 >= 440.0f) {  // a whole-picture draw: every state, to set two of them side by side
         std::string all = "rs";
         char v[16];
@@ -1445,6 +1461,7 @@ struct InkTexture {
 std::unordered_map<uint64_t, InkTexture> g_ink;
 struct Letter {
     float x0, y0, y1, l, r, shift;
+    bool space = false;  // an empty cell: the gaps on either side of it are kept
 };
 std::vector<Letter> g_letters;  // the string's letters, as its first run drew them (not drawn)
 bool g_letter_skip = false;     // the draw being made is one of the first run's
@@ -1529,7 +1546,10 @@ void LetterShift(const uint8_t* vertices, uint32_t stride, uint32_t count) {
         }
         total += cols[c - c0];
     }
-    if (total <= 0) return;  // (an empty cell: a space)
+    if (total <= 0) {  // (an empty cell: a space)
+        if (gpu::g_letter_pass == 1 && g_letters.size() < 512) g_letters.push_back({x0, y0, y1, x0, x1, 0, true});
+        return;
+    }
     int first = c0, last = c1 - 1;
     float run = 0;
     for (int c = c0; c < c1 && c - c0 < 256; c++) {
@@ -1562,9 +1582,10 @@ void LetterShift(const uint8_t* vertices, uint32_t stride, uint32_t count) {
 }  // namespace
 
 // [local change, The Suffering: Ties That Bind] The plan for the string just collected: line by line (letters whose
-// tops are within a third of a letter's height), left to right by ink, each gap made a tenth of the letter's height,
-// a gap of more than a third of it (a space) kept; then the line is moved back by half of what it grew or shrank, so
-// that centred text stays centred.
+// tops are within a third of a letter's height), left to right by ink. The gaps between letters are all made the
+// line's average gap; a gap of more than a third of a letter's height (a space) is kept. The line's first and last
+// letters stay where the game put them: left, right and centred text keep their place, and nothing is pushed out of
+// its box (the owner, 2026-11-27: the save times on the Load Game page lost their first digit when the line grew).
 void LetterPlanNow() {
     std::vector<size_t> order(g_letters.size());
     for (size_t i = 0; i < order.size(); i++) order[i] = i;
@@ -1574,24 +1595,60 @@ void LetterPlanNow() {
         if (std::fabs(p.y0 - q.y0) > h / 3) return p.y0 < q.y0;
         return p.l < q.l;
     });
+    // where the string's spaces are, from its characters: the k-th letter (by line, then left to right) is its k-th
+    // character that is not a space; a gap with a space before it is kept. A "1" is narrow in a digit's wide step,
+    // so its gap looks like a space ("1 1/27"). When the letters and characters do not match one for one (a tag
+    // drawn as a picture, say), the gaps tell: one well above the line's usual gap is a space.
+    std::vector<uint8_t> spaced(order.size(), 0);
+    bool known = false;
+    {
+        size_t k = 0;
+        bool pending = false;
+        for (uint16_t c : gpu::g_letter_text) {
+            if (c == 10 || c == 13) pending = true;
+            else if (c == 32 || c == 9 || c == 0xA0 || c == 0x3000) pending = true;
+            else {
+                if (k < spaced.size()) spaced[k] = pending;
+                pending = false;
+                k++;
+            }
+        }
+        known = k == order.size() && k > 0;
+        for (size_t n = 0; n < spaced.size() && known; n++) known = !g_letters[order[n]].space;
+    }
     size_t i = 0;
     while (i < order.size()) {
         size_t j = i + 1;
         float h = g_letters[order[i]].y1 - g_letters[order[i]].y0;
         while (j < order.size() && std::fabs(g_letters[order[j]].y0 - g_letters[order[i]].y0) <= h / 3) j++;
-        float shift = 0, prev_r = 0, ours_r = 0;
+        // the gaps between letters: the line's usual gap and those near it; one well above it is a space ("5 - The")
+        std::vector<float> usual;
+        for (size_t k = i + 1; k < j; k++) {
+            const Letter &t = g_letters[order[k]], &b = g_letters[order[k - 1]];
+            float gap = t.l - b.r;
+            if (!t.space && !b.space && gap < 0.33f * (t.y1 - t.y0) && gap > -0.5f * (t.y1 - t.y0)) usual.push_back(gap);
+        }
+        std::sort(usual.begin(), usual.end());
+        float median = usual.empty() ? 0 : usual[usual.size() / 2];
+        auto between = [&](size_t k) {  // the gap before letter k of the line, if it is one between letters (not a space)
+            const Letter &t = g_letters[order[k]], &b = g_letters[order[k - 1]];
+            float th = t.y1 - t.y0, gap = t.l - b.r;
+            if (known) return !spaced[k] && gap < 0.6f * th && gap > -0.5f * th;
+            return !t.space && !b.space && gap < 0.33f * th && gap > -0.5f * th && gap < median + 0.1f * th;
+        };
+        float sum = 0;
+        int gaps = 0;
+        for (size_t k = i + 1; k < j; k++)
+            if (between(k)) sum += g_letters[order[k]].l - g_letters[order[k - 1]].r, gaps++;
+        float even = gaps ? sum / gaps : 0, shift = 0;
         for (size_t k = i; k < j; k++) {
             Letter& t = g_letters[order[k]];
-            float th = t.y1 - t.y0;
-            if (k > i) {
-                float gap = t.l - prev_r;
-                if (gap < 0.33f * th && gap > -0.5f * th) shift = ours_r + 0.1f * th - t.l;
+            if (k > i && between(k)) {
+                const Letter& b = g_letters[order[k - 1]];
+                shift = b.r + b.shift + even - t.l;
             }
             t.shift = shift;
-            prev_r = t.r, ours_r = t.r + shift;
         }
-        float grew = j > i ? g_letters[order[j - 1]].shift : 0;
-        for (size_t k = i; k < j; k++) g_letters[order[k]].shift -= grew / 2;
         i = j;
     }
 }

@@ -434,6 +434,20 @@ void Load(const std::vector<uint8_t>& img, size_t table, const std::vector<uint3
             e.kind = KindOf(CodeHash(code));
         }
         kinds += " " + std::to_string(i) + " " + KindName(e.kind) + ",";
+        // [local change, The Suffering: Ties That Bind] what an effect is and what it reads and writes, to know the
+        // ones not reproduced: its code's size and hash, and its first state words (flags, then the X pointers)
+        {
+            std::vector<uint8_t> code;
+            if (code_at <= img.size() && code_bytes <= img.size() - code_at) {
+                code.assign(img.begin() + code_at, img.begin() + code_at + code_bytes);
+                Decrypt(&keys[i * kKeyBytes], code.data(), code.size());
+            }
+            char words[200] = "";
+            int k = 0;
+            for (uint32_t w = 0; w < 12 && k < 190; w++) k += std::snprintf(words + k, sizeof words - size_t(k), " %06X", R32(e.state + w * 4) & 0xFFFFFF);
+            LOGI("dsound: effect %u: %s, %u code bytes, hash %016llX, state%s", i, KindName(e.kind), code_bytes,
+                 (unsigned long long)(code.empty() ? 0 : CodeHash(code)), words);
+        }
         g_effects.push_back(e);
     }
     LOGR("dsound: effects image, reverb %d, effects%s", reverb, kinds.c_str());

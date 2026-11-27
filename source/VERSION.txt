@@ -1,1 +1,1 @@
-66 2026-11-27 Chief: each part drawn with its own image (no orange armour), his hands where Torque's are, smoother. Blackmore: Torque's full skeleton (no floating things, no bat between his legs, guns fire after a switch). Load Game from the pause menu no longer crashes.
+67 2026-11-27 The guns' bang is heard again after Load Game (sounds heard everywhere were placed far away since version 62). The A and B button pictures no longer take a strip of the icons beside them. Save times keep their first digit.

@@ -1115,6 +1115,30 @@ X86_FUNC(sub_001D5B60) {  // a string (this = the font)
     static const bool off = [] { const char* v = std::getenv("S2_TEXT_GAPS"); return v && *v == '0'; }();
     gpu::g_letter_spacing = !off && app::Output().width > 1000;
     gpu::g_letter_string++;
+    {   // tests: S2_TEXT_ARGS=<seconds>: each string's text and arguments from then on (200 at most)
+        static const double from = std::getenv("S2_TEXT_ARGS") ? std::atof(std::getenv("S2_TEXT_ARGS")) : -1;
+        static int said = 0;
+        if (from >= 0 && said < 200 && logx::Seconds() >= from) {
+            said++;
+            char text[64] = {};
+            uint32_t at = kernel::R32(ctx.esp + 8);
+            for (int i = 0; i < 60 && at && mem::IsCommitted(at + i * 2 + 1); i++) {
+                uint16_t c = kernel::R16(at + i * 2);
+                if (!c) break;
+                text[i] = c < 128 ? char(c) : '?';
+            }
+            std::string line;
+            for (int i = 1; i < 12; i++) {
+                uint32_t v = kernel::R32(ctx.esp + 4 + i * 4);
+                float f;
+                std::memcpy(&f, &v, 4);
+                char one[48];
+                std::snprintf(one, sizeof one, " %08X(%.1f)", v, std::fabs(f) < 1e6f && std::fabs(f) > 1e-3f ? f : 0.0f);
+                line += one;
+            }
+            LOGI("text: string \"%s\" this %08X ret %08X:%s", text, ctx.ecx, kernel::R32(ctx.esp), line.c_str());
+        }
+    }
     if (!gpu::g_letter_spacing || gpu::g_letter_pass) {  // (a string within a string: as the game has it)
         __imp__sub_001D5B60(ctx, base);
         return;
@@ -1124,6 +1148,12 @@ X86_FUNC(sub_001D5B60) {  // a string (this = the font)
     uint32_t args[16];
     for (int i = 0; i < 16; i++) args[i] = kernel::R32(ctx.esp + 4 + i * 4);
     gpu::LetterBegin();
+    gpu::g_letter_text.clear();  // the string's characters (its second argument, 16 bits each): where its spaces are
+    for (uint32_t at = kernel::R32(ctx.esp + 8), i = 0; at && i < 512 && mem::IsCommitted(at + i * 2 + 1); i++) {
+        uint16_t c = kernel::R16(at + i * 2);
+        if (!c) break;
+        gpu::g_letter_text.push_back(c);
+    }
     gpu::g_letter_pass = 1;
     __imp__sub_001D5B60(ctx, base);
     gpu::LetterPlan();
@@ -1134,10 +1164,30 @@ X86_FUNC(sub_001D5B60) {  // a string (this = the font)
     gpu::g_letter_pass = 0;
 }
 X86_EXTERN_FUNC(__imp__sub_001C6B20);
+// A letter is cut to the box its string is drawn in (the sprite's 7th argument, a rectangle in 640 x 480 layout
+// pixels: left, top, right, bottom; none: the screen). The Load Game list puts its save times at the left edge of
+// their column's box, and a digit's ink starts a pixel or two left of the place the string starts at, so the
+// first digit lost its left side ("9:57pm" showed as ":57pm"; the owner, 2026-11-27). A letter's box is made
+// 4 pixels wider on the left and the right while it is drawn (top and bottom, which scrolling lists use, stay).
+// S2_TEXT_CLIP=0: as the game has it.
 X86_FUNC(sub_001C6B20) {  // a sprite: a letter when the string drawer calls it
+    static const bool keep = [] { const char* v = std::getenv("S2_TEXT_CLIP"); return v && *v == '0'; }();
     bool letter = kernel::R32(ctx.esp) == 0x1D5F7B;
     bool before = gpu::g_letter_now;
     if (letter) gpu::g_letter_now = true;
+    uint32_t box = letter ? kernel::R32(ctx.esp + 0x1C) : 0;
+    bool wider = !keep && box && mem::IsCommitted(box) && mem::IsCommitted(box + 15);
+    int32_t left = 0, right = 0;
+    if (wider) {
+        left = int32_t(kernel::R32(box)), right = int32_t(kernel::R32(box + 8));
+        static const double from = std::getenv("S2_TEXT_ARGS") ? std::atof(std::getenv("S2_TEXT_ARGS")) : -1;
+        static int said = 0;
+        if (from >= 0 && said < 100 && logx::Seconds() >= from)
+            said++, LOGI("text: a letter's box %d %d %d %d", left, int32_t(kernel::R32(box + 4)), right, int32_t(kernel::R32(box + 12)));
+        kernel::W32(box, uint32_t(std::max(0, left - 4)));
+        kernel::W32(box + 8, uint32_t(right + 4));
+    }
     __imp__sub_001C6B20(ctx, base);
+    if (wider) kernel::W32(box, uint32_t(left)), kernel::W32(box + 8, uint32_t(right));
     gpu::g_letter_now = before;
 }

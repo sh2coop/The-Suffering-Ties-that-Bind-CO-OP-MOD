@@ -138,6 +138,7 @@ inline Flat2D g_flat2d;
 inline uint32_t g_letter_string = 0;
 inline bool g_letter_now = false;
 inline bool g_letter_spacing = true;  // the title's switch (off: letters where the title puts them)
+inline std::vector<uint16_t> g_letter_text;  // the string's characters, where the title gives them (spaces: LetterPlan)
 inline int g_letter_pass = 0;  // 0 as drawn, 1 the string's letters noted and not drawn, 2 drawn where LetterPlan puts them
 void LetterBegin();  // xdk/d3d8.cpp
 void LetterPlan();

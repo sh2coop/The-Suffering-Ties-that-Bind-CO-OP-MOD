@@ -1,0 +1,3 @@
+# main menu (about 25 s after start): RIGHT to Load Game, A opens it (the A and B prompts at the bottom)
+28 RIGHT
+30 A

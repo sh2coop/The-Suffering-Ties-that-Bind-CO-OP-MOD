@@ -5282,6 +5282,7 @@ void game_coop::DrawOne(X86Context& ctx, uint8_t* base) {
     game_coop::g_skin_depth = skin_before, game_coop::g_skin_place = place_before, game_coop::g_skin_char = char_before;
 }
 
+namespace game_listener { uint32_t NoPlaceStandIn(); }  // listener.cpp
 // S2_SOUND_TRACE=1: every sound the game asks for (0x191070: the wave, the place, flags, a float), who asked and what
 // came back.
 X86_EXTERN_FUNC(__imp__sub_00191070);
@@ -5289,6 +5290,10 @@ X86_FUNC(sub_00191070) {
     static const bool trace = std::getenv("S2_SOUND_TRACE") != nullptr;
     uint32_t from = kernel::R32(ctx.esp), sound = kernel::R32(ctx.esp + 4), place = kernel::R32(ctx.esp + 8), flags = kernel::R32(ctx.esp + 12);
     float scale = game_coop::ReadF(ctx.esp + 16);
+    // a sound "heard everywhere" sits where the game hears from (src\game\listener.cpp: after Load Game that is
+    // Player 1, not the origin the "no place" vector names)
+    if (place == 0x3932AC)
+        if (uint32_t here = game_listener::NoPlaceStandIn()) kernel::W32(ctx.esp + 8, here);
     __imp__sub_00191070(ctx, base);
     {   // the record: how many sounds started, how many were refused, which packages they came from
         static uint32_t started = 0, refused = 0, packages[8] = {}, kinds = 0, said = 0;

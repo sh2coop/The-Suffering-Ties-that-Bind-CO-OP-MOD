@@ -540,6 +540,24 @@ static int WriteDds(const wchar_t* dir, uint32_t w, uint32_t h, uint64_t key, co
 
 static wchar_t g_hd_x2[MAX_PATH * 2], g_hd_x4[MAX_PATH * 2];
 
+// Fix-ups for single textures whose pictures share texels (found by tracing the game's draws, S2_2D_TRACE with the
+// vertices). Bump kFixUps when the table changes: the textures in it are made again, nothing else.
+//   The menu's button icons (64 x 64, A B X Y, R L, the white square): the A and B buttons are cut from u 21.5 to 42.5
+//   texels, so their right edge takes half of column 42, the left edge of the R and L icons' light rings. The game's
+//   own filter showed it as a dim line; at 4x it was a crisp white one (the owner: "the a and b look weird still with
+//   white strays"). The half of column 42 inside the A and B pictures is cleared (rows 19.5 to 63.5), and likewise the
+//   half rows 19 and 41 that the A and B pictures take from the icons above them (a green or white fleck at their foot).
+#define HD_FIXUPS 2
+static const uint64_t kFixUpKeys[] = {0x7459a981c099d9a1ull};
+static void FixUp(uint64_t key, uint8_t* px, uint32_t w, uint32_t h) {
+    if (key == 0x7459a981c099d9a1ull && w == 256 && h == 256)
+        for (uint32_t y = 78; y < 254; y++)
+            for (uint32_t x = 168; x < 170; x++) px[((size_t)y * w + x) * 4 + 3] = 0;
+    if (key == 0x7459a981c099d9a1ull && w == 256 && h == 256)   // and the half rows the A and B pictures take from the icon above
+        for (uint32_t x = 0; x < 170; x++)
+            for (int r = 0; r < 4; r++) px[((size_t)(r < 2 ? 78 + r : 164 + r) * w + x) * 4 + 3] = 0;
+}
+
 static int FinishJob(HdJob* j) {
     uint32_t PW = (j->t.w + 2 * j->pad_x) * 4;
     uint32_t w = j->t.w * 4, h = j->t.h * 4, ox = j->pad_x * 4, oy = j->pad_y * 4;
@@ -597,6 +615,8 @@ static int FinishJob(HdJob* j) {
             if (k < 1)
                 for (int c = 0; c < 3; c++) o[c] = (uint8_t)(Bicubic(j, x, y, c) + k * (s[c] - Bicubic(j, x, y, c)) + 0.5f);
         }
+
+    FixUp(j->t.key, px, w, h);
 
     // the levels: 4x, 2x, the console's own size, then the console's own extra ones (as the game had them); an on /
     // off alpha keeps its coverage at every level. The 4x set's file has them all, the 2x set's from the second on.
@@ -882,6 +902,29 @@ static int MakeHdTextures(void) {
     }
     CreateDirectoryW(g_hd_x2, NULL);
     CreateDirectoryW(g_hd_x4, NULL);
+    {   // the fix-up table changed: its textures are made again
+        wchar_t fix_file[MAX_PATH * 2];
+        char text[32] = {0}, want[32];
+        _snwprintf(fix_file, MAX_PATH * 2, L"%ls\\fixups.txt", hd_dir);
+        _snprintf(want, sizeof want, "%d\n", HD_FIXUPS);
+        if (!ReadSmall(fix_file, text, sizeof text) || strcmp(text, want) != 0) {
+            for (size_t i = 0; i < sizeof kFixUpKeys / sizeof kFixUpKeys[0]; i++)
+                for (int set = 0; set < 2; set++) {
+                    wchar_t pattern[MAX_PATH * 2], one[MAX_PATH * 2];
+                    const wchar_t* dir = set ? g_hd_x4 : g_hd_x2;
+                    _snwprintf(pattern, MAX_PATH * 2, L"%ls\\*_%016llx_HD.dds", dir, (unsigned long long)kFixUpKeys[i]);
+                    WIN32_FIND_DATAW f;
+                    HANDLE h = FindFirstFileW(pattern, &f);
+                    if (h == INVALID_HANDLE_VALUE) continue;
+                    do {
+                        _snwprintf(one, MAX_PATH * 2, L"%ls\\%ls", dir, f.cFileName);
+                        DeleteFileW(one);
+                    } while (FindNextFileW(h, &f));
+                    FindClose(h);
+                }
+            WriteWhole(fix_file, want, strlen(want));
+        }
+    }
     HdLog(L"making HD textures (version %d, %ls)", HD_VERSION, g_hd_background ? L"in the background" : L"with a window");
 
     HdDisc disc;
