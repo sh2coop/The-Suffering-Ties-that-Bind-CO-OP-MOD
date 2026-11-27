@@ -188,6 +188,9 @@ struct State {
     // texture pack variant of the draws: 0 the pack itself, n the images in its "player<n+1>" folder first (a title
     // hook sets it around the draws of a second player's model, so the two players can look different)
     uint32_t variant = 0;
+    // [local change, The Suffering: Ties That Bind] a texture pack image drawn in place of stage 0's texture, by the
+    // key in its file name (0: none). Set from gpu::g_draw_force_image after the title's variant hook.
+    uint64_t force_image = 0;
     // pixels a program's screen positions move down (a split screen HUD drawn in the lower half)
     float screen_dx = 0, screen_dy = 0;
     // [local change, The Suffering: Ties That Bind] screen positions are scaled about the target's middle by

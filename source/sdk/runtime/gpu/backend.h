@@ -169,6 +169,9 @@ inline std::atomic<float> g_first_health{-1.0f};
 struct X86Context;
 namespace gpu {
 inline uint32_t (*g_draw_variant)(X86Context& ctx, const State& s) = nullptr;
+// [local change, The Suffering: Ties That Bind] ... and, set by that hook for the draw it is asked about, a texture pack
+// image for stage 0 by its key (State::force_image; the hook's draw only, cleared after it)
+inline uint64_t g_draw_force_image = 0;
 constexpr uint32_t kHudArtW = 100, kHudArtH = 48;
 struct HudArt {
     std::mutex lock;

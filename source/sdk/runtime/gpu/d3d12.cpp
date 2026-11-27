@@ -2003,6 +2003,14 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     }
     if (s.variant && tx.pack_key_v) LatchPackImage(tx.pack_key_v, tx.swap_v);
     const Tex* variant = s.variant && tx.swap_variant == s.variant ? tx.swap_v : nullptr;
+    // [local change, The Suffering: Ties That Bind] State::force_image: that pack image instead (while it is still
+    // loading, the texture as it is)
+    if (stage == 0 && s.force_image) {
+        uint64_t k = s.force_image;
+        const Tex* forced = nullptr;
+        LatchPackImage(k, forced);
+        if (forced) variant = forced;
+    }
     const Tex& drawn = variant ? *variant : tx.swap ? *tx.swap : tx;
     FillTextureView(drawn, d, stages.sv[stage]);
     if (fi.depth) info.shadow = ShadowDepthKind(d.format);

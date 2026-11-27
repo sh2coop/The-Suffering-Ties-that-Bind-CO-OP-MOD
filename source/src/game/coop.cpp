@@ -53,7 +53,7 @@ uint32_t Marks(std::string* why);
 
 namespace game_skins {  // skins.cpp: each player's character
 int BodySkin(uint32_t object);
-void SkinImage(int character, uint64_t key, uint32_t place, uint32_t width, uint32_t height);
+uint64_t SkinKey(int character, uint32_t place);  // the pack image a character's body is drawn with in that place
 }
 namespace game_coop {
 namespace {
@@ -5119,16 +5119,13 @@ uint32_t DrawVariant(X86Context& ctx, const gpu::State& s) {
         LOGI("%s", line);
     }
     // A body that wears another character (skins.cpp): its own draws (not those of what it holds, drawn by calls
-    // inside its own) are variant 2, and the image for each place's texture is made the first time it is seen. The
+    // inside its own) are drawn with that character's image for the place (gpu::g_draw_force_image). The
     // small blood layers (32 x 32) are drawn as they are and do not count as a place.
     if (g_skin_depth >= 0 && g_draw_depth == g_skin_depth + 1) {
         gpu::TextureDesc d;
-        if (s.textures[0] && gpu::Describe(s.textures[0], d) && d.width >= 64 && d.height >= 64) {
-            const gpu::FormatInfo& fi = gpu::Format(d.format);
-            uint64_t key = gpu::texturedumper::KeyOf(d, fi, static_cast<const uint8_t*>(kernel::HostPtr(d.data)), nullptr);
-            game_skins::SkinImage(g_skin_char, key, g_skin_place++, d.width, d.height);
-        }
-        return uint32_t(1 + g_skin_char);  // (variant 2 Blackmore, 3 Chief)
+        if (s.textures[0] && gpu::Describe(s.textures[0], d) && d.width >= 64 && d.height >= 64)
+            gpu::g_draw_force_image = game_skins::SkinKey(g_skin_char, g_skin_place++);
+        return 0;
     }
     if (!g_drawing_second) return 0;
     {   // tests: S2_P2_DRAWS=<frame>: every draw of Player 2's model in that frame, with each stage's texture

@@ -17,7 +17,7 @@
 //     corner uvs (0x204), Torque's 64-bone skeleton with the new weights (0x208), seam copies, uvs and triangle strips
 //     per place (0x211: real strips; one index list per triangle overran the game's room for them), the vertices'
 //     numbers (0x216). The places are drawn with Torque's materials and get the model's own textures at the draw
-//     (skins.cpp SkinImage, variant 3).
+//     (skins.cpp SkinKey: an image of their own, forced at the draw).
 // The work was first done in Python (the scratchpad's chiefconv.py, decimate.py) and checked in the game; this is the
 // same in C++, run on the player's PC. xbox\NOTES.md, "Character choice", has the layout of each chunk.
 #include <algorithm>
@@ -478,6 +478,10 @@ bool WriteFile(const fs::path& p, const Bytes& b) {
 }
 }  // namespace
 
+// The maker's version: a body made by another is made again (2: hands where Torque's are, smoother weights and
+// normals, images by place).
+int Version() { return 3; }
+
 // Makes characters\chief from the zip. Torque's body: his mesh's chunks 0x200, 0x203, 0x208 from the Player package.
 bool Make(const fs::path& zip, const fs::path& out, const std::vector<uint8_t>& c200, const std::vector<uint8_t>& c203, const std::vector<uint8_t>& c208) {
     std::map<std::string, Bytes> files;
@@ -515,13 +519,46 @@ bool Make(const fs::path& zip, const fs::path& out, const std::vector<uint8_t>& 
     for (const V3& v : torque.points) tlo = std::min(tlo, v[1]), thi = std::max(thi, v[1]);
     if (hi <= lo) return false;
     double scale = (thi - tlo) / (hi - lo);
-    // the arms, as Torque holds his
-    const double kDown = 12.0 * 3.14159265358979323846 / 180;
-    const double arm_length = 0.60 / scale;
+    // The body's frame (Torque's height, the middle of the body without the arms, the torso at his depth, turned to
+    // face his way): model = flip(scale * p - (mid, low, 0) + (0, 0, shift)), flip turning x and z round (the model
+    // faces +Z, Torque -Z). Worked out before the arms are posed, which must not move it.
+    double mid = 0, low = lo * scale, shift = 0;
+    {
+        double mnx = 1e30, mxx = -1e30;
+        for (const Part& p : parts)
+            if (Lower(p.name).rfind("arms", 0) != 0)
+                for (const V3& v : p.points) mnx = std::min(mnx, v[0] * scale), mxx = std::max(mxx, v[0] * scale);
+        mid = mnx < mxx ? (mnx + mxx) / 2 : 0;
+        double tz = 0, mz = 0;
+        int tn = 0, mn = 0;
+        for (const V3& q : torque.points)
+            if (q[1] > 0.9 && q[1] < 1.3 && std::fabs(q[0]) < 0.25) tz += q[2], tn++;
+        for (const Part& p : parts)
+            if (Lower(p.name).rfind("arms", 0) != 0)
+                for (const V3& v : p.points) {
+                    V3 m{v[0] * scale - mid, v[1] * scale - low, v[2] * scale};
+                    if (m[1] > 0.9 && m[1] < 1.3 && std::fabs(m[0]) < 0.25) mz += m[2], mn++;
+                }
+        shift = (tn ? tz / tn : 0) - (mn ? mz / mn : 0);
+    }
+    auto to_world = [&](V3 m) {  // a point of the body's frame in the model's own
+        V3 f{-m[0], m[1], -m[2]};
+        return Mul(V3{f[0] + mid, f[1] + low, f[2] - shift}, 1 / scale);
+    };
+    // The arms, as Torque holds his: each turned about its shoulder and stretched so that its hand lands where his
+    // hand is (the middle of his vertices 0.70 m or more out to that side), so that what he holds sits in its hand.
+    V3 torque_hand[2] = {};
+    for (int s = 0; s < 2; s++) {
+        double side = s ? 1 : -1, nh = 0;
+        V3 c{0, 0, 0};
+        for (const V3& q : torque.points)
+            if (-q[0] * side > 0.70) c = AddV(c, q), nh++;  // (the model's side -1 is his +x: turned round)
+        torque_hand[s] = nh ? to_world(Mul(c, 1 / nh)) : V3{0, 0, 0};
+    }
     struct Pose {
         V3 pivot{}, target{};
         M3 turn = Identity();
-        double length = 1;
+        double length = 1, reach = 1;
     } pose[2];
     std::vector<V3> arms;
     for (const Part& p : parts)
@@ -557,10 +594,17 @@ bool Make(const fs::path& zip, const fs::path& out, const std::vector<uint8_t>& 
         }
         std::vector<double> sorted = proj;
         std::sort(sorted.begin(), sorted.end());
-        double p3 = sorted[size_t(0.03 * double(sorted.size() - 1))], p995 = sorted[size_t(0.995 * double(sorted.size() - 1))];
+        double p3 = sorted[size_t(0.03 * double(sorted.size() - 1))], p88 = sorted[size_t(0.88 * double(sorted.size() - 1))];
         Pose& ps = pose[s];
         ps.pivot = AddV(c, Mul(axis, p3));
-        ps.target = {side * std::cos(kDown), -std::sin(kDown), 0};
+        V3 hand{0, 0, 0};  // the middle of its hand: the last 12% along the arm
+        double nh = 0;
+        for (size_t i = 0; i < pts.size(); i++)
+            if (proj[i] >= p88) hand = AddV(hand, pts[i]), nh++;
+        hand = Mul(hand, 1 / std::max(1.0, nh));
+        V3 to = Sub(torque_hand[s], ps.pivot);
+        if (Len(to) < 1e-9) continue;
+        ps.target = Mul(to, 1 / Len(to));
         V3 k = Cross(axis, ps.target);
         double sn = Len(k), cs = Dot(axis, ps.target);
         if (sn > 1e-9) {
@@ -570,7 +614,8 @@ bool Make(const fs::path& zip, const fs::path& out, const std::vector<uint8_t>& 
             for (int i = 0; i < 3; i++)
                 for (int j = 0; j < 3; j++) ps.turn[i][j] = (i == j ? 1 : 0) + std::sin(ang) * K[i][j] + (1 - std::cos(ang)) * KK[i][j];
         }
-        ps.length = std::max(1e-6, p995 - p3);
+        ps.length = std::max(1e-6, Dot(Sub(hand, ps.pivot), axis));
+        ps.reach = Len(to);
     }
     // vertices (part, point, uv) and triangles
     struct Vert {
@@ -591,7 +636,7 @@ bool Make(const fs::path& zip, const fs::path& out, const std::vector<uint8_t>& 
                 const Pose& ps = pose[p[0] < 0 ? 0 : 1];
                 V3 q = Apply(ps.turn, Sub(p, ps.pivot));
                 double along = Dot(q, ps.target);
-                if (along > 0) q = AddV(q, Mul(ps.target, along * (arm_length / ps.length - 1)));
+                if (along > 0) q = AddV(q, Mul(ps.target, along * (ps.reach / ps.length - 1)));
                 p = AddV(ps.pivot, q);
             }
         std::map<std::tuple<int64_t, int64_t, int64_t>, int> index;
@@ -625,34 +670,30 @@ bool Make(const fs::path& zip, const fs::path& out, const std::vector<uint8_t>& 
         std::vector<V3> P;
         for (const Vert& v : verts) P.push_back(v.pos);
         std::vector<int> kept;
-        Decimate(P, tris, 6000, 5600, kept);
+        Decimate(P, tris, 9500, 8800, kept);  // (as much as the strips allow: about 3.1 indices a triangle, under the cap)
         std::vector<Vert> nv;
         for (int k : kept) nv.push_back(verts[size_t(k)]);
         verts = std::move(nv);
     }
     LOGR("chief: %zu parts, %zu vertices and %zu triangles, %zu and %zu after lightening", parts.size(), before_v, before_t, verts.size(), tris.size());
-    // the body's frame: Torque's height, centred, torso at his depth, facing his way
+    // the body's frame (above), and the normals made smooth where the model's points meet (the same place in the
+    // body: at the uv seams each copy had only its own side's normal, and the light broke along them)
     {
-        double minx = 1e30, maxx = -1e30, miny = 1e30;
+        std::map<std::tuple<int64_t, int64_t, int64_t>, V3> sum;
+        auto cell = [&](const V3& p) { return std::make_tuple(std::llround(p[0] * 2000), std::llround(p[1] * 2000), std::llround(p[2] * 2000)); };
         for (Vert& v : verts) {
-            v.pos = Mul(v.pos, scale);
-            minx = std::min(minx, v.pos[0]), maxx = std::max(maxx, v.pos[0]), miny = std::min(miny, v.pos[1]);
-        }
-        double tz = 0, mz = 0;
-        int tn = 0, mn = 0;
-        for (const V3& p : torque.points)
-            if (p[1] > 0.9 && p[1] < 1.3 && std::fabs(p[0]) < 0.25) tz += p[2], tn++;
-        for (Vert& v : verts) {
-            v.pos[0] -= (minx + maxx) / 2, v.pos[1] -= miny;
-            if (v.pos[1] > 0.9 && v.pos[1] < 1.3 && std::fabs(v.pos[0]) < 0.25) mz += v.pos[2], mn++;
-        }
-        double shift = (tn ? tz / tn : 0) - (mn ? mz / mn : 0);
-        for (Vert& v : verts) {
-            v.pos[2] += shift;
-            v.pos[0] = -v.pos[0], v.pos[2] = -v.pos[2];  // turned round: the model faces +Z, Torque -Z
-            v.normal[0] = -v.normal[0], v.normal[2] = -v.normal[2];
+            V3 m = Sub(Mul(v.pos, scale), V3{mid, low, -shift});
+            v.pos = {-m[0], m[1], -m[2]};
+            v.normal = {-v.normal[0], v.normal[1], -v.normal[2]};
             double L = Len(v.normal);
             v.normal = L > 1e-9 ? Mul(v.normal, 1 / L) : V3{0, 1, 0};
+            V3& t = sum[cell(v.pos)];
+            t = AddV(t, v.normal);
+        }
+        for (Vert& v : verts) {
+            V3 t = sum[cell(v.pos)];
+            double L = Len(t);
+            if (L > 1e-9 && Dot(t, v.normal) > 0) v.normal = Mul(t, 1 / L);
         }
     }
     // base vertices (one per point of each part) first, then the copies at uv seams
@@ -671,18 +712,19 @@ bool Make(const fs::path& zip, const fs::path& out, const std::vector<uint8_t>& 
     if (n >= 32767) return false;
     std::vector<int> new_of(verts.size());
     for (size_t k = 0; k < n; k++) new_of[size_t(order[k])] = int(k);
-    // weights: the four nearest of Torque's skinned vertices, the three largest kept
+    // weights: the eight nearest of Torque's skinned vertices by inverse square distance (smoother bends than the four
+    // nearest of version 65), the three largest kept
     size_t nb = torque.bones.size();
     std::vector<std::vector<std::pair<int, float>>> weight(nbase);
     for (size_t k = 0; k < nbase; k++) {
         const V3& p = verts[size_t(order[k])].pos;
-        std::array<std::pair<double, int>, 4> best;
+        std::array<std::pair<double, int>, 8> best;
         best.fill({1e30, -1});
         for (size_t t = 0; t < torque.points.size(); t++) {
             V3 d = Sub(p, torque.points[t]);
             double dd = Dot(d, d);
-            if (dd < best[3].first) {
-                best[3] = {dd, int(t)};
+            if (dd < best[7].first) {
+                best[7] = {dd, int(t)};
                 std::sort(best.begin(), best.end());
             }
         }
@@ -690,7 +732,7 @@ bool Make(const fs::path& zip, const fs::path& out, const std::vector<uint8_t>& 
         double total = 0;
         for (auto& [dd, t] : best) {
             if (t < 0) continue;
-            double iw = 1 / (std::sqrt(dd) + 1e-4);
+            double iw = 1 / (dd + 1e-6);
             total += iw;
             for (auto& [bone, x] : torque.weights[size_t(t)]) w[size_t(bone)] += iw * x;
         }
@@ -806,22 +848,41 @@ bool Make(const fs::path& zip, const fs::path& out, const std::vector<uint8_t>& 
                 }
             if (s < 0) break;
             used[size_t(s)] = true;
-            std::vector<int> run = {group[size_t(s)][0], group[size_t(s)][1], group[size_t(s)][2]};
-            for (;;) {
-                int x = run[run.size() - 2], y = run.back();
-                bool odd = (run.size() - 2) % 2 == 1;
-                std::pair<int, int> want = odd ? std::make_pair(y, x) : std::make_pair(x, y);
-                int next = -1, least = 99;
-                auto it = by_edge.find(want);
-                if (it != by_edge.end())
-                    for (int k : it->second)
-                        if (!used[size_t(k)]) {
-                            int f = free_around(k);
-                            if (f < least) least = f, next = k;
-                        }
-                if (next < 0) break;
-                used[size_t(next)] = true;
-                run.push_back(third(next, want.first, want.second));
+            // (the run is grown from each of the three ways round its first triangle, and the longest is kept)
+            auto grow = [&](int r, std::vector<int>& taken) {
+                const auto& g = group[size_t(s)];
+                std::vector<int> run = {g[size_t(r)], g[size_t((r + 1) % 3)], g[size_t((r + 2) % 3)]};
+                for (;;) {
+                    int x = run[run.size() - 2], y = run.back();
+                    bool odd = (run.size() - 2) % 2 == 1;
+                    std::pair<int, int> want = odd ? std::make_pair(y, x) : std::make_pair(x, y);
+                    int next = -1, least = 99;
+                    auto it = by_edge.find(want);
+                    if (it != by_edge.end())
+                        for (int k : it->second)
+                            if (!used[size_t(k)]) {
+                                int f = free_around(k);
+                                if (f < least) least = f, next = k;
+                            }
+                    if (next < 0) break;
+                    used[size_t(next)] = true;
+                    taken.push_back(next);
+                    run.push_back(third(next, want.first, want.second));
+                }
+                return run;
+            };
+            std::vector<int> run;
+            int best_r = 0;
+            size_t best_len = 0;
+            for (int r = 0; r < 3; r++) {
+                std::vector<int> taken;
+                std::vector<int> trial = grow(r, taken);
+                for (int k : taken) used[size_t(k)] = false;
+                if (trial.size() > best_len) best_len = trial.size(), best_r = r;
+            }
+            {
+                std::vector<int> taken;
+                run = grow(best_r, taken);
             }
             if (!strip.empty()) {
                 strip.push_back(strip.back()), strip.push_back(uint16_t(run[0]));
@@ -885,6 +946,10 @@ bool Make(const fs::path& zip, const fs::path& out, const std::vector<uint8_t>& 
         char name[32];
         std::snprintf(name, sizeof name, "chief_%03x.bin", kind);
         if (!WriteFile(out / name, *b)) return false;
+    }
+    {
+        std::ofstream v(out / "chief_version.txt");
+        v << Version() << "\n";
     }
     LOGR("chief: made in %s", out.string().c_str());
     return true;

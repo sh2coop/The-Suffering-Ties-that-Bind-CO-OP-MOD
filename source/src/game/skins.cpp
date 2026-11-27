@@ -22,10 +22,9 @@
 // Player's own materials, Torque's, place by place (the draws of his body went out with Torque's arms-and-hands,
 // head and trousers textures; changing his mesh's materials, its triangles' places, the model copy's material list
 // at +0xA0 or giving the Player the level's own Blackmore 0x72004D changed nothing; where the game does this was
-// not found). So the textures are swapped at the draw: coop.cpp marks a Blackmore body's own draws as texture pack
-// variant 2 and counts them (the 32 x 32 blood layers aside); for place k, the texture drawn (Torque's, any of its
-// blood and morality stages) gets his texture k from skin_<k>.dds, copied into textures\replacement\player3 under
-// that texture's key the first time it is seen (SkinImage). The runtime picks the new image up a moment later.
+// not found). So the textures are swapped at the draw: coop.cpp counts a character's body's own draws (the 32 x 32
+// blood layers aside) and has the runtime draw place k with that character's image k (SkinKey, PackImages:
+// textures/replacement/characters, keyed 5C1A00000000<character><place>).
 //
 // So Blackmore is added to the Player package (60, always loaded, from English\NTSC\Common\Player): his mesh, its
 // materials and its textures are copied out of the player's own disc into copies of Player.mdu, .tdu and .odu
@@ -86,10 +85,12 @@ uint32_t DoublePlayerOf(int who);            // the Player of that player's stan
 
 namespace game_chief {  // chief.cpp: Chief's body from the owner's zip
 bool Make(const fs::path& zip, const fs::path& out, const std::vector<uint8_t>& c200, const std::vector<uint8_t>& c203, const std::vector<uint8_t>& c208);
+int Version();
 }
 
 namespace game_skins {
 uint32_t g_p1_body = 0, g_p2_body = 0;  // settings.toml p1_character, p2_character: 0 Torque, 1 Blackmore, 2 Chief
+void PackImages();  // (below)
 
 namespace {
 constexpr uint32_t kVersion = 7;  // the made files are made again when this changes
@@ -466,7 +467,7 @@ bool Make(const std::vector<std::string>& asked) {
         tdu_more.push_back({n, lt.Bytes(*c)});
     }
     // Each of his materials' own texture, as a DDS file (skin_<place>.dds): what his body is drawn with (see
-    // SkinImage: a Player's body is drawn with the Player's own materials, place by place, whatever model it wears)
+    // SkinKey: a Player's body is drawn with the Player's own materials, place by place, whatever model it wears)
     std::function<uint32_t(uint32_t, int)> first_texture = [&](uint32_t ref, int depth) -> uint32_t {
         const Chunk* c = ref_of(ref) && depth < 4 ? lo.Find(0x102, uint16_t(ref)) : nullptr;
         if (!c) return 0;
@@ -631,7 +632,9 @@ void MakeChief(const std::vector<std::string>& asked) {
         if (it->is_regular_file(ec) && Upper(it->path().extension().string()) == ".ZIP") { zip = it->path(); break; }
     if (zip.empty()) return;
     fs::path made = ChiefDir() / "chief_200.bin";
-    if (fs::exists(made, ec) && fs::last_write_time(made, ec) >= fs::last_write_time(zip, ec)) return;
+    int version = 0;
+    if (std::ifstream v(ChiefDir() / "chief_version.txt"); v) v >> version;
+    if (version == game_chief::Version() && fs::exists(made, ec) && fs::last_write_time(made, ec) >= fs::last_write_time(zip, ec)) return;
     std::vector<std::string> mdu(asked.begin(), asked.end() - 1);
     mdu.push_back("Player.mdu");
     Pack pm;
@@ -639,7 +642,7 @@ void MakeChief(const std::vector<std::string>& asked) {
     const Chunk *h = pm.Find(0x200, 1), *p = pm.Find(0x203, 1), *k = pm.Find(0x208, 1);
     if (!h || !p || !k) return;
     LOGR("skins: making Chief from %s", zip.string().c_str());
-    game_chief::Make(zip, ChiefDir(), pm.Bytes(*h), pm.Bytes(*p), pm.Bytes(*k));
+    if (game_chief::Make(zip, ChiefDir(), pm.Bytes(*h), pm.Bytes(*p), pm.Bytes(*k))) fs::remove(g_dir / "made.txt", ec);  // (the Player files are made again with it)
 }
 
 fs::path Replace(const std::vector<std::string>& parts) {
@@ -662,7 +665,9 @@ fs::path Replace(const std::vector<std::string>& parts) {
         MakeChief(parts);
         if (!Known()) {
             if (Make(parts)) Known();
+            if (g_blackmore) PackImages();
         } else {
+            PackImages();
             LOGR("skins: Player package with Blackmore (model %X) from %s", g_blackmore, g_dir.string().c_str());
         }
     }
@@ -778,26 +783,31 @@ int BodySkin(uint32_t object) {
     return c && game_coop::BodyOwner(object) >= 0 ? int(c) : 0;
 }
 
-// The texture pack image for the draw of place k of a Blackmore body, whose texture (Torque's for that place) has
-// this key: his own texture for that place, in textures\replacement\player3 (variant 2), made once (a copy of
-// skin_<k>.dds). Why: whatever model a Player wears, the game draws its triangle groups with the Player's own
-// materials, Torque's, place by place (seen in the draws: his three groups came out in Torque's arms and hands,
-// head and trousers textures; changing the model's head, its triangles' places or the copy's material list
-// changed nothing). The runtime swaps the image by key for the draws marked as his.
-// (Chief's: variant 3, textures\replacement\player4, from characters\chief\chief_skin_<k>.dds)
-void SkinImage(int character, uint64_t key, uint32_t k, uint32_t w, uint32_t h) {
-    if (character < 1 || character > 2 || k >= (character == 1 ? g_skins : g_chief_skins) || !key) return;
-    static std::set<uint64_t> done[3];
-    if (!done[character].insert(key).second) return;
-    fs::path dir = app::ExeDir() / "textures" / "replacement" / (character == 1 ? "player3" : "player4");
-    char name[80];
-    std::snprintf(name, sizeof name, "%ux%u_%016llx_%s%u.dds", w, h, (unsigned long long)key, character == 1 ? "blackmore" : "chief", k);
+// The image a character's body is drawn with for place k (its own texture for that place), by a key of its own:
+// 5C1A00000000<character><place>. A Player's body is drawn with the Player's own materials, Torque's, place by place,
+// whatever model it wears (seen in the draws: Blackmore's three groups came out in Torque's arms and hands, head and
+// trousers textures; changing the model's head, its triangles' places or the copy's material list changed nothing).
+// So the runtime is told, draw by draw, to use this image for stage 0 (gpu::g_draw_force_image, coop.cpp). The images
+// are put in the texture pack (textures\replacement\characters) when the Player files are made or found, before
+// play. (Until version 65 an image was copied under the key of whichever Torque texture was seen in a place, the
+// first time it was seen: a new blood stage showed Torque's orange trousers until the pack had been read again, the
+// owner saw his armour "come off" and turn orange.)
+uint64_t SkinKey(int character, uint32_t k) { return 0x5C1A000000000000ull | uint64_t(character) << 8 | k; }
+void PackImages() {
+    fs::path dir = app::ExeDir() / "textures" / "replacement" / "characters";
     std::error_code ec;
-    if (fs::exists(dir / name, ec)) return;
     fs::create_directories(dir, ec);
-    fs::path from = character == 1 ? g_dir / ("skin_" + std::to_string(k) + ".dds") : ChiefDir() / ("chief_skin_" + std::to_string(k) + ".dds");
-    fs::copy_file(from, dir / name, fs::copy_options::overwrite_existing, ec);
-    LOGR("skins: %s's place %u is drawn over Torque's texture %ux%u_%016llx (%s)", kNames[character], k, w, h, (unsigned long long)key, ec ? "could not be written" : "written");
+    for (int character = 1; character <= 2; character++) {
+        uint32_t places = character == 1 ? g_skins : g_chief_skins;
+        for (uint32_t k = 0; k < places; k++) {
+            fs::path from = character == 1 ? g_dir / ("skin_" + std::to_string(k) + ".dds") : ChiefDir() / ("chief_skin_" + std::to_string(k) + ".dds");
+            char name[64];
+            std::snprintf(name, sizeof name, "%016llx_%s%u.dds", (unsigned long long)SkinKey(character, k), kNames[character], k);
+            fs::path to = dir / name;
+            if (fs::exists(to, ec) && fs::file_size(to, ec) == fs::file_size(from, ec) && fs::last_write_time(to, ec) >= fs::last_write_time(from, ec)) continue;
+            fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+        }
+    }
 }
 }  // namespace game_skins
 

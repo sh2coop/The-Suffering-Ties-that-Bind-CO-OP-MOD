@@ -1,1 +1,1 @@
-65 2026-11-27 A third character, Chief: put your John.zip in Game Files\characters and pick Chief for either player in Options (Display and Co-op, Co-op section). The game makes him from your own files; nothing of him is shipped.
+66 2026-11-27 Chief: each part drawn with its own image (no orange armour), his hands where Torque's are, smoother. Blackmore: Torque's full skeleton (no floating things, no bat between his legs, guns fire after a switch). Load Game from the pause menu no longer crashes.

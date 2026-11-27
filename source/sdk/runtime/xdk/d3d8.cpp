@@ -1769,6 +1769,7 @@ HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     const uint8_t* flat_vertices = StreamVertices(a[1], flat_stride);
     ClassifyDraw(flat_vertices, flat_stride, a[2]);
     g_state.variant = gpu::g_draw_variant ? gpu::g_draw_variant(ctx, g_state) : 0;  // [local change, The Suffering: Ties That Bind]
+    g_state.force_image = gpu::g_draw_force_image, gpu::g_draw_force_image = 0;  // [local change]
     if (g_backend && !g_flat_skip && !g_letter_skip) g_backend->Draw(ForDraw(), a[0], a[1], a[2], nullptr);
     return 0;
 }
@@ -1780,6 +1781,7 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     const uint8_t* indices = a[2] ? static_cast<const uint8_t*>(HostPtr(a[2])) : nullptr;
     ClassifyDraw(nullptr, 0, 0);
     g_state.variant = gpu::g_draw_variant ? gpu::g_draw_variant(ctx, g_state) : 0;  // [local change, The Suffering: Ties That Bind]
+    g_state.force_image = gpu::g_draw_force_image, gpu::g_draw_force_image = 0;  // [local change]
     if (g_backend) g_backend->Draw(ForDraw(), a[0], 0, a[1], indices);
     return 0;
 }
