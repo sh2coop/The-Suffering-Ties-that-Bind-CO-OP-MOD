@@ -105,7 +105,7 @@ void Asked(X86Context& ctx, uint32_t getter) {
     uint64_t key = (uint64_t(from ^ (action << 20)) << 32) | (user ^ (g_running * 31));
     if (seen[key]++ || seen.size() > 900) return;
     LOGI("coop trace: getter %06X for user %08X (index %u), action %X, inside the method of Player %08X, called from %s", getter, user,
-         mem::IsCommitted(user + 4) ? kernel::R32(user + 4) : 99, action, g_running, Callers(ctx, 6).c_str());
+         mem::Spans(user, 4) ? kernel::R32(user + 4) : 99, action, g_running, Callers(ctx, 6).c_str());
 }
 
 std::string CallersOf(X86Context& ctx) { return Callers(ctx, 8); }
@@ -545,9 +545,9 @@ constexpr uint32_t kPlayerMethods = 0x3381D0;
 constexpr uint32_t kObjectEnd = 0x1849B0;  // (this = engine object)
 
 bool IsPlayerObject(uint32_t object) {
-    if (!object || !mem::IsCommitted(object + 0x110)) return false;
+    if (!object || !mem::Spans(object, 0x110)) return false;
     uint32_t player = kernel::R32(object + kClassObject);
-    return player && mem::IsCommitted(player + 0x88F) && kernel::R32(player) == kPlayerMethods && kernel::R32(player + 4) == object;
+    return player && mem::Spans(player, 0x88F) && kernel::R32(player) == kPlayerMethods && kernel::R32(player + 4) == object;
 }
 
 // Player 2 and everything made for him is forgotten (the level ended them), and Player 1 has the whole screen again
@@ -629,7 +629,7 @@ void EndSecond(X86Context& ctx, const char* why) {
         for (uint32_t i = 1; table && mine && i < entries && mem::IsCommitted(table + i * 6 + 4); i++) {
             uint32_t object = kernel::R32(table + i * 6);
             // (a free entry holds a small number, the next free one, not an object)
-            if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0 || object == g_second_object) continue;
+            if (object < 0x400000 || !mem::IsCommitted(object) || !mem::Spans(object, 0x110) || int32_t(kernel::R32(object + 8)) < 0 || object == g_second_object) continue;
             if (kernel::R16(object + 0xE6) != i) continue;
             float d2 = 0;
             for (int k = 0; k < 3; k++) {
@@ -638,7 +638,7 @@ void EndSecond(X86Context& ctx, const char* why) {
             }
             if (!(d2 <= 16.0f)) continue;  // (four metres: what he carries is on him)
             uint32_t c = kernel::R32(object + kClassObject), cls = ClassOf(object);
-            if (!c || !mem::IsCommitted(c + 0x100)) continue;
+            if (!c || !mem::Spans(c, 0x100)) continue;
             bool item = cls == 0x9710D816 || cls == 0x22E48520 || cls == 0xFE9F718D || cls == kFlashlightClass;
             bool loose = cls == 0xEB13B226;
             if ((item && kernel::R16(c + 0x56) == mine) || (loose && kernel::R16(c + 0x92) == mine)) held.push_back(object);
@@ -709,6 +709,7 @@ uint64_t g_spare_at = 0;
 uint32_t ClassOfTemplate(uint32_t index);
 uint32_t ClassOf(uint32_t object);
 const char* KindName(uint32_t cls);            // what the players use, by its class: "a ladder", "a ledge" (nullptr: none of them)
+bool Whole(uint32_t p, uint32_t size);  // both ends of an object in committed memory (DetailFrame)
 uint32_t Named(uint32_t player, uint32_t at);  // the object a Player's handle names (+0x33E: what he is using, +0x340: what he could use)
 bool ForBoth(uint32_t cls);
 void Spare(X86Context& ctx);
@@ -793,7 +794,7 @@ void Arm(X86Context& ctx) {
 
 void Spare(X86Context& ctx) {
     if (!g_spare_at || g_frames < g_spare_at) return;
-    if (!g_second || !mem::IsCommitted(g_second + 0x490)) {
+    if (!g_second || !mem::Spans(g_second, 0x490)) {
         g_spare_at = 0;
         return;
     }
@@ -831,12 +832,12 @@ bool InScene() {
     // not on any of the 287 lines where he was on a door, ladder, switch or ledge (those keep bit 0 set).
     static uint32_t held = 0;
     {
-        uint32_t b0 = g_player && mem::IsCommitted(g_player + 0xC0) ? kernel::R32(g_player + 0xB0) : 0;
+        uint32_t b0 = g_player && mem::Spans(g_player, 0xC0) ? kernel::R32(g_player + 0xB0) : 0;
         held = (b0 & 0x02000000) && !(b0 & 1) ? held + 1 : 0;
     }
     uint32_t object = kernel::R32(kGameCamera);
-    uint32_t camera = object && mem::IsCommitted(object + 0x110) ? kernel::R32(object + kClassObject) : 0;
-    if (!camera || !mem::IsCommitted(camera + 0x40)) return g_scene_why = "no game camera", true;
+    uint32_t camera = object && mem::Spans(object, 0x110) ? kernel::R32(object + kClassObject) : 0;
+    if (!camera || !mem::Spans(camera, 0x40)) return g_scene_why = "no game camera", true;
     uint32_t stack = kernel::R32(camera + 0x20), count = kernel::R32(camera + 0x28);
     static uint32_t mode_seen = 0;
     uint32_t mode = stack && count && count <= 64 ? kernel::R32(stack + count * 8 - 4) : 99;
@@ -924,7 +925,7 @@ constexpr uint32_t kPlayerStop = 0x2ED90, kPlayerTeleport = 0x2F060;
 void Ears() {
     uint32_t device = kernel::R32(0x398CB0), camera = kernel::R32(kGameCamera);
     static const bool trace = std::getenv("S2_EARS_TRACE") != nullptr;
-    if (trace && g_frames % 120 == 0 && device && mem::IsCommitted(device + 0x44)) {
+    if (trace && g_frames % 120 == 0 && device && mem::Spans(device, 0x44)) {
         uint32_t table = kernel::R32(kObjectManager + 0x0C), handle = kernel::R16(device + 0x42);
         uint32_t object = table && handle ? kernel::R32(table + handle * 6) : 0;
         LOGI("coop: ears trace: device %08X handle %04X object %08X at %.1f %.1f %.1f; game camera %08X (handle %04X), Player 1 object %08X (handle %04X)", device, handle,
@@ -932,7 +933,7 @@ void Ears() {
              object && object > 0x400000 ? ReadF(object + kPosition + 8) : 0.0f, camera, camera ? kernel::R16(camera + 4) : 0, g_player_object,
              g_player_object ? kernel::R16(g_player_object + 4) : 0);
     }
-    if (!device || !mem::IsCommitted(device + 0x44) || !camera || !mem::IsCommitted(camera + 0x60)) return;
+    if (!device || !mem::Spans(device, 0x44) || !camera || !mem::Spans(camera, 0x60)) return;
     if (camera == g_camera2_object) return;  // (Player 2's code is running with his Camera as the game's: not now)
     // (the handle is the object's place in the object manager's table, six bytes an entry, the object first)
     uint32_t table = kernel::R32(kObjectManager + 0x0C), have = kernel::R16(device + 0x42);
@@ -950,7 +951,7 @@ struct TrailPoint {
 };
 std::vector<TrailPoint> g_trail;
 void TrailStep() {
-    if (!g_player_object || !mem::IsCommitted(g_player_object + 0x60)) {
+    if (!g_player_object || !mem::Spans(g_player_object, 0x60)) {
         g_trail.clear();
         return;
     }
@@ -1117,7 +1118,7 @@ void Session(X86Context& ctx, bool wanted) {
     if (Trace()) {  // the game's Camera, whenever it or what it does changes
         static uint64_t before = 0;
         uint32_t object = kernel::R32(kGameCamera);
-        uint32_t camera = object && mem::IsCommitted(object + 0x110) ? kernel::R32(object + kClassObject) : 0;
+        uint32_t camera = object && mem::Spans(object, 0x110) ? kernel::R32(object + kClassObject) : 0;
         uint32_t stack = camera ? kernel::R32(camera + 0x20) : 0, n = camera ? kernel::R32(camera + 0x28) : 0;
         uint32_t mode = stack && n && n < 64 ? kernel::R32(stack + n * 8 - 4) : 99, handle = camera ? kernel::R32(camera + 0x38) & 0xFFFF : 0;
         uint32_t table = kernel::R32(kObjectManager + 0x0C), tracked = table && handle ? kernel::R32(table + handle * 6) : 0;
@@ -1142,8 +1143,8 @@ void Session(X86Context& ctx, bool wanted) {
         // its line in InScene). Asked for on 2026-11-26: "there was a bug where his camera became fixed", and the
         // log of that session had nothing about his camera.
         static uint64_t before = ~0ull;
-        uint32_t camera = g_camera2_object && mem::IsCommitted(g_camera2_object + 0x110) ? kernel::R32(g_camera2_object + kClassObject) : 0;
-        if (camera && mem::IsCommitted(camera + 0x40)) {
+        uint32_t camera = g_camera2_object && mem::Spans(g_camera2_object, 0x110) ? kernel::R32(g_camera2_object + kClassObject) : 0;
+        if (camera && mem::Spans(camera, 0x40)) {
             uint32_t stack = kernel::R32(camera + 0x20), n = kernel::R32(camera + 0x28);
             uint32_t mode = stack && n && n <= 64 ? kernel::R32(stack + n * 8 - 4) : 99, cflags = kernel::R32(camera + 0x2C);
             uint32_t table = kernel::R32(kObjectManager + 0x0C), handle = kernel::R32(camera + 0x38) & 0xFFFF;
@@ -1347,7 +1348,7 @@ void TestLineup(X86Context& ctx) {
         static const float gap = std::getenv("S2_TEST_LINEUP_GAP") ? float(std::atof(std::getenv("S2_TEST_LINEUP_GAP"))) : 1.6f;
         float pos[3], side = (float(k) - float(many - 1) * 0.5f) * gap, dir[3] = {1, 0, 0};
         uint32_t cam = kernel::R32(kGameCamera);
-        if (cam && mem::IsCommitted(cam + 0x60)) {
+        if (cam && mem::Spans(cam, 0x60)) {
             dir[0] = ReadF(g_player_object + kPosition) - ReadF(cam + kPosition), dir[2] = ReadF(g_player_object + kPosition + 8) - ReadF(cam + kPosition + 8);
             float len = std::sqrt(dir[0] * dir[0] + dir[2] * dir[2]);
             if (len > 0.01f) dir[0] /= len, dir[2] /= len;
@@ -1367,7 +1368,7 @@ void TestLineup(X86Context& ctx) {
 void TestFace(X86Context& ctx) {
     static const bool on = std::getenv("S2_COOP_FACE") != nullptr;
     if (!on || !g_test_enemy || !g_second || !g_second_object || g_frames % 15) return;
-    if (!mem::IsCommitted(g_test_enemy + 0x110) || (kernel::R32(g_test_enemy + 8) & 0x80010000)) return;
+    if (!mem::Spans(g_test_enemy, 0x110) || (kernel::R32(g_test_enemy + 8) & 0x80010000)) return;
     static uint32_t matrix = mem::AllocSystem(64);
     float m[16];
     std::memcpy(m, kernel::HostPtr(g_second_object + kMatrix), 64);
@@ -1533,12 +1534,12 @@ bool DoublesThing(uint32_t object) {  // a stand-in body, or what one holds
 // (A stand-in has none as long as its Detect never runs; 0x1CB80 is also called from 0x41770 and 0x45890, so the
 // code below looks for one all the same.)
 uint32_t ProxyOf(uint32_t player) {
-    if (!player || !mem::IsCommitted(player + 0xF4)) return 0;
+    if (!player || !mem::Spans(player, 0xF4)) return 0;
     uint32_t body = kernel::R32(player + 0xF0);
-    if (!body || !mem::IsCommitted(body + 0x130)) return 0;
+    if (!body || !mem::Spans(body, 0x130)) return 0;
     uint32_t table = kernel::R32(kObjectManager + 0x0C), h = kernel::R16(body + 0xD8);
-    uint32_t object = table && h ? kernel::R32(table + h * 6) : 0;
-    return object && mem::IsCommitted(object + 0x110) ? object : 0;
+    uint32_t object = table && h && h < kernel::R32(kObjectManager + 0x14) ? kernel::R32(table + h * 6) : 0;
+    return object && Whole(object, 0x114) ? object : 0;  // (both ends: see Named)
 }
 void OffTheList(uint32_t object) {
     uint32_t list = kernel::R32(kObjectManager + kPlayerList), count = kernel::R32(kObjectManager + kPlayerCount);
@@ -1553,7 +1554,7 @@ void OffTheList(uint32_t object) {
 // property 0x11 of his model's set (0x26090, this = Player: the set is another in first person, 0x25FE0), and the
 // object at a point is the skeleton's to say (0x188130, this = the skeleton at [object +0xE8]; the point).
 uint32_t ReadyPoint(X86Context& ctx, uint32_t player) {
-    if (!player || !mem::IsCommitted(player + 0x770) || !kernel::R32(player + ((kernel::R32(player + 0xBC) & 0x8000) ? 0x768 : 0x76C))) return 0xFFFFFFFF;
+    if (!player || !mem::Spans(player, 0x770) || !kernel::R32(player + ((kernel::R32(player + 0xBC) & 0x8000) ? 0x768 : 0x76C))) return 0xFFFFFFFF;
     uint32_t ecx = ctx.ecx, eax = ctx.eax;
     ctx.ecx = player;
     uint32_t point = kernel::CallGuest(ctx, 0x26090, {0x11});
@@ -1561,17 +1562,17 @@ uint32_t ReadyPoint(X86Context& ctx, uint32_t player) {
     return point;
 }
 uint32_t AtPoint(X86Context& ctx, uint32_t player, uint32_t point) {
-    uint32_t object = player ? kernel::R32(player + 4) : 0, skeleton = object && mem::IsCommitted(object + 0x110) ? kernel::R32(object + 0xE8) : 0;
-    if (!skeleton || !mem::IsCommitted(skeleton + 0x10) || point == 0xFFFFFFFF) return 0;
+    uint32_t object = player ? kernel::R32(player + 4) : 0, skeleton = object && mem::Spans(object, 0x110) ? kernel::R32(object + 0xE8) : 0;
+    if (!skeleton || !mem::Spans(skeleton, 0x10) || point == 0xFFFFFFFF) return 0;
     uint32_t ecx = ctx.ecx, eax = ctx.eax;
     ctx.ecx = skeleton;
     uint32_t at = kernel::CallGuest(ctx, 0x188130, {point});
     ctx.ecx = ecx, ctx.eax = eax;
-    return at && mem::IsCommitted(at + 0x110) && int32_t(kernel::R32(at + 8)) >= 0 ? at : 0;
+    return at && mem::Spans(at, 0x110) && int32_t(kernel::R32(at + 8)) >= 0 ? at : 0;
 }
 // A thing made to be thrown, as the game asks it (0x2B0C0): a Bouncing Object, a Missile, Lightning.
 bool Throwable(uint32_t object) {
-    if (!object || !mem::IsCommitted(object + 0x110)) return false;
+    if (!object || !mem::Spans(object, 0x110)) return false;
     uint32_t cls = ClassOf(object);
     return cls == 0xEB13B226 || cls == 0xFD73BAB8 || cls == 0x16AB1B0C;
 }
@@ -1582,7 +1583,7 @@ void DoublesLoose(X86Context& ctx) {
     for (int which = 0; which < 2; which++) {
         Double& d = g_doubles[which];
         d.loose[0] = d.loose[1] = d.owner_loose[0] = d.owner_loose[1] = 0;
-        if (!d.object || !d.player || !mem::IsCommitted(d.object + 0x110) || int32_t(kernel::R32(d.object + 8)) < 0) continue;
+        if (!d.object || !d.player || !mem::Spans(d.object, 0x110) || int32_t(kernel::R32(d.object + 8)) < 0) continue;
         auto look = [&](uint32_t player, uint32_t out[2]) {
             out[0] = AtPoint(ctx, player, ReadyPoint(ctx, player));
             uint32_t hand = kernel::R32(player + 0x44A);
@@ -1592,7 +1593,7 @@ void DoublesLoose(X86Context& ctx) {
         };
         look(d.player, d.loose);
         uint32_t owner = which ? g_second : g_player, owner_object = which ? g_second_object : g_player_object;
-        if (d.out && owner && owner_object && mem::IsCommitted(owner + 0x490) && int32_t(kernel::R32(owner_object + 8)) >= 0) look(owner, d.owner_loose);
+        if (d.out && owner && owner_object && mem::Spans(owner, 0x490) && int32_t(kernel::R32(owner_object + 8)) >= 0) look(owner, d.owner_loose);
     }
 }
 // The throw of a stand-in is for show. The game throws in three steps, each a message the throwing movement sends its
@@ -1608,8 +1609,8 @@ void DoublesLoose(X86Context& ctx) {
 // that flies), and the next one is put on its belt by Doubles when the throw is over.
 void DoubleTakesInHand(X86Context& ctx, int which, uint32_t message) {
     Double& d = g_doubles[which];
-    uint32_t record = message && mem::IsCommitted(message + 8) ? kernel::R32(message + 4) : 0;
-    if (!record || !mem::IsCommitted(record + 0x10) || kernel::R32(record + 4) != 1 || !d.object) return;
+    uint32_t record = message && mem::Spans(message, 8) ? kernel::R32(message + 4) : 0;
+    if (!record || !mem::Spans(record, 0x10) || kernel::R32(record + 4) != 1 || !d.object) return;
     uint32_t hand = kernel::R32(record + 0x0A), skeleton = kernel::R32(d.object + 0xE8);
     uint32_t there = AtPoint(ctx, d.player, hand);
     if (!skeleton || Throwable(there)) return;  // (as the game: the hand has one already)
@@ -1639,8 +1640,8 @@ void DoubleTakesInHand(X86Context& ctx, int which, uint32_t message) {
 }
 void DoubleLetsGo(X86Context& ctx, int which, uint32_t message) {
     Double& d = g_doubles[which];
-    uint32_t record = message && mem::IsCommitted(message + 8) ? kernel::R32(message + 4) : 0;
-    if (!record || !mem::IsCommitted(record + 0x10) || kernel::R32(record + 4) != 1 || !d.object) return;
+    uint32_t record = message && mem::Spans(message, 8) ? kernel::R32(message + 4) : 0;
+    if (!record || !mem::Spans(record, 0x10) || kernel::R32(record + 4) != 1 || !d.object) return;
     uint32_t hand = kernel::R32(record + 0x0A), skeleton = kernel::R32(d.object + 0xE8);
     uint32_t there = AtPoint(ctx, d.player, hand);
     if (!skeleton || !Throwable(there)) return;
@@ -1764,12 +1765,12 @@ void EndDoubles(X86Context& ctx, const char* why) {
         ended++;
         // (what hangs on it, ready to throw or in its hand: objects of their own, they would fall to the ground there)
         for (uint32_t l : loose) {
-            if (!l || !mem::IsCommitted(l + 0x110) || int32_t(kernel::R32(l + 8)) < 0) continue;
+            if (!l || !mem::Spans(l, 0x110) || int32_t(kernel::R32(l + 8)) < 0) continue;
             ctx.ecx = l;
             kernel::CallGuest(ctx, kObjectEnd, {});
         }
-        if (display && mem::IsCommitted(player + 0x7F4) && !kernel::R32(player + 0x7F0)) kernel::W32(player + 0x7F0, display);
-        if (mem::IsCommitted(object + 0x110) && int32_t(kernel::R32(object + 8)) >= 0) {
+        if (display && mem::Spans(player, 0x7F4) && !kernel::R32(player + 0x7F0)) kernel::W32(player + 0x7F0, display);
+        if (mem::Spans(object, 0x110) && int32_t(kernel::R32(object + 8)) >= 0) {
             ctx.ecx = object;
             kernel::CallGuest(ctx, kObjectEnd, {});
         }
@@ -1833,7 +1834,7 @@ void PinDoubles(X86Context& ctx) {
         Double& d = g_doubles[which];
         if (!d.object || !d.out) continue;
         uint32_t owner = which ? g_second_object : g_player_object, owner_player = which ? g_second : g_player;
-        if (!owner || !owner_player || !mem::IsCommitted(owner + 0x110) || !mem::IsCommitted(d.object + 0x110)) continue;
+        if (!owner || !owner_player || !mem::Spans(owner, 0x110) || !mem::Spans(d.object, 0x110)) continue;
         // (both still what they were: not ended, and each object still its Player's)
         if (int32_t(kernel::R32(owner + 8)) < 0 || kernel::R32(owner + kClassObject) != owner_player) continue;
         if (int32_t(kernel::R32(d.object + 8)) < 0 || kernel::R32(d.object + kClassObject) != d.player) continue;
@@ -1850,17 +1851,17 @@ void PinDoubles(X86Context& ctx) {
         } else {
             ctx.ecx = d.object;
             uint32_t its = kernel::CallGuest(ctx, 0x184EB0, {});  // (an object's matrix, to be written: the engine marks it changed)
-            if (its && mem::IsCommitted(its + 0x3C)) std::memcpy(kernel::HostPtr(its), kernel::HostPtr(matrix), 64);
+            if (its && mem::Spans(its, 0x3C)) std::memcpy(kernel::HostPtr(its), kernel::HostPtr(matrix), 64);
             uint32_t skeleton = kernel::R32(d.object + 0xE8), body = kernel::R32(d.player + 0xF0);
-            if (skeleton && mem::IsCommitted(skeleton + 0x1E4)) std::memcpy(kernel::HostPtr(skeleton + 0x1A4), kernel::HostPtr(matrix), 64);
-            if (body && mem::IsCommitted(body + 0x90)) std::memcpy(kernel::HostPtr(body + 0x84), kernel::HostPtr(matrix + 0x30), 12);
+            if (skeleton && mem::Spans(skeleton, 0x1E4)) std::memcpy(kernel::HostPtr(skeleton + 0x1A4), kernel::HostPtr(matrix), 64);
+            if (body && mem::Spans(body, 0x90)) std::memcpy(kernel::HostPtr(body + 0x84), kernel::HostPtr(matrix + 0x30), 12);
             uint32_t carried[4] = {Named(d.player, 0x3AC), Named(d.player, 0x3AE), d.loose[0], d.loose[1]};
             if (carried[1] == carried[0]) carried[1] = 0;
             for (uint32_t held : carried) {
                 if (!held) continue;
                 ctx.ecx = held;
                 uint32_t m = kernel::CallGuest(ctx, 0x184EB0, {});
-                if (!m || !mem::IsCommitted(m + 0x3C)) continue;
+                if (!m || !mem::Spans(m, 0x3C)) continue;
                 for (int i = 0; i < 3; i++) {
                     float v = ReadF(m + 0x30 + i * 4) + step[i];
                     std::memcpy(kernel::HostPtr(m + 0x30 + i * 4), &v, 4);
@@ -1870,7 +1871,7 @@ void PinDoubles(X86Context& ctx) {
         if (uint32_t proxy = ProxyOf(d.player)) {
             ctx.ecx = proxy;
             uint32_t its = kernel::CallGuest(ctx, 0x184EB0, {});
-            if (its && mem::IsCommitted(its + 0x3C)) std::memcpy(kernel::HostPtr(its + 0x30), kernel::HostPtr(matrix + 0x30), 12);
+            if (its && mem::Spans(its, 0x3C)) std::memcpy(kernel::HostPtr(its + 0x30), kernel::HostPtr(matrix + 0x30), 12);
         }
         OffTheList(d.object);
     }
@@ -1879,9 +1880,9 @@ void PinDoubles(X86Context& ctx) {
 // once a frame
 void Doubles(X86Context& ctx) {
     g_doubles_fresh = false;
-    bool both = g_second && g_second_object && mem::IsCommitted(g_second + 0x490) && g_player && g_player_object && mem::IsCommitted(g_player + 0x490);
+    bool both = g_second && g_second_object && mem::Spans(g_second, 0x490) && g_player && g_player_object && mem::Spans(g_player, 0x490);
     for (Double& d : g_doubles)
-        if (d.object && (!mem::IsCommitted(d.object + 0x110) || int32_t(kernel::R32(d.object + 8)) < 0 || kernel::R32(d.object + kClassObject) != d.player)) {
+        if (d.object && (!mem::Spans(d.object, 0x110) || int32_t(kernel::R32(d.object + 8)) < 0 || kernel::R32(d.object + kClassObject) != d.player)) {
             LOGI("coop: a stand-in body's object ended by itself");
             d = Double{};
         }
@@ -2042,9 +2043,9 @@ struct CameraNow {
 };
 CameraNow CameraOf(uint32_t object) {
     CameraNow c;
-    if (!object || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) return c;
+    if (!object || !mem::Spans(object, 0x110) || int32_t(kernel::R32(object + 8)) < 0) return c;
     uint32_t camera = kernel::R32(object + kClassObject);
-    if (!camera || !mem::IsCommitted(camera + 0x40)) return c;
+    if (!camera || !mem::Spans(camera, 0x40)) return c;
     c.there = true;
     for (int i = 0; i < 3; i++) c.eye[i] = ReadF(object + kPosition + i * 4), c.way[i] = ReadF(object + kMatrix + 0x20 + i * 4);
     uint32_t stack = kernel::R32(camera + 0x20);
@@ -2301,7 +2302,7 @@ void DetailFrame(X86Context& ctx) {
         for (uint32_t i = 0; i < count; i++) {
             uint32_t e = list + i * 0x16, h = kernel::R16(e + 0x14);
             uint32_t owner = table && h ? kernel::R32(table + h * 6) : 0;
-            uint32_t cls = owner && mem::IsCommitted(owner + 0x110) ? ClassOf(owner) : 0;
+            uint32_t cls = owner && mem::Spans(owner, 0x110) ? ClassOf(owner) : 0;
             int whose = !owner ? 0 : owner == g_player_object ? 1 : owner == g_second_object ? 2 : 0;
             float strength = ReadF(e + 4);
             char who[12];
@@ -2358,7 +2359,7 @@ void DetailFrame(X86Context& ctx) {
         uint32_t entries = std::min<uint32_t>(kernel::R32(kObjectManager + 0x14), 0x4000), other_handle = 0, objects = 0;
         for (uint32_t h = 1; table && h < entries && mem::IsCommitted(table + h * 6 + 4); h++) {
             uint32_t object = kernel::R32(table + h * 6);
-            if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
+            if (object < 0x400000 || !mem::IsCommitted(object) || !mem::Spans(object, 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
             objects++;
             if (kernel::R16(object + 0xE6) != h) {
                 other_handle++;
@@ -2410,11 +2411,11 @@ void Frame(X86Context& ctx) {
             LOGR("fp probe: frame %llu: object %08X model id %08X resource %08X skeleton %08X; Player +760 %08X +764 %08X +768 %08X +76C %08X; state %08X",
                  (unsigned long long)g_frames, o, kernel::R32(o + 0x64), res, sk, kernel::R32(g_player + 0x760), kernel::R32(g_player + 0x764),
                  kernel::R32(g_player + 0x768), kernel::R32(g_player + 0x76C), kernel::R32(g_player + 0xBC));
-            if (res && mem::IsCommitted(res + 0x80)) Dump("fp probe resource", res, 0x80);
-            if (sk && mem::IsCommitted(sk + 0xC0)) Dump("fp probe skeleton", sk, 0xC0);
+            if (res && mem::Spans(res, 0x80)) Dump("fp probe resource", res, 0x80);
+            if (sk && mem::Spans(sk, 0xC0)) Dump("fp probe skeleton", sk, 0xC0);
             for (uint32_t at : {0x760u, 0x764u}) {
                 uint32_t r = kernel::R32(g_player + at);
-                if (r && mem::IsCommitted(r + 0x80)) Dump(at == 0x760 ? "fp probe +760" : "fp probe +764", r, 0x80);
+                if (r && mem::Spans(r, 0x80)) Dump(at == 0x760 ? "fp probe +760" : "fp probe +764", r, 0x80);
             }
         }
     }
@@ -2660,10 +2661,10 @@ void Frame(X86Context& ctx) {
             float shape = game_view::Aspect() * 0.5f;
             for (int v = 0; v < 2; v++) {
                 float x = -1, y = -1;
-                uint32_t eye = cams[v] && mem::IsCommitted(cams[v] + 0x284) ? kernel::R32(cams[v] + 0xA0) : 0;
+                uint32_t eye = cams[v] && mem::Spans(cams[v], 0x284) ? kernel::R32(cams[v] + 0xA0) : 0;
                 float distance = eye ? ReadF(cams[v] + 0x280) : 0;
                 bool shown = !g_down_until;  // (Player 2 is out of sight while he is down, and sees nothing himself)
-                if (eye && mem::IsCommitted(eye + 0x60) && distance > 1e-4f && partner[v] && shown) {
+                if (eye && mem::Spans(eye, 0x60) && distance > 1e-4f && partner[v] && shown) {
                     float m[16], d[3];
                     std::memcpy(m, kernel::HostPtr(eye + kMatrix), 64);
                     for (int i = 0; i < 3; i++) d[i] = ReadF(partner[v] + kPosition + i * 4) - m[12 + i];
@@ -2726,7 +2727,7 @@ void Frame(X86Context& ctx) {
                        {0x400000, "looks at a security monitor", "leaves the security monitor"}};
         const uint32_t players[2] = {g_player, g_second};
         for (int i = 0; i < 2; i++) {
-            if (!players[i] || !mem::IsCommitted(players[i] + 0xBC)) {
+            if (!players[i] || !mem::Spans(players[i], 0xBC)) {
                 before[i] = 0;
                 continue;
             }
@@ -2750,9 +2751,9 @@ void Frame(X86Context& ctx) {
             // skeleton ([object +0xE8] +0x64, three floats; 0xD93D0 sets it, 0xD92A0 puts 1 back, both for "the
             // player"). Should that way back ever be taken for Player 1 while it was Player 2 who climbed, he is
             // not left stretched.
-            if (i == 1 && (before[i] & ~now & 0x200000) && g_second_object && mem::IsCommitted(g_second_object + 0xEC)) {
+            if (i == 1 && (before[i] & ~now & 0x200000) && g_second_object && mem::Spans(g_second_object, 0xEC)) {
                 uint32_t skeleton = kernel::R32(g_second_object + 0xE8);
-                if (skeleton && mem::IsCommitted(skeleton + 0x70)) {
+                if (skeleton && mem::Spans(skeleton, 0x70)) {
                     float sx = ReadF(skeleton + 0x64), sy = ReadF(skeleton + 0x68), sz = ReadF(skeleton + 0x6C);
                     if (sx != 1.0f || sy != 1.0f || sz != 1.0f) {
                         const float one = 1.0f;
@@ -2772,19 +2773,19 @@ void Frame(X86Context& ctx) {
             uint32_t table = kernel::R32(kObjectManager + 0x0C);
             for (int i = 0; i < 2; i++) {
                 uint32_t pl = players[i];
-                if (!pl || !mem::IsCommitted(pl + 0x540)) continue;
+                if (!pl || !mem::Spans(pl, 0x540)) continue;
                 std::string line;
                 char one[64];
                 uint32_t list = kernel::R32(pl + 0x342), count = kernel::R32(pl + 0x34A);
                 for (uint32_t k = 0; list && k < count && k < 8; k++) {
                     uint32_t h = kernel::R16(list + k * 6), o = table && h ? kernel::R32(table + h * 6) : 0;
-                    std::snprintf(one, sizeof one, " %08X(%X)", o && mem::IsCommitted(o + 0x110) ? ClassOf(o) : 0, kernel::R32(list + k * 6 + 2));
+                    std::snprintf(one, sizeof one, " %08X(%X)", o && mem::Spans(o, 0x110) ? ClassOf(o) : 0, kernel::R32(list + k * 6 + 2));
                     line += one;
                 }
                 uint32_t h1 = kernel::R16(pl + 0x33E), h2 = kernel::R16(pl + 0x340);
                 uint32_t o1 = table && h1 ? kernel::R32(table + h1 * 6) : 0, o2 = table && h2 ? kernel::R32(table + h2 * 6) : 0;
                 LOGI("use trace: Player %d can use %u things:%s; +33E names %08X, +340 names %08X; looks at %u; +B0 %08X +BC %08X", i + 1, count, line.c_str(),
-                     o1 && mem::IsCommitted(o1 + 0x110) ? ClassOf(o1) : 0, o2 && mem::IsCommitted(o2 + 0x110) ? ClassOf(o2) : 0, kernel::R32(pl + 0x53A),
+                     o1 && mem::Spans(o1, 0x110) ? ClassOf(o1) : 0, o2 && mem::Spans(o2, 0x110) ? ClassOf(o2) : 0, kernel::R32(pl + 0x53A),
                      kernel::R32(pl + 0xB0), kernel::R32(pl + 0xBC));
             }
         }
@@ -2801,7 +2802,7 @@ void Frame(X86Context& ctx) {
         static bool down[2] = {false, false};
         const uint32_t players[2] = {g_player, g_second};
         for (int i = 0; i < 2; i++) {
-            bool now = players[i] && mem::IsCommitted(players[i] + 0x20) && ReadF(players[i] + 0x16) <= 0.0f;
+            bool now = players[i] && mem::Spans(players[i], 0x20) && ReadF(players[i] + 0x16) <= 0.0f;
             if (now != down[i] && players[i]) LOGI("coop: Player %d's health %s", i + 1, now ? "is gone: he is down" : "is back");
             down[i] = now;
         }
@@ -2809,7 +2810,7 @@ void Frame(X86Context& ctx) {
     if (g_frames % 60 == 0 && g_player && g_player_object && InLevel()) {  // (what else each player is, once a second)
         uint32_t view = kernel::R32(kViewPointer);
         char two[96] = "";
-        if (g_second && mem::IsCommitted(g_second + 0x490))
+        if (g_second && mem::Spans(g_second, 0x490))
             std::snprintf(two, sizeof two, "; Player 2 %08X %08X meter %.0f", kernel::R32(g_second + 0xB0), kernel::R32(g_second + 0xBC), ReadF(g_second + 0x48A));
         LOGI("state: Player 1 %08X %08X meter %.0f morality %.0f%s; %u view cameras, %s", kernel::R32(g_player + 0xB0), kernel::R32(g_player + 0xBC),
              ReadF(g_player + 0x48A), ReadF(g_player + 0x482), two, view ? kernel::R32(view + kViewCount) : 0,
@@ -2835,7 +2836,7 @@ void Frame(X86Context& ctx) {
              ReadF(g_second_object + kPosition), ReadF(g_second_object + kPosition + 4), ReadF(g_second_object + kPosition + 8), yaw(g_second_object),
              g_second ? ReadF(g_second + 0x16) : 0.0f);
         // (tests) the enemy made by S2_COOP_ENEMY, while its object is alive
-        if (g_test_enemy && mem::IsCommitted(g_test_enemy + 0x110) && !(kernel::R32(g_test_enemy + 8) & 0x80010000))
+        if (g_test_enemy && mem::Spans(g_test_enemy, 0x110) && !(kernel::R32(g_test_enemy + 8) & 0x80010000))
             LOGI("coop: test: the enemy at %.2f %.2f %.2f facing %.0f (flags %08X)", ReadF(g_test_enemy + kPosition), ReadF(g_test_enemy + kPosition + 4),
                  ReadF(g_test_enemy + kPosition + 8), yaw(g_test_enemy), kernel::R32(g_test_enemy + 8));
         else if (g_test_enemy)
@@ -2938,7 +2939,7 @@ X86_FUNC(sub_0016F3C0) {
     // S2_CLASS_MAP=1: each class's method table, once (tools\classmap.py makes the table of which function is
     // whose from these lines: the code-reading trace of two players goes by class)
     static const bool map = std::getenv("S2_CLASS_MAP") != nullptr;
-    if (map && ctx.eax && mem::IsCommitted(ctx.eax + 4)) {
+    if (map && ctx.eax && mem::Spans(ctx.eax, 4)) {
         static std::map<uint32_t, uint32_t> seen;
         uint32_t methods = kernel::R32(ctx.eax);
         if (seen.emplace(cls, methods).second) LOGR("classmap: %08X %08X", cls, methods);
@@ -3063,10 +3064,10 @@ X86_FUNC(sub_0001B0D0) {
 X86_EXTERN_FUNC(__imp__sub_0002DA30);
 X86_FUNC(sub_0002DA30) {
     uint32_t player = ctx.ecx, object = kernel::R32(ctx.esp + 4);
-    uint32_t count = player && mem::IsCommitted(player + 0x540) ? kernel::R32(player + 0x53A) : 0;
+    uint32_t count = player && mem::Spans(player, 0x540) ? kernel::R32(player + 0x53A) : 0;
     __imp__sub_0002DA30(ctx, base);
     static const bool trace = std::getenv("S2_USE_TRACE") != nullptr;
-    if (trace && object && mem::IsCommitted(object + 0x110) && (player == game_coop::g_player || player == game_coop::g_second)) {
+    if (trace && object && mem::Spans(object, 0x110) && (player == game_coop::g_player || player == game_coop::g_second)) {
         static std::map<uint64_t, int> seen;
         uint32_t after = kernel::R32(player + 0x53A);
         uint64_t key = (uint64_t(object) << 2) | (player == game_coop::g_second ? 2 : 0) | (after > count ? 1 : 0);
@@ -3459,7 +3460,7 @@ X86_FUNC(sub_00108120) {
 namespace game_coop {
 constexpr uint32_t kTemplates = 0x384BA4;  // the template table: chunks of 1024 at +0, entry size +0x14, count +0x18
 uint32_t ClassOf(uint32_t object) {
-    if (!object) return 0;
+    if (!object || !mem::Spans(object, kTemplateWord) || !mem::Spans(object, kTemplateWord + 3)) return 0;
     uint32_t index = kernel::R32(object + kTemplateWord) & 0xFFFF, table = kernel::R32(kTemplates);
     if (index == 0xFFFF || !table || index >= kernel::R32(table + 0x18)) return 0;
     uint32_t chunk = kernel::R32(kernel::R32(table) + (index >> 10) * 4);
@@ -3583,7 +3584,7 @@ X86_FUNC(sub_001706F0) {
         // touched it, and it is told of nothing.
         uint32_t table = kernel::R32(game_coop::kObjectManager + 0x0C), handle = kernel::R32(ctx.ecx + 0x0C) & 0xFFFF;
         uint32_t touched = table && handle ? kernel::R32(table + handle * 6) : 0, contact = kernel::R32(ctx.esp + 4);
-        uint32_t toucher = contact && mem::IsCommitted(contact + 0x34) ? kernel::R32(contact + 0x30) : 0;
+        uint32_t toucher = contact && mem::Spans(contact, 0x34) ? kernel::R32(contact + 0x30) : 0;
         bool refuse = game_coop::DoubleObject(touched) >= 0 || game_coop::DoubleObject(toucher) >= 0;
         for (const game_coop::Double& d : game_coop::g_doubles)
             if (uint32_t proxy = d.player ? game_coop::ProxyOf(d.player) : 0; proxy && toucher == proxy) refuse = true;
@@ -3710,9 +3711,9 @@ std::string WhoIs(uint32_t object) {
 }
 
 void Hit(uint32_t victim, uint32_t by, float amount) {
-    if (!g_player_object || !victim || !mem::IsCommitted(victim + 0x20)) return;
+    if (!g_player_object || !victim || !mem::Spans(victim, 0x20)) return;
     uint32_t object = kernel::R32(victim + 4);
-    if (by && !mem::IsCommitted(by + 0x110)) by = 0;
+    if (by && !mem::Spans(by, 0x110)) by = 0;
     bool player = object == g_player_object || object == g_second_object || (by && (by == g_player_object || by == g_second_object));
     if (!player) return;
     if (by && amount > 0 && (object == g_player_object || object == g_second_object) && by != g_player_object && by != g_second_object)
@@ -3742,7 +3743,7 @@ X86_FUNC(sub_00028E00) {
         uint32_t by = kernel::R32(ctx.esp + 8);
         if (game_coop::g_double_hits++ < 12)
             LOGR("coop: a stand-in body was hit (%u) by %s: not hurt (the hit came through %s)", game_coop::g_double_hits,
-                 by && mem::IsCommitted(by + 0x110) ? game_coop::WhoIs(by).c_str() : "nothing named", game_coop::Callers(ctx, 12).c_str());
+                 by && mem::Spans(by, 0x110) ? game_coop::WhoIs(by).c_str() : "nothing named", game_coop::Callers(ctx, 12).c_str());
         float none = 0;
         std::memcpy(kernel::HostPtr(ctx.esp + 4), &none, 4);
     }
@@ -3751,7 +3752,7 @@ X86_FUNC(sub_00028E00) {
     // tests: S2_COOP_HURT_TRACE=1 logs where the first hurts of a Player by a person or a creature come from
     static const bool trace = std::getenv("S2_COOP_HURT_TRACE") != nullptr;
     static int said = 0;
-    if (trace && said < 8 && game_coop::g_hit_by && mem::IsCommitted(game_coop::g_hit_by + 0x110)) {
+    if (trace && said < 8 && game_coop::g_hit_by && mem::Spans(game_coop::g_hit_by, 0x110)) {
         uint32_t cls = game_coop::ClassOf(game_coop::g_hit_by);
         if (cls == 0x0E15C87E || cls == 0xC3F8C321 || cls == 0x4E28364F || cls == 0x127243E5 || cls == 0x285A9A1F) {
             said++;
@@ -3762,10 +3763,10 @@ X86_FUNC(sub_00028E00) {
     // Co-op rules (decided 2026-11-24): the two players do not hurt each other. What is not a Player hurts them as
     // it does in the game alone (until 2026-11-27 it was 30% more while both were in; the owner then: "lets bring
     // that back down to 0 and just have the game be regular difficulty").
-    if (game_coop::g_second_object && mem::IsCommitted(ctx.esp + 8)) {
+    if (game_coop::g_second_object && mem::Spans(ctx.esp, 8)) {
         uint32_t by = game_coop::g_hit_by;
         bool partner = by && (by == game_coop::g_player_object || by == game_coop::g_second_object) &&
-                       mem::IsCommitted(ctx.ecx + 8) && kernel::R32(ctx.ecx + 4) != by;
+                       mem::Spans(ctx.ecx, 8) && kernel::R32(ctx.ecx + 4) != by;
         if (partner || game_coop::DoublesThing(by)) {  // (nor does a stand-in body hurt anybody: its blows are for show)
             float none = 0;
             std::memcpy(kernel::HostPtr(ctx.esp + 4), &none, 4);
@@ -3783,11 +3784,11 @@ X86_FUNC(sub_0016AF00) {
     {   // tests: S2_COOP_HURT_TRACE=1 also logs the first hurts of anything that is not a Player, whoever did it
         static const bool trace = std::getenv("S2_COOP_HURT_TRACE") != nullptr;
         static int said = 0;
-        uint32_t object = mem::IsCommitted(ctx.ecx + 8) ? kernel::R32(ctx.ecx + 4) : 0;
+        uint32_t object = mem::Spans(ctx.ecx, 8) ? kernel::R32(ctx.ecx + 4) : 0;
         if (trace && said < 12 && object && object != game_coop::g_player_object && object != game_coop::g_second_object) {
             said++;
             LOGI("coop trace: %s (class object %08X) is hurt %.1f by %s (%08X), called from %s", game_coop::WhoIs(object).c_str(), ctx.ecx, amount,
-                 by && mem::IsCommitted(by + 0x110) ? game_coop::WhoIs(by).c_str() : "nothing named", by, game_coop::CallersOf(ctx).c_str());
+                 by && mem::Spans(by, 0x110) ? game_coop::WhoIs(by).c_str() : "nothing named", by, game_coop::CallersOf(ctx).c_str());
         }
     }
     // (Enemies had 30% more health while both players were in, until 2026-11-27: the game's own difficulty since.)
@@ -3870,7 +3871,7 @@ int g_as_second = 0;  // depth of "Player 2 is the player" below
 uint32_t g_as_place = 0;
 
 bool HitBySecond(uint32_t hit) {  // the hit's maker is a handle at +0x24 into the object table (6-byte entries)
-    if (!g_second_object || !hit || !mem::IsCommitted(hit + 0x28)) return false;
+    if (!g_second_object || !hit || !mem::Spans(hit, 0x28)) return false;
     uint32_t table = kernel::R32(kObjectManager + 0x0C);
     return table && kernel::R32(table + uint32_t(kernel::R16(hit + 0x24)) * 6) == g_second_object;
 }
@@ -3897,7 +3898,7 @@ X86_FUNC(sub_00072330) {
     // (S2_COOP_ONEHIT=all: whoever hits it)
     static const char* onehit_v = std::getenv("S2_COOP_ONEHIT");
     static const bool onehit = onehit_v != nullptr, onehit_all = onehit_v && !std::strcmp(onehit_v, "all");
-    if (onehit && (second || onehit_all) && mem::IsCommitted(ctx.ecx + 0x20) && game_coop::ReadF(ctx.ecx + 0x16) > 0.5f) {
+    if (onehit && (second || onehit_all) && mem::Spans(ctx.ecx, 0x20) && game_coop::ReadF(ctx.ecx + 0x16) > 0.5f) {
         float half = 0.5f;
         std::memcpy(kernel::HostPtr(ctx.ecx + 0x16), &half, 4);
     }
@@ -3913,7 +3914,7 @@ X86_FUNC(sub_0002B5F0) {
     // killed. Its morality is shared: 0x46B60, called from in here for Player 2, is run for Player 1 (below).
     uint32_t player = ctx.ecx;
     int who = player == game_coop::g_player ? 1 : game_coop::g_second && player == game_coop::g_second ? 2 : 0;
-    bool known = who && game_coop::g_player && mem::IsCommitted(player + 0x490) && mem::IsCommitted(game_coop::g_player + 0x490);
+    bool known = who && game_coop::g_player && mem::Spans(player, 0x490) && mem::Spans(game_coop::g_player, 0x490);
     float morality = known ? game_coop::ReadF(game_coop::g_player + 0x482) : 0, meter = known ? game_coop::ReadF(player + 0x48A) : 0;
     __imp__sub_0002B5F0(ctx, base);
     if (known)
@@ -3951,10 +3952,12 @@ X86_FUNC(sub_00046B60) {
 //     2026-11-25), mounted weapons (the truck's gun comes later), phones, toilets and seats (they start scenes).
 namespace game_coop {
 uint32_t Named(uint32_t player, uint32_t at) {
-    if (!player || !mem::IsCommitted(player + 0x540)) return 0;
+    if (!player || !mem::Spans(player, 0x540)) return 0;
     uint32_t table = kernel::R32(kObjectManager + 0x0C), h = kernel::R16(player + at);
-    uint32_t object = table && h ? kernel::R32(table + h * 6) : 0;
-    return object && mem::IsCommitted(object + 0x110) ? object : 0;
+    uint32_t object = table && h && h < kernel::R32(kObjectManager + 0x14) ? kernel::R32(table + h * 6) : 0;  // (as many entries as +0x14 says)
+    // (both ends: the owner's version 67 crashed when a handle named 0000FF10, whose +0x110 lies in the image at
+    // 0x10000 while its +0xE4, read for its class, does not)
+    return object && Whole(object, 0x114) ? object : 0;
 }
 const char* KindName(uint32_t cls) {
     switch (cls) {
@@ -3993,7 +3996,7 @@ bool SecondOn(uint32_t object) {
 // ... for a usable thing's method (this = its class object, the engine object at +4), outside the Players' own
 bool ForSecond(uint32_t self) {
     static const bool off = std::getenv("S2_COOP_NO_USE_SWAP") != nullptr;  // tests: as before 2026-11-26
-    if (off || g_running || !g_second_object || !self || !mem::IsCommitted(self + 8)) return false;
+    if (off || g_running || !g_second_object || !self || !mem::Spans(self, 8)) return false;
     return SecondOn(kernel::R32(self + 4));
 }
 // the record: each thing a player can use, once for each player and level (and each that is kept off his list)
@@ -4016,15 +4019,15 @@ bool g_use_quiet = false;  // a test is asking by the thousand (TestSpot)
 void UseAnswer(X86Context& ctx, uint32_t self, uint32_t user, uint32_t answer) {
     static const bool trace = std::getenv("S2_USE_TRACE") != nullptr;
     static int said = 0;
-    if (!trace || g_use_quiet || said > 400 || !self || !mem::IsCommitted(self + 8)) return;
+    if (!trace || g_use_quiet || said > 400 || !self || !mem::Spans(self, 8)) return;
     uint32_t object = kernel::R32(self + 4);
-    if (!object || !mem::IsCommitted(object + 0x110)) return;
+    if (!object || !mem::Spans(object, 0x110)) return;
     said++;
     const char* name = KindName(ClassOf(object));
     LOGI("use trace: %s at %.1f %.1f %.1f is asked by Player %d (at %.2f %.2f %.2f): answer %u (3 is no); the first in the list is Player %d", name ? name : "something",
          ReadF(object + kPosition), ReadF(object + kPosition + 4), ReadF(object + kPosition + 8), user == g_second_object ? 2 : user == g_player_object ? 1 : 0,
-         user && mem::IsCommitted(user + 0x60) ? ReadF(user + kPosition) : 0.f, user && mem::IsCommitted(user + 0x60) ? ReadF(user + kPosition + 4) : 0.f,
-         user && mem::IsCommitted(user + 0x60) ? ReadF(user + kPosition + 8) : 0.f, answer,
+         user && mem::Spans(user, 0x60) ? ReadF(user + kPosition) : 0.f, user && mem::Spans(user, 0x60) ? ReadF(user + kPosition + 4) : 0.f,
+         user && mem::Spans(user, 0x60) ? ReadF(user + kPosition + 8) : 0.f, answer,
          kernel::R32(kernel::R32(kObjectManager + kPlayerList)) == g_second_object ? 2 : 1);
     (void)ctx;
 }
@@ -4081,7 +4084,7 @@ X86_FUNC(sub_0001ABC0) {
     using namespace game_coop;
     uint32_t player = ctx.ecx, object = kernel::R32(ctx.esp + 4);
     int who = player && player == g_player ? 1 : g_second && player == g_second ? 2 : 0;
-    if (who && object && mem::IsCommitted(object + 0x110)) {
+    if (who && object && mem::Spans(object, 0x110)) {
         uint32_t cls = ClassOf(object);
         const char* refused = nullptr;
         if (who == 2 && FirstOnly(cls)) refused = "it is for Player 1 only";
@@ -4142,7 +4145,7 @@ void TestExit(X86Context& ctx) {
     for (uint32_t i = 0; table && i < entries && mem::IsCommitted(table + i * 6 + 4); i++) {
         uint32_t object = kernel::R32(table + i * 6);
         // (a free entry holds a small number, the next free one, not an object)
-        if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
+        if (object < 0x400000 || !mem::IsCommitted(object) || !mem::Spans(object, 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
         if (ClassOf(object) != 0x10BD8382) continue;
         uint32_t transition = kernel::R32(object + 0x60);
         // its properties 0 to 6 (0: the level to load, 1: a start point for each player, 2 and 3: which level
@@ -4176,7 +4179,7 @@ X86_FUNC(sub_00160D20) {
     if (game_coop::g_second_object) {
         uint32_t ecx = ctx.ecx;
         game_coop::g_return.valid = false;
-        if (game_coop::g_second && mem::IsCommitted(game_coop::g_second + 0x490) && game_coop::ReadF(game_coop::g_second + 0x1A) > 0) {
+        if (game_coop::g_second && mem::Spans(game_coop::g_second, 0x490) && game_coop::ReadF(game_coop::g_second + 0x1A) > 0) {
             game_coop::g_carry.valid = true;
             game_coop::g_carry.share = game_coop::ReadF(game_coop::g_second + 0x16) / game_coop::ReadF(game_coop::g_second + 0x1A);
             game_coop::g_carry.meter = game_coop::ReadF(game_coop::g_second + 0x48A);
@@ -4203,11 +4206,11 @@ namespace game_coop {
 bool NearerIsSecond(X86Context& ctx, uint32_t behaviour, uint32_t fn) {
     static const bool off = std::getenv("S2_COOP_NO_NEAREST") != nullptr;
     if (off || !g_second_object || !g_second || !g_player_object || g_down_until || g_one_view || g_as_second) return false;
-    if (!mem::IsCommitted(behaviour + 0x20)) return false;
+    if (!mem::Spans(behaviour, 0x20)) return false;
     uint32_t holder = kernel::R32(behaviour + 0x1C);
-    if (holder < 0x10000 || !mem::IsCommitted(holder + 0x14)) return false;
+    if (holder < 0x10000 || !mem::Spans(holder, 0x14)) return false;
     uint32_t owner = kernel::R32(holder + 0x10);
-    if (owner < 0x400000 || !mem::IsCommitted(owner) || !mem::IsCommitted(owner + 0x110)) return false;
+    if (owner < 0x400000 || !mem::IsCommitted(owner) || !mem::Spans(owner, 0x110)) return false;
     uint32_t cls = ClassOf(owner);
     bool person = cls == 0x0E15C87E;
     switch (cls) {
@@ -4272,7 +4275,7 @@ void EachObject(F&& f) {
     uint32_t table = kernel::R32(kObjectManager + 0x0C), entries = std::min<uint32_t>(kernel::R32(kObjectManager + 0x14), 0x4000);
     for (uint32_t i = 0; table && i < entries && mem::IsCommitted(table + i * 6 + 4); i++) {
         uint32_t object = kernel::R32(table + i * 6);
-        if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
+        if (object < 0x400000 || !mem::IsCommitted(object) || !mem::Spans(object, 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
         f(object);
     }
 }
@@ -4293,7 +4296,7 @@ void TestCensus() {
             if (ClassOf(object) != want || n > 80) return;
             uint32_t self = kernel::R32(object + kClassObject);
             LOGR("census: %08X #%d at %.1f %.1f %.1f, object flags %08X, its own flags (+0x46) %08X", want, n++, ReadF(object + kPosition), ReadF(object + kPosition + 4),
-                 ReadF(object + kPosition + 8), kernel::R32(object + 8), self && mem::IsCommitted(self + 0x4C) ? kernel::R32(self + 0x46) : 0);
+                 ReadF(object + kPosition + 8), kernel::R32(object + 8), self && mem::Spans(self, 0x4C) ? kernel::R32(self + 0x46) : 0);
         });
     }
     for (const Kind& k : kKinds) {
@@ -4371,7 +4374,7 @@ void TestSpot(X86Context& ctx) {
         if (ClassOf(object) == cls && n++ == which) target = object;
     });
     uint32_t self = target ? kernel::R32(target + kClassObject) : 0;
-    if (!player || !body || !self || !mem::IsCommitted(self + 0x90)) {
+    if (!player || !body || !self || !mem::Spans(self, 0x90)) {
         LOGR("spot: no Player %d, or no object %d of class %08X (%d loaded)", who, which, cls, n);
         step = -2;
         return;
@@ -4498,11 +4501,11 @@ namespace game_coop {
 bool g_story_creature = false;
 void StoryHold(X86Context& ctx) {
     if (!g_story_creature) return;
-    if (!g_player || !mem::IsCommitted(g_player + 0x490)) {
+    if (!g_player || !mem::Spans(g_player, 0x490)) {
         g_story_creature = false;
         return;
     }
-    if (!g_second || !mem::IsCommitted(g_second + 0x490)) return;
+    if (!g_second || !mem::Spans(g_second, 0x490)) return;
     uint32_t one = kernel::R32(g_player + 0xBC), two = kernel::R32(g_second + 0xBC);
     if (!(one & 0x80000)) {  // Player 1 is on his way in (or out): nothing to hold yet
         if (!(one & 0x40000)) g_story_creature = false, LOGI("coop: the story's creature form is over for Player 1: Player 2's is no longer held");
@@ -4527,7 +4530,7 @@ void StoryForm(X86Context& ctx, int what) {
     if (what == 1) g_story_creature = true;
     if (what == 2) g_story_creature = false;
     uint32_t p2 = g_second;
-    if (!p2 || !mem::IsCommitted(p2 + 0x490)) return;
+    if (!p2 || !mem::Spans(p2, 0x490)) return;
     bool creature = (kernel::R32(p2 + 0xBC) & 0x80000) != 0;
     uint32_t ecx = ctx.ecx;
     ctx.ecx = p2;
@@ -4602,7 +4605,7 @@ void TestMeter(X86Context& ctx) {
     static uint32_t form[2] = {0, 0};
     uint32_t players[2] = {g_player, g_second};
     for (int i = 0; i < 2; i++) {
-        if (!players[i] || !mem::IsCommitted(players[i] + 0x490)) { form[i] = 0; continue; }
+        if (!players[i] || !mem::Spans(players[i], 0x490)) { form[i] = 0; continue; }
         uint32_t now = kernel::R32(players[i] + 0xBC) & 0x80000;
         if (now != form[i]) LOGI("coop: Player %d is now in %s form (insanity meter %.1f)", i + 1, now ? "creature" : "human", ReadF(players[i] + 0x48A));
         form[i] = now;
@@ -4613,7 +4616,7 @@ void TestMeter(X86Context& ctx) {
     static uint32_t was[2][3] = {};
     static int said = 0;
     for (int i = 0; flags && i < 2; i++) {
-        if (!players[i] || !mem::IsCommitted(players[i] + 0x490)) continue;
+        if (!players[i] || !mem::Spans(players[i], 0x490)) continue;
         uint32_t b0 = kernel::R32(players[i] + 0xB0), bc = kernel::R32(players[i] + 0xBC), c0 = kernel::R32(players[i] + 0xC0) & 0x7F;
         if ((b0 != was[i][0] || bc != was[i][1] || c0 != was[i][2]) && said < 400) {
             said++;
@@ -4645,7 +4648,7 @@ void TestMeter(X86Context& ctx) {
     }();
     for (MarkState& m : mark_states)
         for (int i = 0; i < 2; i++) {
-            if (!players[i] || !mem::IsCommitted(players[i] + 0x490)) continue;
+            if (!players[i] || !mem::Spans(players[i], 0x490)) continue;
             bool on = ((kernel::R32(players[i] + 0xBC + (m.state >> 5) * 4) >> (m.state & 31)) & 1) != 0;
             if (on && !m.was_on[i]) m.began[i] = g_frames;
             m.was_on[i] = on;
@@ -4664,8 +4667,8 @@ void TestBody() {
     if (!v || g_frames != uint64_t(std::atoll(v))) return;
     uint32_t players[2] = {g_player, g_second};
     for (int i = 0; i < 2; i++) {
-        uint32_t body = players[i] && mem::IsCommitted(players[i] + 0xF4) ? kernel::R32(players[i] + 0xF0) : 0;
-        if (!body || !mem::IsCommitted(body + 0x140)) continue;
+        uint32_t body = players[i] && mem::Spans(players[i], 0xF4) ? kernel::R32(players[i] + 0xF0) : 0;
+        if (!body || !mem::Spans(body, 0x140)) continue;
         for (uint32_t at = 0; at < 0x140; at += 0x20) {
             char line[200];
             int n = std::snprintf(line, sizeof line, "body: Player %d +%03X:", i + 1, at);
@@ -4890,7 +4893,7 @@ X86_FUNC(sub_0018CD30) {
     __imp__sub_0018CD30(ctx, base);
     if (!shadows || !game_coop::g_second_object) return;
     static const bool trace = std::getenv("S2_SHADOW_TRACE") != nullptr;  // each caster the manager looks at, every 120th frame
-    if (trace && game_coop::Frames() % 120 == 0 && ctx.eax && mem::IsCommitted(ctx.eax + 12))
+    if (trace && game_coop::Frames() % 120 == 0 && ctx.eax && mem::Spans(ctx.eax, 12))
         LOGI("coop: shadow trace: frame %llu caster %08X%s at %.1f %.1f %.1f eye %.1f %.1f %.1f size %.2f", (unsigned long long)game_coop::Frames(), caster,
              caster == game_coop::g_second_object ? " (Player 2)" : caster == game_coop::g_player_object ? " (Player 1)" : "",
              game_coop::ReadF(ctx.eax), game_coop::ReadF(ctx.eax + 4), game_coop::ReadF(ctx.eax + 8), game_coop::ReadF(esp + 4 + kEyeOnStack),
@@ -4907,9 +4910,9 @@ X86_FUNC(sub_0018CD30) {
         LOGI("coop: shadow trace: record %08X +0E:%s", record, line.c_str());
     }
     static const bool off = std::getenv("S2_COOP_NO_SHADOW_FIX") != nullptr;
-    uint32_t camera = game_coop::ViewCamera2(), eye = camera && mem::IsCommitted(camera + 0xA4) ? kernel::R32(camera + 0xA0) : 0;
+    uint32_t camera = game_coop::ViewCamera2(), eye = camera && mem::Spans(camera, 0xA4) ? kernel::R32(camera + 0xA0) : 0;
     uint32_t place = ctx.eax, held = esp + 4 + kEyeOnStack;
-    if (off || !eye || !mem::IsCommitted(eye + 0x50) || !place || !mem::IsCommitted(place + 12)) return;
+    if (off || !eye || !mem::Spans(eye, 0x50) || !place || !mem::Spans(place, 12)) return;
     float mine = 0, other = 0, second[3];
     for (int i = 0; i < 3; i++) {
         float at = game_coop::ReadF(place + i * 4);
@@ -4987,7 +4990,7 @@ void Outfit(const gpu::State& s) {
     gpu::TextureDesc d;
     if (off || !s.textures[0] || !gpu::Describe(s.textures[0], d) || d.width != 256 || d.height != 256) return;
     const gpu::FormatInfo& fi = gpu::Format(d.format);
-    if (fi.host != gpu::Host::BC1 || !mem::IsCommitted(d.data + 32768)) return;
+    if (fi.host != gpu::Host::BC1 || !mem::Spans(d.data, 32768)) return;
     const uint8_t* guest = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
     uint64_t first;
     std::memcpy(&first, guest + 4096, 8);
@@ -5090,7 +5093,7 @@ uint32_t DrawVariant(X86Context& ctx, const gpu::State& s) {
                               int(g_screen_pass));
         int found = 0;
         for (uint32_t at = ctx.esp; at < ctx.esp + 0x400 && found < 12; at += 4) {
-            if (!mem::IsCommitted(at + 4)) break;
+            if (!mem::Spans(at, 4)) break;
             uint32_t v = kernel::R32(at);
             if (v >= 0x11000 && v < 0x24A000) n += std::snprintf(line + n, sizeof line - n, " %06X", v), found++;
         }
@@ -5194,10 +5197,10 @@ X86_FUNC(sub_001D1970) {
     uint32_t rest[64];
     int count = 0;
     static const bool whole = std::getenv("S2_COOP_WHOLE_CHAINS") != nullptr;  // tests: as before 2026-11-26
-    if (!whole && g_second_object && first && mem::IsCommitted(first + 0x110) && kernel::R32(first + kNextAlike)) {
+    if (!whole && g_second_object && first && mem::Spans(first, 0x110) && kernel::R32(first + kNextAlike)) {
         bool ours = PlayersThing(first);
         int length = 0;
-        for (uint32_t o = kernel::R32(first + kNextAlike); o && length < 64 && mem::IsCommitted(o + 0x110); o = kernel::R32(o + kNextAlike), length++) ours |= PlayersThing(o);
+        for (uint32_t o = kernel::R32(first + kNextAlike); o && length < 64 && mem::Spans(o, 0x110); o = kernel::R32(o + kNextAlike), length++) ours |= PlayersThing(o);
         if (ours && length < 64) {
             for (uint32_t o = kernel::R32(first + kNextAlike); o && count < 64;) {
                 uint32_t next = kernel::R32(o + kNextAlike);
@@ -5228,7 +5231,7 @@ void game_coop::DrawOne(X86Context& ctx, uint8_t* base) {
         int view = g_screen_pass ? 2 : 1;
         // (tests: S2_BODY_TRACE=<frame> lists every Player's object the engine draws in that frame, and what is done with it)
         static const uint64_t body_trace = std::getenv("S2_BODY_TRACE") ? uint64_t(std::atoll(std::getenv("S2_BODY_TRACE"))) : 0;
-        bool traced = body_trace && g_frames == body_trace && object && mem::IsCommitted(object + 0x110) && ClassOf(object) == 0xC8BC44E1;
+        bool traced = body_trace && g_frames == body_trace && object && mem::Spans(object, 0x110) && ClassOf(object) == 0xC8BC44E1;
         auto who = [&]() -> const char* {
             return object == g_player_object ? "Player 1" : object == g_second_object ? "Player 2" : object == g_doubles[0].object ? "Player 1's stand-in" :
                    object == g_doubles[1].object ? "Player 2's stand-in" : "ANOTHER Player object";
@@ -5258,7 +5261,7 @@ void game_coop::DrawOne(X86Context& ctx, uint8_t* base) {
         using namespace game_coop;
         static const uint64_t body_trace = std::getenv("S2_BODY_TRACE") ? uint64_t(std::atoll(std::getenv("S2_BODY_TRACE"))) : 0;
         uint32_t object = kernel::R32(ctx.esp + 4);
-        if (body_trace && g_frames == body_trace && object && mem::IsCommitted(object + 0x110) && g_player_object) {
+        if (body_trace && g_frames == body_trace && object && mem::Spans(object, 0x110) && g_player_object) {
             float d2 = 0;
             for (int k = 0; k < 3; k++) {
                 float d = ReadF(object + kPosition + k * 4) - ReadF(g_player_object + kPosition + k * 4);
@@ -5325,7 +5328,7 @@ X86_FUNC(sub_00191070) {
     }
     if (trace) {
         float at[3] = {0, 0, 0};
-        if (place && mem::IsCommitted(place + 12)) std::memcpy(at, kernel::HostPtr(place), 12);
+        if (place && mem::Spans(place, 12)) std::memcpy(at, kernel::HostPtr(place), 12);
         LOGI("sound trace: wave %08X place %08X (%.1f %.1f %.1f) flags %X scale %.2f from %08X gave %08X", sound, place, at[0], at[1], at[2], flags, scale, from, ctx.eax);
     }
 }
@@ -5359,21 +5362,21 @@ X86_FUNC(sub_00191070) {
 //   S2_TORCH_BATTERY=1: the game's own battery (tests)
 namespace game_coop {
 uint32_t FlashlightOf(uint32_t player) {
-    if (!player || !mem::IsCommitted(player + 0x170)) return 0;
+    if (!player || !mem::Spans(player, 0x170)) return 0;
     uint32_t table = kernel::R32(kObjectManager + 0x0C), h = kernel::R16(player + 0x16C);
     uint32_t object = table && h ? kernel::R32(table + h * 6) : 0;
-    if (!object || !mem::IsCommitted(object + 0x110) || ClassOf(object) != kFlashlightClass) return 0;
+    if (!object || !mem::Spans(object, 0x110) || ClassOf(object) != kFlashlightClass) return 0;
     return kernel::R32(object + kClassObject);
 }
 // one of an object's properties as a float (the object's own property reader: its method +8, number and -1)
 float PropertyF(X86Context& ctx, uint32_t object, uint32_t number, float otherwise) {
-    uint32_t props = object && mem::IsCommitted(object + 0xF0) ? kernel::R32(object + 0xEC) : 0;
+    uint32_t props = object && mem::Spans(object, 0xF0) ? kernel::R32(object + 0xEC) : 0;
     if (!props || !mem::IsCommitted(props)) return otherwise;
     uint32_t ecx = ctx.ecx, eax = ctx.eax;
     ctx.ecx = props;
     uint32_t at = kernel::CallGuest(ctx, kernel::R32(kernel::R32(props) + 8), {number, 0xFFFFFFFF});
     ctx.ecx = ecx, ctx.eax = eax;
-    return at && mem::IsCommitted(at + 4) ? ReadF(at) : otherwise;
+    return at && mem::Spans(at, 4) ? ReadF(at) : otherwise;
 }
 // the players' flashlights, once a frame: what they are doing, into the log when it changes
 // S2_TEST_TORCH_AGAIN=<frame>[,<frames between>[,<times>]]: Player 1's flashlight is ended at that frame and he is
@@ -5393,7 +5396,7 @@ void TestTorchAgain(X86Context& ctx) {
     if (done < times && !give_at && g_frames >= at + uint64_t(done) * uint64_t(gap) * 2) {
         uint32_t table = kernel::R32(kObjectManager + 0x0C), h = kernel::R16(g_player + 0x16C);
         uint32_t object = table && h ? kernel::R32(table + h * 6) : 0;
-        if (object && mem::IsCommitted(object + 0x110) && ClassOf(object) == kFlashlightClass && int32_t(kernel::R32(object + 8)) >= 0) {
+        if (object && mem::Spans(object, 0x110) && ClassOf(object) == kFlashlightClass && int32_t(kernel::R32(object + 8)) >= 0) {
             item = kernel::R32(object + kTemplateWord) & 0xFFFF;
             ctx.ecx = object;
             kernel::CallGuest(ctx, kObjectEnd, {});
@@ -5420,7 +5423,7 @@ void Flashlights() {
     {   // (once: where the game's message manager is, for the notes)
         static bool said = false;
         uint32_t m = kernel::R32(0x384B8C);
-        if (!said && m && mem::IsCommitted(m + 4) && mem::IsCommitted(kernel::R32(m) + 0x40)) {
+        if (!said && m && mem::Spans(m, 4) && mem::Spans(kernel::R32(m), 0x40)) {
             said = true;
             uint32_t v = kernel::R32(m);
             LOGI("coop: the message manager [0x384B8C] is %08X, its methods at %08X: +0x04 %06X, +0x10 %06X, +0x14 %06X, +0x18 %06X, +0x1C %06X, +0x20 %06X", m, v, kernel::R32(v + 4),
@@ -5430,7 +5433,7 @@ void Flashlights() {
     if (g_trace_left_at && g_frames >= g_trace_left_at) {
         uint32_t table = kernel::R32(kObjectManager + 0x0C);
         for (const auto& [object, index] : g_trace_left) {
-            bool there = table && kernel::R32(table + index * 6) == object && mem::IsCommitted(object + 0x110) && int32_t(kernel::R32(object + 8)) >= 0;
+            bool there = table && kernel::R32(table + index * 6) == object && mem::Spans(object, 0x110) && int32_t(kernel::R32(object + 8)) >= 0;
             LOGI("held trace: object %08X (handle %X), still there right after he was taken out, is %s 90 frames later (class now %08X, flags %08X)", object, index,
                  there ? "STILL THERE" : "gone", there ? ClassOf(object) : 0, there ? kernel::R32(object + 8) : 0);
         }
@@ -5460,7 +5463,7 @@ void Flashlights() {
         for (uint32_t i = 1; table && i < entries && mem::IsCommitted(table + i * 6 + 4); i++) {
             uint32_t object = kernel::R32(table + i * 6);
             // (a free entry holds a small number, the next free one, not an object; an object knows its own handle)
-            if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
+            if (object < 0x400000 || !mem::IsCommitted(object) || !mem::Spans(object, 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
             if (kernel::R16(object + 0xE6) != i || ClassOf(object) != kFlashlightClass) continue;
             all++;
             uint32_t light = kernel::R32(object + kClassObject);
@@ -5472,9 +5475,9 @@ void Flashlights() {
             // (each of them: which object, who carries it by its own word, where it is)
             for (uint32_t i = 1; table && i < entries && mem::IsCommitted(table + i * 6 + 4); i++) {
                 uint32_t object = kernel::R32(table + i * 6);
-                if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
+                if (object < 0x400000 || !mem::IsCommitted(object) || !mem::Spans(object, 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
                 if (kernel::R16(object + 0xE6) != i || ClassOf(object) != kFlashlightClass) continue;
-                uint32_t light = kernel::R32(object + kClassObject), h = light && mem::IsCommitted(light + 0xD0) ? kernel::R16(light + 0x56) : 0;
+                uint32_t light = kernel::R32(object + kClassObject), h = light && mem::Spans(light, 0xD0) ? kernel::R16(light + 0x56) : 0;
                 uint32_t owner = h ? kernel::R32(table + h * 6) : 0;
                 LOGI("coop:   flashlight object %08X (handle %X), its Flashlight %08X, flags %X, carried by %s (object %08X), at %.2f %.2f %.2f", object, i, light,
                      light ? kernel::R32(light + 0xA8) & 7 : 0,
@@ -5510,7 +5513,7 @@ X86_EXTERN_FUNC(__imp__sub_000EA840);
 X86_FUNC(sub_000EA840) {
     using namespace game_coop;
     uint32_t light = ctx.ecx;
-    uint32_t table = kernel::R32(kObjectManager + 0x0C), h = mem::IsCommitted(light + 0xD0) ? kernel::R16(light + 0x56) : 0;
+    uint32_t table = kernel::R32(kObjectManager + 0x0C), h = mem::Spans(light, 0xD0) ? kernel::R16(light + 0x56) : 0;
     uint32_t owner = table && h ? kernel::R32(table + h * 6) : 0;
     bool second = owner && g_second_object && owner == g_second_object;
     bool players = owner && (owner == g_player_object || second);
@@ -5545,18 +5548,18 @@ X86_FUNC(sub_0018C370) {
     if (all && game_coop::Frames() >= from && game_coop::Frames() < from + 60) {
         uint32_t owner = kernel::R32(ctx.esp + 4), matrix = kernel::R32(ctx.esp + 8), tmpl = kernel::R32(ctx.esp + 16);
         float at[3] = {0, 0, 0};
-        if (matrix && mem::IsCommitted(matrix + 64)) std::memcpy(at, kernel::HostPtr(matrix + 48), 12);
+        if (matrix && mem::Spans(matrix, 64)) std::memcpy(at, kernel::HostPtr(matrix + 48), 12);
         LOGI("spawn trace: frame %llu: template %u of class %08X at %.2f %.2f %.2f, owner %s (class %08X), asked from %s", (unsigned long long)game_coop::Frames(), tmpl,
-             tmpl < 0x10000 ? game_coop::ClassOfTemplate(tmpl) : 0, at[0], at[1], at[2], owner && mem::IsCommitted(owner + 0x110) ? game_coop::WhoIs(owner).c_str() : "none",
-             owner && mem::IsCommitted(owner + 0x110) ? game_coop::ClassOf(owner) : 0, game_coop::Callers(ctx, 10).c_str());
+             tmpl < 0x10000 ? game_coop::ClassOfTemplate(tmpl) : 0, at[0], at[1], at[2], owner && mem::Spans(owner, 0x110) ? game_coop::WhoIs(owner).c_str() : "none",
+             owner && mem::Spans(owner, 0x110) ? game_coop::ClassOf(owner) : 0, game_coop::Callers(ctx, 10).c_str());
     } else if (want && !all) {
         uint32_t owner = kernel::R32(ctx.esp + 4), matrix = kernel::R32(ctx.esp + 8), tmpl = kernel::R32(ctx.esp + 16);
         if (tmpl < 0x10000 && game_coop::ClassOfTemplate(tmpl) == want) {
             float at[3] = {0, 0, 0};
-            if (matrix && mem::IsCommitted(matrix + 64)) std::memcpy(at, kernel::HostPtr(matrix + 48), 12);
+            if (matrix && mem::Spans(matrix, 64)) std::memcpy(at, kernel::HostPtr(matrix + 48), 12);
             LOGI("spawn trace: frame %llu: template %u of class %08X at %.2f %.2f %.2f, owner %08X (class %08X), inside the method of Player %08X, asked from %s",
                  (unsigned long long)game_coop::Frames(), tmpl, want, at[0], at[1], at[2], owner,
-                 owner && mem::IsCommitted(owner + 0x110) ? game_coop::ClassOf(owner) : 0, game_coop::g_running, game_coop::Callers(ctx, 14).c_str());
+                 owner && mem::Spans(owner, 0x110) ? game_coop::ClassOf(owner) : 0, game_coop::g_running, game_coop::Callers(ctx, 14).c_str());
         }
     }
     __imp__sub_0018C370(ctx, base);
@@ -5572,7 +5575,7 @@ X86_EXTERN_FUNC(__imp__sub_001D7110);
 X86_FUNC(sub_001D7110) {
     using namespace game_coop;
     uint32_t from = kernel::R32(ctx.esp + 4), to = kernel::R32(ctx.esp + 8), message = kernel::R32(ctx.esp + 12);
-    uint32_t id = message > 3 && mem::IsCommitted(message + 4) ? kernel::R32(message) : message;
+    uint32_t id = message > 3 && mem::Spans(message, 4) ? kernel::R32(message) : message;
     int sender = -1, taker = -1;
     for (int which = 0; which < 2; which++) {
         const Double& d = g_doubles[which];
@@ -5583,7 +5586,7 @@ X86_FUNC(sub_001D7110) {
     static const bool trace = std::getenv("S2_MESSAGE_TRACE") != nullptr;
     if (trace && (sender >= 0 || taker >= 0)) {
         static std::map<uint64_t, int> seen;
-        uint32_t cf = from && mem::IsCommitted(from + 0x110) ? ClassOf(from) : 0, ct = to && mem::IsCommitted(to + 0x110) ? ClassOf(to) : 0;
+        uint32_t cf = from && mem::Spans(from, 0x110) ? ClassOf(from) : 0, ct = to && mem::Spans(to, 0x110) ? ClassOf(to) : 0;
         uint64_t key = (uint64_t(id) << 40) ^ (uint64_t(cf) << 8) ^ ct ^ (uint64_t(sender + 1) << 62) ^ (uint64_t(taker + 1) << 60);
         if (seen.size() < 300 && !seen[key]++)
             LOGI("message trace: frame %llu: message %X from %s (class %08X) to %s (class %08X), number %X, flags %X, inside the method of Player %08X, from %s",
@@ -5707,7 +5710,7 @@ X86_FUNC(sub_0001E3E0) {
 namespace game_coop {
 bool BlowIsForShow(X86Context& ctx) {
     uint32_t weapon = ctx.ecx, met = kernel::R32(ctx.esp + 4);
-    uint32_t table = kernel::R32(kObjectManager + 0x0C), h = weapon && mem::IsCommitted(weapon + 0x60) ? kernel::R16(weapon + 0x56) : 0;
+    uint32_t table = kernel::R32(kObjectManager + 0x0C), h = weapon && mem::Spans(weapon, 0x60) ? kernel::R16(weapon + 0x56) : 0;
     uint32_t carrier = table && h ? kernel::R32(table + h * 6) : 0;
     static const bool live = std::getenv("S2_DOUBLE_LIVE") != nullptr;  // tests: as it was
     if (live || !(DoublesThing(met) || DoubleObject(carrier) >= 0)) return false;

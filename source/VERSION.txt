@@ -1,1 +1,1 @@
-67 2026-11-27 The guns' bang is heard again after Load Game (sounds heard everywhere were placed far away since version 62). The A and B button pictures no longer take a strip of the icons beside them. Save times keep their first digit.
+68 2026-11-27 No crash after using a door: an object the game no longer has is never read (the same check now guards every place the mod reads the game's objects). The Load Game save times keep their first digit.

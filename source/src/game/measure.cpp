@@ -43,7 +43,7 @@ void Frame() {
     frames++;
     double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_start).count();
     uint32_t object = game_coop::g_player_object;
-    if (t < next || !object || !mem::IsCommitted(object + 0x110)) return;
+    if (t < next || !object || !mem::Spans(object, 0x110)) return;
     next = std::floor(t * 20.0 + 1.0) / 20.0;
     uint32_t timer = kernel::R32(kTimer);
     float yaw = std::atan2(ReadF(object + kMatrix + 0x20), ReadF(object + kMatrix + 0x28)) * 57.29578f;
@@ -51,7 +51,7 @@ void Frame() {
     // number at +8, a count at +8 of each): it goes down when a weapon is loaded again, so the times of its steps
     // are the times of the reloads while he fires
     uint32_t player = game_coop::g_player, carried = 0;
-    if (player && mem::IsCommitted(player + 0x134)) {
+    if (player && mem::Spans(player, 0x134)) {
         uint32_t list = kernel::R32(player + 0x128), n = kernel::R32(player + 0x130);
         for (uint32_t i = 0; list && i < n && i < 64; i++) carried += kernel::R32(list + i * 12 + 8);
     }

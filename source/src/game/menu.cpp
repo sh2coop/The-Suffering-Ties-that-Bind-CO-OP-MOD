@@ -661,14 +661,14 @@ void TraceTop() {
     uint32_t manager = kernel::R32(0x391D64);
     uint32_t screens = manager ? kernel::R32(manager + kChildren) : 0, count = manager ? kernel::R32(manager + kCount) : 0;
     uint32_t top = screens && count && count <= 64 ? kernel::R32(screens + (count - 1) * 4) : 0;
-    if (top == before || !top || !mem::IsCommitted(top + kCount + 4)) return;
+    if (top == before || !top || !mem::Spans(top, kCount + 4)) return;
     before = top;
     uint32_t widgets = kernel::R32(top + kChildren), n = kernel::R32(top + kCount);
     LOGI("menu: screen %08X is on top (%u screens, %u widgets, methods %08X)", top, count, n, kernel::R32(top));
     int named = 0;
     for (uint32_t i = 0; widgets && i < n && i < 64 && (trace || named < 3); i++) {
         uint32_t w = kernel::R32(widgets + i * 4);
-        if (!w || !mem::IsCommitted(w + kTextId + 4)) continue;
+        if (!w || !mem::Spans(w, kTextId + 4)) continue;
         uint32_t at = kernel::R32(w + kString), size = kernel::R32(w + kStringSize);
         if (!at || size < 2 || size > 64 || !mem::IsCommitted(at) || !mem::IsCommitted(at + size * 2)) continue;
         std::string text;
@@ -736,13 +736,13 @@ void PauseTitle(X86Context& ctx, int pauser) {
             uint32_t manager = kernel::R32(0x391D64);
             uint32_t list = manager ? kernel::R32(manager + kChildren) : 0, n = manager ? kernel::R32(manager + kCount) : 0;
             uint32_t top = list && n && n <= 64 ? kernel::R32(list + (n - 1) * 4) : 0;
-            if (top && mem::IsCommitted(top + kCount + 4) && kernel::R32(top) == 0x3417D8) {
+            if (top && mem::Spans(top, kCount + 4) && kernel::R32(top) == 0x3417D8) {
                 uint32_t widgets = kernel::R32(top + kChildren), wn = kernel::R32(top + kCount);
                 for (uint32_t i = 5; widgets && i < wn && i < 64; i += 2) {
                     uint32_t widget = kernel::R32(widgets + i * 4);
-                    if (!widget || !mem::IsCommitted(widget + kTextId + 4)) continue;
+                    if (!widget || !mem::Spans(widget, kTextId + 4)) continue;
                     uint32_t at = kernel::R32(widget + kString), size = kernel::R32(widget + kStringSize);
-                    bool mine = at && size == 18 && mem::IsCommitted(at + 36) && kernel::R16(at) == 'D' && kernel::R16(at + 2 * 12) == 'C';  // "Display and Co-op"
+                    bool mine = at && size == 18 && mem::Spans(at, 36) && kernel::R16(at) == 'D' && kernel::R16(at + 2 * 12) == 'C';  // "Display and Co-op"
                     if (mine) continue;
                     uint32_t state = kernel::R32(widget + kState);
                     on_one |= state == kHighlighted;
@@ -751,7 +751,7 @@ void PauseTitle(X86Context& ctx, int pauser) {
             }
         }
         for (uint32_t widget : g_p1_only) {
-            if (!mem::IsCommitted(widget + kState + 4)) continue;
+            if (!mem::Spans(widget, kState + 4)) continue;
             uint32_t state = kernel::R32(widget + kState);
             on_one |= state == kHighlighted;
             if (state == kIdle) Method(ctx, widget, kSetState, {grey});
@@ -765,7 +765,7 @@ void PauseTitle(X86Context& ctx, int pauser) {
     static const bool trace = std::getenv("S2_MENU_TRACE") != nullptr;
     auto words = [](uint32_t widget) {
         std::string out;
-        if (!mem::IsCommitted(widget + kStringSize + 4)) return out;
+        if (!mem::Spans(widget, kStringSize + 4)) return out;
         uint32_t at = kernel::R32(widget + kString), size = kernel::R32(widget + kStringSize);
         if (!at || size < 2 || size > 64 || !mem::IsCommitted(at) || !mem::IsCommitted(at + size * 2)) return out;
         for (uint32_t i = 0; i + 1 < size; i++) {
@@ -776,12 +776,12 @@ void PauseTitle(X86Context& ctx, int pauser) {
     };
     for (uint32_t n = count; n-- > 0 && !titled;) {  // newest first: the pause screen is on top
         uint32_t screen = kernel::R32(screens + n * 4);
-        if (!screen || !mem::IsCommitted(screen + kCount + 4)) continue;
+        if (!screen || !mem::Spans(screen, kCount + 4)) continue;
         uint32_t widgets = kernel::R32(screen + kChildren), widget_count = kernel::R32(screen + kCount);
         if (!widgets || widget_count > 64) continue;
         for (uint32_t i = 0; i < widget_count; i++) {
             uint32_t widget = kernel::R32(widgets + i * 4);
-            if (!widget || !mem::IsCommitted(widget + kTextId + 4)) continue;
+            if (!widget || !mem::Spans(widget, kTextId + 4)) continue;
             std::string text = words(widget);
             if (trace && !text.empty()) LOGI("menu: screen %u widget %u says \"%s\"", n, i, text.c_str());
             if (text == "PAUSE" || text == "Pause" || text == "PAUSED") titled = widget;
@@ -840,7 +840,7 @@ void HideSignIn(X86Context& ctx, uint32_t menu) {
     uint32_t children = kernel::R32(menu + kChildren), count = kernel::R32(menu + kCount);
     for (uint32_t i = 0; children && i < count && i < 64; i++) {
         uint32_t w = kernel::R32(children + i * 4);
-        if (!w || !mem::IsCommitted(w + kTextId + 4) || kernel::R32(w) != kTextMethods || kernel::R32(w + kState) == kHidden) continue;
+        if (!w || !mem::Spans(w, kTextId + 4) || kernel::R32(w) != kTextMethods || kernel::R32(w + kState) == kHidden) continue;
         uint32_t at = kernel::R32(w + kString), size = kernel::R32(w + kStringSize);
         if (!at || size < 8 || size > 40 || !mem::IsCommitted(at + size * 2)) continue;
         static const char kSays[] = "sign-in";
@@ -864,14 +864,14 @@ void FriendsEntry(X86Context& ctx, uint32_t menu) {
     for (uint32_t i = 0; children && i < count && i < 64; i++) found.push_back(kernel::R32(children + i * 4));
     for (uint32_t i = 0; i < 11; i++) {
         uint32_t e = kernel::R32(menu + 0xC4 + i * 4);
-        if (!e || !mem::IsCommitted(e + 0x100)) continue;
+        if (!e || !mem::Spans(e, 0x100)) continue;
         found.push_back(e);
         for (uint32_t off = 0x10; off < 0x100; off += 4) found.push_back(kernel::R32(e + off));
         uint32_t inner = kernel::R32(e + kChildren), n = kernel::R32(e + kCount);
         for (uint32_t k = 0; inner && n < 16 && k < n && mem::IsCommitted(inner + k * 4 + 4); k++) found.push_back(kernel::R32(inner + k * 4));
     }
     for (uint32_t w : found) {
-        if (w < 0x10000 || !mem::IsCommitted(w) || !mem::IsCommitted(w + kTextId + 4)) continue;
+        if (w < 0x10000 || !mem::IsCommitted(w) || !mem::Spans(w, kTextId + 4)) continue;
         uint32_t at = kernel::R32(w + kString), size = kernel::R32(w + kStringSize);
         if (!at || size < 8 || size > 16 || !mem::IsCommitted(at + size * 2)) continue;
         static const char kWas[] = "friends";
@@ -894,11 +894,11 @@ void FriendsEntry(X86Context& ctx, uint32_t menu) {
 // its entry's words: "Friends" becomes "Co-op", once for each pause screen (they come some frames after it is made)
 void PauseFriends(X86Context& ctx, uint32_t pause) {
     static uint32_t named = 0;
-    if (named == pause || !mem::IsCommitted(pause + kCount + 4)) return;
+    if (named == pause || !mem::Spans(pause, kCount + 4)) return;
     uint32_t widgets = kernel::R32(pause + kChildren), n = kernel::R32(pause + kCount);
     for (uint32_t i = 0; widgets && i < n && i < 64; i++) {
         uint32_t w = kernel::R32(widgets + i * 4);
-        if (!w || !mem::IsCommitted(w + kTextId + 4)) continue;  // (its entries are buttons, not plain text widgets)
+        if (!w || !mem::Spans(w, kTextId + 4)) continue;  // (its entries are buttons, not plain text widgets)
         uint32_t at = kernel::R32(w + kString), size = kernel::R32(w + kStringSize);
         if (!at || size != 8 || !mem::IsCommitted(at + size * 2)) continue;
         static const char kWas[] = "Friends";
@@ -914,9 +914,9 @@ void PauseFriends(X86Context& ctx, uint32_t pause) {
 }
 void OpenCoopFromPause(X86Context& ctx, uint32_t pause) {
     uint32_t res = kernel::CallGuest(ctx, 0x15E310, {});
-    uint32_t bag = res && mem::IsCommitted(res + 8) ? kernel::R32(res + 4) : 0;
+    uint32_t bag = res && mem::Spans(res, 8) ? kernel::R32(res + 4) : 0;
     uint32_t at = bag ? Method(ctx, bag, 8, {0x0E, 0xFFFFFFFFu}) : 0;
-    uint32_t options_tmpl = at && mem::IsCommitted(at + 4) ? kernel::R32(at) : 0;
+    uint32_t options_tmpl = at && mem::Spans(at, 4) ? kernel::R32(at) : 0;
     uint32_t page_at = options_tmpl ? Property(ctx, options_tmpl, 0x22) : 0;
     uint32_t page_tmpl = page_at ? kernel::R32(page_at) : 0, manager = kernel::R32(0x391D64);
     LOGR("menu: Co-op from the pause menu: the Options template is %08X, the page's %08X", options_tmpl, page_tmpl);
@@ -953,13 +953,13 @@ X86_FUNC(sub_00157A60) {
     game_menu::FriendsEntry(ctx, menu);
     uint32_t action = kernel::R32(menu + 0x6C);
     uint32_t live = kernel::R32(0x384B58), before = 0;
-    bool mine = action == 6 && live && mem::IsCommitted(live + 0xBC);
+    bool mine = action == 6 && live && mem::Spans(live, 0xBC);
     if (mine) before = kernel::R32(live + 0xBC), kernel::W32(live + 0xBC, 1);
     __imp__sub_00157A60(ctx, base);
     if (mine && kernel::R32(0x384B58) == live) kernel::W32(live + 0xBC, before);
     // (and after its own work too: back from a page it opened, the menu showed the sign-in line again, run
     // main_coop2; only while it is still the main menu, methods 0x342198: its work may have ended it)
-    if (mem::IsCommitted(menu + 4) && kernel::R32(menu) == 0x342198) {
+    if (mem::Spans(menu, 4) && kernel::R32(menu) == 0x342198) {
         uint32_t ecx = ctx.ecx;
         game_menu::HideSignIn(ctx, menu);
         ctx.ecx = ecx;
@@ -970,7 +970,7 @@ X86_FUNC(sub_001598A0) {
     uint32_t pause = ctx.ecx;
     uint32_t live = kernel::R32(0x384B58), before = 0;
     if (pause && kernel::R32(pause) == 0x342290) game_menu::PauseFriends(ctx, pause);
-    bool mine = pause && kernel::R32(pause) == 0x342290 && kernel::R32(pause + 0x6C) == 6 && live && mem::IsCommitted(live + 0xBC);
+    bool mine = pause && kernel::R32(pause) == 0x342290 && kernel::R32(pause + 0x6C) == 6 && live && mem::Spans(live, 0xBC);
     if (mine) before = kernel::R32(live + 0xBC), kernel::W32(live + 0xBC, 1);
     __imp__sub_001598A0(ctx, base);
     if (mine && kernel::R32(0x384B58) == live) kernel::W32(live + 0xBC, before);
@@ -1022,10 +1022,10 @@ X86_FUNC(sub_0014DA30) {  // the logo film's screen, once a frame (this)
 X86_EXTERN_FUNC(__imp__sub_0014D830);
 X86_FUNC(sub_0014D830) {
     uint32_t screen = ctx.ecx, event = kernel::R32(ctx.esp + 4);
-    if (event == 1 && screen && mem::IsCommitted(screen + 0x74)) {
+    if (event == 1 && screen && mem::Spans(screen, 0x74)) {
         uint32_t player = kernel::R32(screen + 0x6C);
-        uint32_t methods = player && mem::IsCommitted(player + 4) ? kernel::R32(player) : 0;
-        uint32_t stop = methods && mem::IsCommitted(methods + 0x34) ? kernel::R32(methods + 0x30) : 0;
+        uint32_t methods = player && mem::Spans(player, 4) ? kernel::R32(player) : 0;
+        uint32_t stop = methods && mem::Spans(methods, 0x34) ? kernel::R32(methods + 0x30) : 0;
         if (!stop || kernel::R32(screen + 0x68) == 0x7FFF) {
             static int said = 0;
             if (said++ < 3) LOGI("menu: A on the logo screen after its films were skipped (player %08X): nothing to stop", player);
@@ -1176,7 +1176,7 @@ X86_FUNC(sub_001C6B20) {  // a sprite: a letter when the string drawer calls it
     bool before = gpu::g_letter_now;
     if (letter) gpu::g_letter_now = true;
     uint32_t box = letter ? kernel::R32(ctx.esp + 0x1C) : 0;
-    bool wider = !keep && box && mem::IsCommitted(box) && mem::IsCommitted(box + 15);
+    bool wider = !keep && box && mem::IsCommitted(box) && mem::Spans(box, 15);
     int32_t left = 0, right = 0;
     if (wider) {
         left = int32_t(kernel::R32(box)), right = int32_t(kernel::R32(box + 8));

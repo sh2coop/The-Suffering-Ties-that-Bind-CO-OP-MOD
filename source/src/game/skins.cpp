@@ -691,7 +691,7 @@ uint32_t Resource(X86Context& ctx, uint32_t id) {
     ctx.ecx = kernel::R32(kResourceManager);
     uint32_t r = kernel::CallGuest(ctx, kResource, {id});
     ctx.ecx = ecx, ctx.eax = eax;
-    return r && mem::IsCommitted(r + 0x10) && kernel::R32(r + 4) == id ? r : 0;
+    return r && mem::Spans(r, 0x10) && kernel::R32(r + 4) == id ? r : 0;
 }
 uint32_t Blackmore(X86Context& ctx) {
     if (!g_blackmore) return 0;
@@ -702,7 +702,7 @@ uint32_t Blackmore(X86Context& ctx) {
         if (!r || ModelId(r) != id) r = Resource(ctx, id);
         return r;
     }
-    if (g_blackmore_resource && mem::IsCommitted(g_blackmore_resource + 0x10) && kernel::R32(g_blackmore_resource + 4) == g_blackmore)
+    if (g_blackmore_resource && mem::Spans(g_blackmore_resource, 0x10) && kernel::R32(g_blackmore_resource + 4) == g_blackmore)
         return g_blackmore_resource;
     g_blackmore_resource = Resource(ctx, g_blackmore);
     if (g_blackmore_resource) LOGR("skins: Blackmore's model %X is resource %08X", g_blackmore, g_blackmore_resource);
@@ -723,10 +723,10 @@ uint32_t Wear(X86Context& ctx, uint32_t character) {  // the model resource of t
 const char* kNames[3] = {"Torque", "Blackmore", "Chief"};
 uint32_t Torque(X86Context& ctx, uint32_t id) {
     uint32_t& r = g_torque_resource[id];
-    if (!r || !mem::IsCommitted(r + 0x10) || kernel::R32(r + 4) != id) r = Resource(ctx, id);
+    if (!r || !mem::Spans(r, 0x10) || kernel::R32(r + 4) != id) r = Resource(ctx, id);
     return r;
 }
-uint32_t ModelId(uint32_t resource) { return resource && mem::IsCommitted(resource + 0x10) ? kernel::R32(resource + 4) : 0; }
+uint32_t ModelId(uint32_t resource) { return resource && mem::Spans(resource, 0x10) ? kernel::R32(resource + 4) : 0; }
 
 }  // namespace
 
@@ -742,9 +742,9 @@ void Frame(X86Context& ctx) {
     if (!g_blackmore) return;
     for (int who = 0; who < 2; who++) {
         for (uint32_t player : {game_coop::PlayerOf(who), game_coop::DoublePlayerOf(who)}) {
-            if (!player || !mem::IsCommitted(player + 0x770)) continue;
+            if (!player || !mem::Spans(player, 0x770)) continue;
             uint32_t object = kernel::R32(player + 4);
-            if (!object || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
+            if (!object || !mem::Spans(object, 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
             uint32_t now = kernel::R32(object + 0x64);
             bool first_person = (kernel::R32(player + 0xBC) & 0x8000) != 0;
             uint32_t want = Want(who);
@@ -778,7 +778,7 @@ bool ChiefAvailable() { return g_chief != 0; }
 // Is this engine object a player's body (or his stand-in) wearing Blackmore? 1 then, else 0.
 // (2 when he wears Chief)
 int BodySkin(uint32_t object) {
-    if (!g_blackmore || !object || !mem::IsCommitted(object + 0x110)) return 0;
+    if (!g_blackmore || !object || !mem::Spans(object, 0x110)) return 0;
     uint32_t c = CharacterOf(kernel::R32(object + 0x64));
     return c && game_coop::BodyOwner(object) >= 0 ? int(c) : 0;
 }

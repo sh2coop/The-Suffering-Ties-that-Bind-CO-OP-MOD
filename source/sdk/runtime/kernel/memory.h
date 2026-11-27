@@ -26,6 +26,17 @@ bool Commit(uint32_t va, uint32_t size);
 void Decommit(uint32_t va, uint32_t size);
 bool IsCommitted(uint32_t va);
 
+// [local change, The Suffering: Ties That Bind] A thing of the game's that is read from base to base + last: every
+// page it touches is committed, and it lies in user space (the owner's version 67 crashed reading an object at
+// 0000FF10 whose far end, the only one checked, lay in the image at 0x10000).
+inline bool Spans(uint32_t base, uint32_t last) {
+    if (base < kUserLow || base + last < base) return false;
+    for (uint32_t page = base & ~(kPage - 1), end = (base + last) & ~(kPage - 1);; page += kPage) {
+        if (!IsCommitted(page)) return false;
+        if (page == end) return true;
+    }
+}
+
 // user virtual space, NTSTATUS results
 uint32_t AllocateVirtual(uint32_t& base, uint32_t& size, uint32_t type, uint32_t protect);
 uint32_t FreeVirtual(uint32_t& base, uint32_t& size, uint32_t type);

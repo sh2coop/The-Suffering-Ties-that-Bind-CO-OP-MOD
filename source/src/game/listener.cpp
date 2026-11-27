@@ -43,7 +43,7 @@ X86_FUNC(sub_001FEF80) {
     if (off) return;
     bool none = device && kernel::R16(device + 0x42) == 0;
     uint32_t player = game_coop::g_player_object;
-    bool use = none && out && player && mem::IsCommitted(player + 0x50) && mem::IsCommitted(out + 12);
+    bool use = none && out && player && mem::Spans(player, 0x50) && mem::Spans(out, 12);
     if (use) {
         for (int i = 0; i < 3; i++) kernel::W32(out + i * 4, kernel::R32(player + 0x44 + i * 4));
         if (!game_listener::g_here) game_listener::g_here = mem::AllocSystem(16);

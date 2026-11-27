@@ -56,10 +56,10 @@ X86_EXTERN_FUNC(__imp__sub_001FC220);
 X86_FUNC(sub_001FC220) {
     using namespace game_loads;
     uint32_t resource = ctx.ecx;
-    uint8_t* word = mem::IsCommitted(resource + 0x10) ? static_cast<uint8_t*>(kernel::HostPtr(resource + kState)) : nullptr;
+    uint8_t* word = mem::Spans(resource, 0x10) ? static_cast<uint8_t*>(kernel::HostPtr(resource + kState)) : nullptr;
     uint8_t before = word ? *word & 3 : kLoaded;
     __imp__sub_001FC220(ctx, base);
-    if (!word || before != kLoading || !mem::IsCommitted(resource + 0x10)) return;
+    if (!word || before != kLoading || !mem::Spans(resource, 0x10)) return;
     // Tests: S2_LOAD_FAULT=<n> loses the mark of every n-th load on purpose (the state goes back to what it was, as
     // the other thread's late write would leave it). With S2_NO_LOAD_REPAIR=1 that must give the hang as it was
     // seen; without, a "put back" line and no hang.
