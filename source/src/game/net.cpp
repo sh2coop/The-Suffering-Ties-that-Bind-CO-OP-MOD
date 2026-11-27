@@ -37,6 +37,8 @@
 #include <oleauto.h>
 #include <natupnp.h>
 #include <winhttp.h>
+#include <wincodec.h>
+#include <wrl/client.h>
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "winhttp.lib")
@@ -104,7 +106,14 @@ uint32_t Marks(std::string* why);  // how many marks (full-size pictures of the 
 }
 
 namespace game_net {
-uint32_t g_picture_rows = 1080;  // the setting friend_picture_rows: the most rows of the joined player's picture
+// The joined player's picture: the most rows it may have (the setting friend_rows; his window's rows when that is
+// less) and how many pictures a second he is sent (the setting friend_pictures_a_second: 60, or 30).
+// Until 2026-11-27 these were 1080 rows (friend_picture_rows, a key no longer read) and thirty a second: the host's
+// own line was taken for the limit, and the owner's has 933 Mbit/s of upload ("It wasn't 60 fps for him?").
+uint32_t g_picture_rows = 2160;
+uint32_t g_picture_rate = 60;
+// ms between two pictures, less the play a frame's timing needs (a host at 60 frames a second: every frame)
+int PictureInterval() { return g_picture_rate >= 45 ? 12 : 28; }
 namespace {
 #ifdef _WIN32
 using Sock = SOCKET;
@@ -121,7 +130,7 @@ constexpr uint16_t kGamePort = 27025, kBeaconPort = 27026;
 // last one sent" let every second frame through only when the timer agreed, else the third: pictures 33 or 50 ms
 // apart, 25 a second, which the joined player of the first online session saw as stutter (his copy counted waits
 // of up to 74 ms on one PC). With 28 it is every second frame, evenly, 30 a second (every fourth at 120).
-constexpr int kFrameInterval = 28;
+constexpr int kFrameInterval = 28;  // (the pictures of the host's own split screen, the first online build's way: thirty a second)
 constexpr int kJpegQuality = 70;
 // The joined player's picture at the size of his window ("he should be playing at the resolution he has the window
 // at", 2026-11-26; until then it was the console's 640 x 480, made larger on his PC). Player 2's view is taken from
@@ -178,6 +187,12 @@ Sock Bind(uint16_t port, bool reuse) {
     int one = 1;
     if (reuse) setsockopt(s, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof one);
     setsockopt(s, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&one), sizeof one);
+    // Room for whole pictures in the socket: Windows keeps 64 kB of what has come in and not been read yet, less than
+    // one large picture (100 to 250 kB, all its packets within a few ms). While the joined game unpacked one picture
+    // the next one's packets found no room (4 pictures lost in 5 s between two copies on one PC, at sixty a second).
+    int room = 4 * 1024 * 1024;
+    setsockopt(s, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&room), sizeof room);
+    setsockopt(s, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&room), sizeof room);
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_port = htons(port);
@@ -833,9 +848,12 @@ void SendPicture(const std::vector<uint8_t>& jpeg, uint32_t frame, uint32_t w, u
         std::memcpy(pkt.data() + kFrameHead, jpeg.data() + at, n);
         HostSend(pkt.data(), kFrameHead + n);
         for (size_t k = 0; k < n; k++) repair[k] ^= jpeg[at + k];
-        // (a picture is twenty to a hundred packets: sent in one burst they overran a home router's queue now and
-        // then, and one lost packet was a lost picture. A short breath every eight.)
-        if (i % 8 == 7) std::this_thread::sleep_for(std::chrono::microseconds(500));
+        // (a picture is twenty to two hundred packets: sent in one burst they overran a home router's queue now and
+        // then, and one lost packet was a lost picture. A short breath every eight; from sixty pictures a second on
+        // every sixteen, and for a large picture fewer still: a breath is half a millisecond at best and one at
+        // worst, and all of a picture has to be out before the next one is packed.)
+        const int every = g_picture_rate >= 45 ? std::max<int>(16, parts / 6) : 8;
+        if (i % every == every - 1) std::this_thread::sleep_for(std::chrono::microseconds(500));
     }
     // A large picture is many parts (a hundred for 1920 x 1440), and one repair packet for all of them mends
     // one loss only: every twelve parts get a repair packet of their own (packet type 11: the picture, how many
@@ -859,7 +877,7 @@ void SendPicture(const std::vector<uint8_t>& jpeg, uint32_t frame, uint32_t w, u
                 for (size_t b = 0; b < len; b++) grp[17 + b] ^= jpeg[at + b];
             }
             HostSend(grp.data(), grp.size());
-            if ((first / kRepairGroup) % 8 == 7) std::this_thread::sleep_for(std::chrono::microseconds(500));
+            if ((first / kRepairGroup) % 8 == 7 && g_picture_rate < 45) std::this_thread::sleep_for(std::chrono::microseconds(500));
         }
     }
     // The repair packet: part number = the number of parts (a copy of the game from before 2026-11-25 drops such
@@ -880,6 +898,52 @@ void SendPicture(const std::vector<uint8_t>& jpeg, uint32_t frame, uint32_t w, u
         HostSend(pkt.data(), kFrameHead + kChunk);
     }
 }
+
+// A picture packed as JPEG by Windows' own encoder (WIC). Measured 2026-11-27 on a game picture, the same quality
+// and the same size of file as the encoder the port had used alone (stb_image_write): 1.6 ms against 9.2 ms at
+// 960 x 720, 3.5 against 20.8 at 1440 x 1080, 6.8 against 34.8 at 1920 x 1440. Sixty pictures a second leave 16 ms
+// for one. Takes the pixels as blue, green, red; false when Windows has no such encoder (the other one is used then).
+#ifdef _WIN32
+bool WicJpeg(const uint8_t* bgr, uint32_t w, uint32_t h, int quality, std::vector<uint8_t>& out) {
+    using Microsoft::WRL::ComPtr;
+    static thread_local ComPtr<IWICImagingFactory> factory;
+    static thread_local bool tried = false;
+    if (!tried) {
+        tried = true;
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) factory.Reset();
+    }
+    if (!factory) return false;
+    ComPtr<IStream> stream;
+    ComPtr<IWICBitmapEncoder> encoder;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    ComPtr<IPropertyBag2> props;
+    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream)) || FAILED(factory->CreateEncoder(GUID_ContainerFormatJpeg, nullptr, &encoder)) ||
+        FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) || FAILED(encoder->CreateNewFrame(&frame, &props)))
+        return false;
+    PROPBAG2 option{};
+    option.pstrName = const_cast<LPOLESTR>(L"ImageQuality");
+    VARIANT v;
+    VariantInit(&v);
+    v.vt = VT_R4, v.fltVal = float(quality) / 100.0f;
+    props->Write(1, &option, &v);
+    WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+    if (FAILED(frame->Initialize(props.Get())) || FAILED(frame->SetSize(w, h)) || FAILED(frame->SetPixelFormat(&format)) ||
+        !IsEqualGUID(format, GUID_WICPixelFormat24bppBGR) || FAILED(frame->WritePixels(h, w * 3, w * 3 * h, const_cast<BYTE*>(bgr))) ||
+        FAILED(frame->Commit()) || FAILED(encoder->Commit()))
+        return false;
+    HGLOBAL memory = nullptr;
+    STATSTG stat{};
+    if (FAILED(GetHGlobalFromStream(stream.Get(), &memory)) || FAILED(stream->Stat(&stat, STATFLAG_NONAME)) || !stat.cbSize.QuadPart) return false;
+    const uint8_t* bytes = static_cast<const uint8_t*>(GlobalLock(memory));
+    if (!bytes) return false;
+    out.assign(bytes, bytes + size_t(stat.cbSize.QuadPart));
+    GlobalUnlock(memory);
+    return true;
+}
+#else
+bool WicJpeg(const uint8_t*, uint32_t, uint32_t, int, std::vector<uint8_t>&) { return false; }
+#endif
 
 void Compose(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch, std::vector<uint8_t>& out, uint32_t& out_w, uint32_t& out_h);
 void HostEncode() {
@@ -918,7 +982,22 @@ void HostEncode() {
             v->insert(v->end(), static_cast<uint8_t*>(data), static_cast<uint8_t*>(data) + size);
         };
         int64_t encode_from = MicrosNow();
-        if (!stbi_write_jpg_to_func(put, &jpeg, int(w), int(h), 3, rgb.data(), kJpegQuality)) continue;
+        // (Windows' encoder first: it takes blue, green, red. S2_NET_STB=1: the other one alone, for tests)
+        static const bool stb_only = std::getenv("S2_NET_STB") != nullptr;
+        static bool wic = !stb_only, said_encoder = false;
+        bool packed = false;
+        if (wic) {
+            for (size_t i = 0; i + 2 < rgb.size(); i += 3) std::swap(rgb[i], rgb[i + 2]);
+            packed = WicJpeg(rgb.data(), w, h, kJpegQuality, jpeg);
+            if (!packed) {
+                wic = false;
+                jpeg.clear();
+                for (size_t i = 0; i + 2 < rgb.size(); i += 3) std::swap(rgb[i], rgb[i + 2]);
+                LOGW("net: Windows' JPEG encoder is not to be had on this PC: the pictures are packed by the slower one");
+            }
+        }
+        if (!packed && !stbi_write_jpg_to_func(put, &jpeg, int(w), int(h), 3, rgb.data(), kJpegQuality)) continue;
+        if (!said_encoder) said_encoder = true, LOGI("net: the joined player's pictures are packed by %s, up to %u a second", packed ? "Windows' JPEG encoder" : "the built-in JPEG encoder", g_picture_rate >= 45 ? 60u : 30u);
         {   // the record
             uint32_t us = uint32_t(MicrosNow() - encode_from);
             g_rec.encode_us += us;
@@ -1033,7 +1112,7 @@ void Sink(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t pitch) {
     // (Player 2's own view is drawn only when a picture is due, every 30 ms or more, see coop.cpp 0x1B83E0, and reaches
     // this place a frame or two later, not evenly: each one is taken. The limit is for the frames of a scene, where
     // the host's own picture comes every frame.)
-    int least = game_coop::StreamView() ? kFrameInterval / 2 : kFrameInterval;
+    int least = game_coop::StreamView() ? std::min(PictureInterval(), kFrameInterval / 2) : game_coop::SplitActive() ? kFrameInterval : PictureInterval();
     if (now - g_host.last_sent < std::chrono::milliseconds(least) || !ClientConnected()) return;
     g_host.last_sent = now;
     // (Only the copy is made here, on the renderer's thread: the picture for the joined player is put together on
@@ -1346,6 +1425,11 @@ void Letterbox(const uint8_t* rgba, int w, int h, float shape, std::vector<uint8
     for (int y = 0; y < dh; y++) {
         int sy2 = std::min(h - 1, y * h / dh);
         uint8_t* d = &out[(size_t(oy + y) * W + ox) * 4];
+        if (dw == w) {  // (the picture at its own size, which it always is: no sum for every pixel, sixty times a second)
+            const uint8_t* p = rgba + size_t(sy2) * w * 4;
+            for (int x = 0; x < dw; x++, p += 4) d[4 * x] = p[2], d[4 * x + 1] = p[1], d[4 * x + 2] = p[0], d[4 * x + 3] = 255;
+            continue;
+        }
         for (int x = 0; x < dw; x++) {
             const uint8_t* p = rgba + (size_t(sy2) * w + std::min(w - 1, x * w / dw)) * 4;
             d[4 * x] = p[2];

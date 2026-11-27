@@ -43,6 +43,7 @@ void SetSplit(bool on);  // view.cpp
 float Aspect();          // width / height of the picture the frame is shown in
 }
 namespace game_net {  // net.cpp
+int PictureInterval();  // ms between two pictures for the joined player, less a frame's play
 bool Host(bool on);
 bool Hosting();
 bool HostHasPlayer();
@@ -112,6 +113,28 @@ void Asked(X86Context& ctx, uint32_t getter) {
 
 std::string CallersOf(X86Context& ctx) { return Callers(ctx, 8); }
 extern bool g_layer_inside;
+
+// Tests: S2_ACTION_TRACE=1 logs which of the game's controller actions answer "yes" for each Player (0x1A09C0: this =
+// the input system [0x384BC8]; the Player's input user part, the action's number, how it is asked), once per press,
+// and each action a Player is asked about, once.
+extern uint32_t g_player, g_second;
+int DoubleAction(uint32_t user, uint32_t action);  // ("the stand-in bodies": the controller a stand-in's question goes to, or -1)
+void MirrorStates(X86Context& ctx, int which);     // ... and the states it takes over from its owner
+bool DoublesThing(uint32_t object);                // a stand-in body, or what one holds
+void Answered(X86Context& ctx, uint32_t getter, uint32_t user, uint32_t action, uint32_t how) {
+    static const bool trace = std::getenv("S2_ACTION_TRACE") != nullptr;
+    if (!trace) return;
+    int who = g_player && user == g_player + 0x3A ? 1 : g_second && user == g_second + 0x3A ? 2 : 0;
+    if (!who) return;
+    static std::map<uint64_t, uint64_t> last;  // (getter, who, how, action) -> the frame it last answered yes
+    static std::map<uint64_t, int> asked;
+    uint64_t key = (uint64_t(getter & 0xFFF) << 52) | (uint64_t(who) << 48) | (uint64_t(how & 0xFF) << 32) | action;
+    if (!asked[key]++ && asked.size() < 600) LOGI("action trace: Player %d is asked about action %X (getter %06X, how %u)", who, action, getter, how);
+    if (getter != 0x1A09C0 || !ctx.eax) return;
+    uint64_t& at = last[key];
+    if (g_frames > at + 1) LOGI("action trace: frame %llu: Player %d: action %X (how %u) says %X", (unsigned long long)g_frames, who, action, how, ctx.eax);
+    at = g_frames;
+}
 
 // trace: which of the game's globals a Player's once-a-frame method writes. What Player 2's Run writes there is
 // state the game keeps once, for "the player": each is something the two players share without meaning to.
@@ -1480,7 +1503,7 @@ void TestClasses(X86Context& ctx) {
 //     becomes one view. They end with Player 2 (a save, a level exit, co-op off) and are made again after him. Why
 //     not made when they are needed: see SpawnDouble.
 //   - They are not on the players' list (nothing counts them as players) and their input user's device is one that
-//     does not exist: no button reaches them.
+//     does not exist: no button reaches them, but the few it does with its owner (below).
 //   - While one is out its Run runs, as "the player" (AsDouble) with its owner's walk stick: it stands when he stands
 //     and runs when he runs. It has no Detect (the hook on 0x24B00), so it has no movement of its own and meets
 //     nothing. Two things were found the hard way:
@@ -1498,8 +1521,11 @@ void TestClasses(X86Context& ctx) {
 //   - Nothing finds it: its object carries the engine's "not for questions" mark, touches with it are refused both
 //     ways (RefuseTouch, 0x1706F0) and nothing hurts it (Player +0x1E; the hook on 0x28E00 says so if anything tries).
 //   - It is drawn in every view but its owner's, and its owner's arms and weapon in his own view only (0x1D1970).
-// Not done: a stand-in has no buttons, so it does not jump, fire, reload or swing with its owner; while he is in the
-// air it is carried along standing. A player in creature form has none.
+//   - It does what its owner does (since 2026-11-27; "it needs to show him jumopiung too", "and doing interactable
+//     stuff"): it reads his controller for jump, fire, reload and the second attack (DoubleAction), is on the ground
+//     and lands when he does (the hook of 0x25480), and takes over his Aim, Attack, Reload and second-attack states
+//     (MirrorStates). Its weapon fires blanks and its blows meet nothing ("the messages a stand-in body sends").
+// Not done: it does not throw, and it does not use things with him. A player in creature form has none.
 //   S2_COOP_NO_DOUBLE=1: none (as before 2026-11-26)      S2_COOP_DOUBLE_NO_WEAPON=1: empty hands
 //   S2_COOP_DOUBLE_SOLID=1: without the "not for questions" mark      S2_COOP_DOUBLE_EVENTS=1: their events go out
 bool g_double_off = std::getenv("S2_COOP_NO_DOUBLE") != nullptr;
@@ -1510,6 +1536,12 @@ int DoubleOf(uint32_t player) {  // which stand-in this Player (class object) is
 int DoubleObject(uint32_t object) {  // the same, by its engine object
     if (!object) return -1;
     return g_doubles[0].object == object ? 0 : g_doubles[1].object == object ? 1 : -1;
+}
+bool DoublesThing(uint32_t object) {  // a stand-in body, or what one holds
+    if (!object) return false;
+    for (const Double& d : g_doubles)
+        if (d.object && (object == d.object || object == d.held[0] || object == d.held[1])) return true;
+    return false;
 }
 // A Player is moved by a second object of his own (made by 0x1CB80 from the template his property 0x78 names, kept
 // by the handle at body +0xD8, the body being [Player +0xF0]): it is that object that is swept through the world.
@@ -1531,6 +1563,78 @@ void OffTheList(uint32_t object) {
         kernel::W32(kObjectManager + kPlayerCount, count - 1);
         return;
     }
+}
+// What a stand-in does with its owner: the actions whose question is put to HIS controller while it is out. The
+// numbers are the game's own (read with S2_ACTION_TRACE: 3E9 fire, 3EA throw, 3EB jump, 3EC use, 3ED first person,
+// 3F5 reload, 3F6 flashlight, 44A the second attack). Tests: S2_DOUBLE_ACTIONS=<hex>,<hex>,... names them.
+int DoubleAction(uint32_t user, uint32_t action) {
+    static const std::vector<uint32_t> actions = [] {
+        std::vector<uint32_t> list = {0x3EB, 0x3E9, 0x3F5, 0x44A};
+        if (const char* v = std::getenv("S2_DOUBLE_ACTIONS")) {
+            list.clear();
+            for (const char* e = v; e && *e; e = std::strchr(e, ',') ? std::strchr(e, ',') + 1 : nullptr) list.push_back(uint32_t(std::strtoul(e, nullptr, 16)));
+        }
+        return list;
+    }();
+    for (int which = 0; which < 2; which++) {
+        const Double& d = g_doubles[which];
+        if (!d.object || !d.out || !d.player || user != d.player + kUser) continue;
+        return std::find(actions.begin(), actions.end(), action) != actions.end() ? which : -1;
+    }
+    return -1;
+}
+// The states a stand-in takes over from its owner: begun on it when he begins one (0x25CD0: this = Player; state)
+// and ended when his ends (0x25C10: state, 0). (A state's bit: bit N of +0xBC, from 32 on of +0xC0.) What a player
+// does in first person, by the buttons (run st1): jump = Fall (9) alone, no Jump; fire = Move, Aim, Attack (3);
+// reload = Reload (17); the second attack = FP Melee Attack (31), for which the stand-in has Melee Attack (4);
+// throw = Throw (20); changing weapon = Equip (24), which the stand-in gets by being handed the weapon (Doubles).
+// Jump, Fall and Landing are not in this list: the stand-in reads the jump button itself and lands when he lands
+// (the hook of 0x25480). Throw is not yet: it has nothing to throw, and what it threw would be a second grenade.
+// The game may say no to a state (it sorts out which states go together, 0x25C80), and a state may end by itself
+// (Attack ends when its time is up): one that is refused is tried again only when its owner begins it anew, one that
+// ended while he is still in his is begun again after a few frames.
+//   S2_DOUBLE_MIRROR=<number>,<number>,... names them (a pair <his>:<its> gives it another state for one of his);
+//   S2_DOUBLE_MIRROR=0: none (tests)
+void MirrorStates(X86Context& ctx, int which) {
+    static const std::vector<std::pair<uint32_t, uint32_t>> states = [] {
+        std::vector<std::pair<uint32_t, uint32_t>> list = {{2, 2}, {3, 3}, {17, 17}, {31, 4}};
+        if (const char* v = std::getenv("S2_DOUBLE_MIRROR")) {
+            list.clear();
+            for (const char* e = v; e && *e; e = std::strchr(e, ',') ? std::strchr(e, ',') + 1 : nullptr) {
+                uint32_t his = uint32_t(std::atoi(e)), its = his;
+                const char* colon = std::strchr(e, ':');
+                const char* comma = std::strchr(e, ',');
+                if (colon && (!comma || colon < comma)) its = uint32_t(std::atoi(colon + 1));
+                if (his && his < 39 && its && its < 39) list.push_back({his, its});
+            }
+        }
+        return list;
+    }();
+    Double& d = g_doubles[which];
+    uint32_t owner = which ? g_second : g_player;
+    if (states.empty() || !d.out || !d.player || !owner) return;
+    // (the rounds in the weapon in its hand are its owner's, Player +0x140: with none the Attack state ends at once)
+    static const bool no_rounds = std::getenv("S2_DOUBLE_NO_ROUNDS") != nullptr;
+    if (!no_rounds) kernel::W32(d.player + 0x140, kernel::R32(owner + 0x140));
+    auto on = [](uint32_t player, uint32_t state) { return (kernel::R32(player + 0xBC + (state >> 5) * 4) >> (state & 31)) & 1; };
+    static uint64_t tried[2][40] = {};   // the frame a state was last begun on this stand-in for the state its owner is in now
+    static bool refused[2][40] = {};     // ... and whether the game said no
+    static const bool trace = std::getenv("S2_DOUBLE_TRACE") != nullptr;
+    uint32_t ecx = ctx.ecx, eax = ctx.eax;
+    for (const auto& [his, its] : states) {
+        bool he = on(owner, his) != 0, it = on(d.player, its) != 0;
+        if (!he) tried[which][his] = 0, refused[which][his] = false;
+        if (he == it) continue;
+        if (he && (refused[which][his] || (tried[which][his] && g_frames < tried[which][his] + 6))) continue;
+        ctx.ecx = d.player;
+        uint32_t result = he ? kernel::CallGuest(ctx, 0x25CD0, {its}) : kernel::CallGuest(ctx, 0x25C10, {its, 0});
+        if (he) tried[which][his] = g_frames, refused[which][his] = !on(d.player, its);
+        static int said = 0;
+        if (trace && said++ < 200)
+            LOGI("double trace: frame %llu: Player %d's stand-in %s state %u (his %u): the game says %u, its states are now %08X %02X", (unsigned long long)g_frames, which + 1,
+                 he ? "begins" : "ends", its, his, result, kernel::R32(d.player + 0xBC), kernel::R32(d.player + 0xC0) & 0x7F);
+    }
+    ctx.ecx = ecx, ctx.eax = eax;
 }
 void EndDoubles(X86Context& ctx, const char* why) {
     uint32_t ecx = ctx.ecx;
@@ -1717,6 +1821,32 @@ void Doubles(X86Context& ctx) {
     }
     PinDoubles(ctx);
     g_doubles_fresh = true;
+    {   // tests: S2_DOUBLE_TRACE=1 says what a stand-in that is out is doing beside its owner, when either changes
+        static const bool trace = std::getenv("S2_DOUBLE_TRACE") != nullptr;
+        static uint32_t was[2][2] = {};
+        static int said = 0;
+        static const char* const kStates[39] = {"0", "Move", "Aim", "Attack", "MeleeAttack", "Turn", "Idle", "IntermittentIdle", "Jump", "Fall", "Pitch", "Controlled", "Landing",
+                                                "JumpMelee", "Roll", "FirstPerson", "HitReacting", "Reload", "Morph", "Insanity", "Throw", "Interact", "ViewMonitor",
+                                                "CameraYaw", "Equip", "ItemPickup", "LadderClimb", "LookAt", "InsanityAttack", "InsanityAttackAcquisition",
+                                                "DocumentView", "FPMelee", "PlayAnim", "HeadGrab", "Crouch", "ForcedCrouch", "Halt", "MorphFail", "BodySlam"};
+        auto names = [](uint32_t bits) {
+            std::string out;
+            for (int i = 1; i < 32; i++)
+                if (bits & (1u << i)) out += std::string(out.empty() ? "" : " ") + kStates[i];
+            return out.empty() ? std::string("none") : out;
+        };
+        for (int which = 0; trace && which < 2; which++) {
+            const Double& d = g_doubles[which];
+            uint32_t owner = which ? g_second : g_player;
+            if (!d.out || !d.player || !owner) continue;
+            uint32_t his = kernel::R32(owner + 0xBC), its = kernel::R32(d.player + 0xBC);
+            if ((his != was[which][0] || its != was[which][1]) && said++ < 400)
+                LOGI("double trace: frame %llu: Player %d does [%s], his stand-in [%s] (on the ground: he %u, it %u; rounds in the weapon: he %d, it %d)", (unsigned long long)g_frames,
+                     which + 1, names(his).c_str(), names(its).c_str(), kernel::R32(owner + 0xA8) & 1, kernel::R32(d.player + 0xA8) & 1, int32_t(kernel::R32(owner + 0x140)),
+                     int32_t(kernel::R32(d.player + 0x140)));
+            was[which][0] = his, was[which][1] = its;
+        }
+    }
 }
 
 // Player 2's Camera made anew: his view camera and his Camera object are ended the way they are when he leaves, and
@@ -2672,6 +2802,29 @@ X86_FUNC(sub_00025480) {
         game_coop::g_running = before;
         kernel::Return(ctx, 0, 0);
         return;
+    } else if (which >= 0) {
+        // A stand-in has no Detect, so nothing tells it whether it stands on anything: it is on the ground when its
+        // owner is (Player +0xA8 bit 0), and in the air with him. Its own states then follow his jump: Jump or Fall
+        // while he is up, Landing when he comes down.
+        // It lands when he lands: the game's own landing (0x3BB00, what a Player's Detect calls when he meets the
+        // ground: it ends the fall, sets the bit and begins the Landing state) the moment its owner is on the ground
+        // again while it is still in the air (its states Jump, bit 8, or Fall, bit 9). A third-person jump lasts
+        // longer than the hop in first person: without this it stayed in the air's pose after his first jump.
+        uint32_t owner = which ? game_coop::g_second : game_coop::g_player;
+        static const bool no_ground = std::getenv("S2_DOUBLE_NO_GROUND") != nullptr;  // tests: as before
+        if (owner && !no_ground) {
+            uint32_t player = ctx.ecx;
+            bool his = (kernel::R32(owner + 0xA8) & 1) != 0, in_air = (kernel::R32(player + 0xBC) & 0x300) != 0;
+            static bool was[2] = {true, true};
+            if (his && in_air && (!was[which] || !(kernel::R32(player + 0xA8) & 1))) {
+                uint32_t eax = ctx.eax;
+                kernel::CallGuest(ctx, 0x3BB00, {});  // (this = the stand-in, still in ecx; "the player" is it: AsDouble above)
+                ctx.ecx = player, ctx.eax = eax;
+            }
+            was[which] = his;
+            kernel::W32(player + 0xA8, (kernel::R32(player + 0xA8) & ~1u) | (his ? 1u : 0u));
+        }
+        game_coop::MirrorStates(ctx, which);
     }
     __imp__sub_00025480(ctx, base);
     game_coop::g_running = before;
@@ -2706,7 +2859,12 @@ X86_FUNC(sub_0017F130) {
     game_coop::SwapStick();
     game_coop::g_stick2_updating = false;
 }
-#define COOP_ASKED(addr)                            X86_EXTERN_FUNC(__imp__sub_##addr);             X86_FUNC(sub_##addr) {                              game_coop::Asked(ctx, 0x##addr);                __imp__sub_##addr(ctx, base);               }
+// The game asks a controller about an action through two routines of the input system ([0x384BC8]): 0x1A09C0 (the
+// Player's input user part, the action's number, how: "was it pressed") and 0x1A0790 (the same, for a value). The
+// controller is the one the user part names (+4: 0 the first, 1 the second). A stand-in body's names one that is not
+// there, so every answer is "no"; for the actions it does with its owner (DoubleAction) the question is put to its
+// owner's controller instead.
+#define COOP_ASKED(addr)                                                                                                      X86_EXTERN_FUNC(__imp__sub_##addr);                                                                                       X86_FUNC(sub_##addr) {                                                                                                        game_coop::Asked(ctx, 0x##addr);                                                                                          uint32_t user = kernel::R32(ctx.esp + 4), action = kernel::R32(ctx.esp + 8), how = kernel::R32(ctx.esp + 12);             int owner = game_coop::DoubleAction(user, action);                                                                        if (owner >= 0) kernel::W32(user + 4, uint32_t(owner));                                                                   __imp__sub_##addr(ctx, base);                                                                                             if (owner >= 0) kernel::W32(user + 4, 3);                                                                                 game_coop::Answered(ctx, 0x##addr, user, action, how);                                                                }
 COOP_ASKED(001A0790)
 COOP_ASKED(001A09C0)
 X86_EXTERN_FUNC(__imp__sub_0001B0D0);
@@ -2827,7 +2985,8 @@ X86_FUNC(sub_001B83E0) {
                    kernel::R32(cameras + kViewCameraBytes + kVcTexture) == g_no_texture;
     if (streams) {
         using StreamClock = std::chrono::steady_clock;
-        constexpr auto kPictureEvery = std::chrono::milliseconds(30);  // (net.cpp sends one at most every 28 ms)
+        // (net.cpp sends one at most that often: thirty a second until 2026-11-27, sixty since, when the setting says so)
+        const auto kPictureEvery = std::chrono::milliseconds(game_net::PictureInterval() + 1);
         static StreamClock::time_point drawn{};
         static uint32_t skipped = 0, drew = 0;
         StreamClock::time_point now = StreamClock::now();
@@ -2848,12 +3007,12 @@ X86_FUNC(sub_001B83E0) {
         PinDoubles(ctx);
     }
     __imp__sub_001B83E0(ctx, base);
-    // a scene online with a large picture for the joined player: this frame, finished, about thirty times a second
+    // a scene online with a large picture for the joined player: this frame, finished, as often as his pictures go
     if (g_stream_view && g_one_view && !g_paused_now && ViewCamera2() && gpu::g_stream_snapshot.load() && gpu::g_stream_snapshot_rows.load() > 0) {
         static std::chrono::steady_clock::time_point taken{};
         static uint32_t count = 0;
         auto now = std::chrono::steady_clock::now();
-        if (now - taken >= std::chrono::milliseconds(30)) {
+        if (now - taken >= std::chrono::milliseconds(game_net::PictureInterval() + 1)) {
             taken = now;
             gpu::SnapshotForStream();
             if (++count % 900 == 1) LOGI("coop: a scene: the joined player's picture is this PC's finished frame, taken at his picture's size (%u so far)", count);
@@ -3500,8 +3659,8 @@ X86_FUNC(sub_00028E00) {
         // not hurt, and the record keeps the first times
         uint32_t by = kernel::R32(ctx.esp + 8);
         if (game_coop::g_double_hits++ < 12)
-            LOGR("coop: a stand-in body was hit (%u) by %s: not hurt", game_coop::g_double_hits,
-                 by && mem::IsCommitted(by + 0x110) ? game_coop::WhoIs(by).c_str() : "nothing named");
+            LOGR("coop: a stand-in body was hit (%u) by %s: not hurt (the hit came through %s)", game_coop::g_double_hits,
+                 by && mem::IsCommitted(by + 0x110) ? game_coop::WhoIs(by).c_str() : "nothing named", game_coop::Callers(ctx, 12).c_str());
         float none = 0;
         std::memcpy(kernel::HostPtr(ctx.esp + 4), &none, 4);
     }
@@ -3527,7 +3686,7 @@ X86_FUNC(sub_00028E00) {
                        mem::IsCommitted(ctx.ecx + 8) && kernel::R32(ctx.ecx + 4) != by;
         float amount;
         std::memcpy(&amount, kernel::HostPtr(ctx.esp + 4), 4);
-        if (partner) amount = 0;
+        if (partner || game_coop::DoublesThing(by)) amount = 0;  // (nor does a stand-in body hurt anybody: its blows are for show)
         else if (!plain && amount > 0) amount *= 1.3f;
         std::memcpy(kernel::HostPtr(ctx.esp + 4), &amount, 4);
     }
@@ -3560,6 +3719,13 @@ X86_FUNC(sub_0016AF00) {
         if (!plain && game_coop::g_second_object && by_player && victim && !is_player && amount > 0) {
             amount /= 1.3f;
             std::memcpy(kernel::HostPtr(ctx.esp + 4), &amount, 4);
+        }
+        // nothing is hurt by a stand-in body or by what it holds
+        if (amount > 0 && game_coop::DoublesThing(by ? by : game_coop::g_hit_by)) {
+            amount = 0;
+            std::memcpy(kernel::HostPtr(ctx.esp + 4), &amount, 4);
+            static int said = 0;
+            if (said++ < 4) LOGI("coop: a stand-in body's blow or shot reached something: it does no harm");
         }
     }
     game_coop::Hit(ctx.ecx, by ? by : game_coop::g_hit_by, amount);
@@ -4983,6 +5149,16 @@ float PropertyF(X86Context& ctx, uint32_t object, uint32_t number, float otherwi
 }
 // the players' flashlights, once a frame: what they are doing, into the log when it changes
 void Flashlights() {
+    {   // (once: where the game's message manager is, for the notes)
+        static bool said = false;
+        uint32_t m = kernel::R32(0x384B8C);
+        if (!said && m && mem::IsCommitted(m + 4) && mem::IsCommitted(kernel::R32(m) + 0x40)) {
+            said = true;
+            uint32_t v = kernel::R32(m);
+            LOGI("coop: the message manager [0x384B8C] is %08X, its methods at %08X: +0x04 %06X, +0x10 %06X, +0x14 %06X, +0x18 %06X, +0x1C %06X, +0x20 %06X", m, v, kernel::R32(v + 4),
+                 kernel::R32(v + 0x10), kernel::R32(v + 0x14), kernel::R32(v + 0x18), kernel::R32(v + 0x1C), kernel::R32(v + 0x20));
+        }
+    }
     if (g_trace_left_at && g_frames >= g_trace_left_at) {
         uint32_t table = kernel::R32(kObjectManager + 0x0C);
         for (const auto& [object, index] : g_trace_left) {
@@ -5095,7 +5271,17 @@ X86_FUNC(sub_000EA840) {
 X86_EXTERN_FUNC(__imp__sub_0018C370);
 X86_FUNC(sub_0018C370) {
     static const uint32_t want = std::getenv("S2_SPAWN_TRACE") ? uint32_t(std::strtoul(std::getenv("S2_SPAWN_TRACE"), nullptr, 16)) : 0;
-    if (want) {
+    // (S2_SPAWN_TRACE=all with S2_SPAWN_FROM=<frame>: everything made in the sixty frames from that one)
+    static const bool all = std::getenv("S2_SPAWN_TRACE") && !std::strcmp(std::getenv("S2_SPAWN_TRACE"), "all");
+    static const uint64_t from = std::getenv("S2_SPAWN_FROM") ? uint64_t(std::atoll(std::getenv("S2_SPAWN_FROM"))) : 0;
+    if (all && game_coop::Frames() >= from && game_coop::Frames() < from + 60) {
+        uint32_t owner = kernel::R32(ctx.esp + 4), matrix = kernel::R32(ctx.esp + 8), tmpl = kernel::R32(ctx.esp + 16);
+        float at[3] = {0, 0, 0};
+        if (matrix && mem::IsCommitted(matrix + 64)) std::memcpy(at, kernel::HostPtr(matrix + 48), 12);
+        LOGI("spawn trace: frame %llu: template %u of class %08X at %.2f %.2f %.2f, owner %s (class %08X), asked from %s", (unsigned long long)game_coop::Frames(), tmpl,
+             tmpl < 0x10000 ? game_coop::ClassOfTemplate(tmpl) : 0, at[0], at[1], at[2], owner && mem::IsCommitted(owner + 0x110) ? game_coop::WhoIs(owner).c_str() : "none",
+             owner && mem::IsCommitted(owner + 0x110) ? game_coop::ClassOf(owner) : 0, game_coop::Callers(ctx, 10).c_str());
+    } else if (want && !all) {
         uint32_t owner = kernel::R32(ctx.esp + 4), matrix = kernel::R32(ctx.esp + 8), tmpl = kernel::R32(ctx.esp + 16);
         if (tmpl < 0x10000 && game_coop::ClassOfTemplate(tmpl) == want) {
             float at[3] = {0, 0, 0};
@@ -5107,3 +5293,86 @@ X86_FUNC(sub_0018C370) {
     }
     __imp__sub_0018C370(ctx, base);
 }
+
+// ---- the messages a stand-in body sends ------------------------------------------------------------------------------
+// Things happen in the game through messages: 0x1D7110 (this = the message manager 0x384BE8, its methods at 0x348A10,
+// +0x18; from, to, the message, a number, flags) hands one object's message to another (0x1D6C60), and with flag 0x10
+// to what hangs on it. A message is a number (its names are in work\re\riot_messages.tsv) or a record that starts with
+// one. A Player's Attack state fires his weapon by sending his own object "Fire" (0x66, at 0x3260B).
+//   S2_MESSAGE_TRACE=1: every kind of message a stand-in's object, or what it holds, sends or is sent (tests)
+X86_EXTERN_FUNC(__imp__sub_001D7110);
+X86_FUNC(sub_001D7110) {
+    using namespace game_coop;
+    uint32_t from = kernel::R32(ctx.esp + 4), to = kernel::R32(ctx.esp + 8), message = kernel::R32(ctx.esp + 12);
+    uint32_t id = message > 3 && mem::IsCommitted(message + 4) ? kernel::R32(message) : message;
+    int sender = -1, taker = -1;
+    for (int which = 0; which < 2; which++) {
+        const Double& d = g_doubles[which];
+        if (!d.object) continue;
+        if (from && (from == d.object || from == d.held[0] || from == d.held[1])) sender = which;
+        if (to && (to == d.object || to == d.held[0] || to == d.held[1])) taker = which;
+    }
+    static const bool trace = std::getenv("S2_MESSAGE_TRACE") != nullptr;
+    if (trace && (sender >= 0 || taker >= 0)) {
+        static std::map<uint64_t, int> seen;
+        uint32_t cf = from && mem::IsCommitted(from + 0x110) ? ClassOf(from) : 0, ct = to && mem::IsCommitted(to + 0x110) ? ClassOf(to) : 0;
+        uint64_t key = (uint64_t(id) << 40) ^ (uint64_t(cf) << 8) ^ ct ^ (uint64_t(sender + 1) << 62) ^ (uint64_t(taker + 1) << 60);
+        if (seen.size() < 300 && !seen[key]++)
+            LOGI("message trace: frame %llu: message %X from %s (class %08X) to %s (class %08X), number %X, flags %X, inside the method of Player %08X, from %s",
+                 (unsigned long long)g_frames, id, sender >= 0 ? (from == g_doubles[sender].object ? "a stand-in" : "what a stand-in holds") : "another object", cf,
+                 taker >= 0 ? (to == g_doubles[taker].object ? "a stand-in" : "what a stand-in holds") : "another object", ct, kernel::R32(ctx.esp + 16),
+                 kernel::R32(ctx.esp + 20), g_running, Callers(ctx, 5).c_str());
+    }
+    // A stand-in's weapon fires blanks: the shots are its owner's own, from the weapon in his first-person hands
+    // (their flash, their sound, their bullets). "Fire" (0x66) is not handed to a stand-in or to what it holds: the
+    // Attack state sends it to the Player's own object when it begins (0x31F3F) and the weapon's animation sends it
+    // to the weapon for every round. With it the target was hit twice for every shot (run ds4: 11 hits in a burst of
+    // five or six). And nothing a stand-in sends hurts anybody: the damage message 0x2001 from one is dropped too.
+    static const bool live = std::getenv("S2_DOUBLE_LIVE") != nullptr;  // tests: as it was
+    // The engine's own messages (0x2000 on: 0x2001 the hurt, 0x2005 a blow's touch, 0x2010 "you hit me") from a
+    // stand-in or from what it holds go to nobody but itself: its second attack met its own owner, who stands in
+    // the same place (run dm1: Player 1 hurt 32.5 by his own stand-in).
+    // ... and none of them reaches a stand-in from anybody else: its owner's own blow in first person met it (he
+    // stands inside it) and blood sprang from it at every swing (run da1).
+    bool its_own = sender >= 0 && taker == sender;
+    if (!live && ((taker >= 0 && id == 0x66) || ((sender >= 0 || taker >= 0) && !its_own && id >= 0x2000 && id < 0x3000))) {
+        static int said = 0;
+        if (said++ < 4) LOGI("coop: a stand-in body does nothing to the world: its message %X is not handed on (its weapon fires blanks, its blows meet nobody)", id);
+        kernel::Return(ctx, 0, 5);
+        return;
+    }
+    __imp__sub_001D7110(ctx, base);
+}
+
+// A weapon's blow meets something (0xEFE9D, for each thing the weapon touched: this = the weapon, its carrier's handle
+// at +0x56). Three things are done with it, each given the object met first: 0xEF320 lands the blow (the record of
+// the hit, 0x28280, handed to what was met: its health part's method +0x58, for a Player the hurt, the flash and the
+// hit's reaction; then the touch message 0x2005), 0xEF6B0 gives it its push, and 0xEEFA0 makes what the blow throws
+// up (an Object Generator, template 1698 for a body: blood). A stand-in body is not there for blows: not for its own
+// owner's, who stands inside it (in first person his second attack met his own stand-in at every swing: blood sprang
+// from it and the grenade on its belt flew off, runs da2 and da5), not for anybody else's; and its own blows meet
+// nothing.
+namespace game_coop {
+bool BlowIsForShow(X86Context& ctx) {
+    uint32_t weapon = ctx.ecx, met = kernel::R32(ctx.esp + 4);
+    uint32_t table = kernel::R32(kObjectManager + 0x0C), h = weapon && mem::IsCommitted(weapon + 0x60) ? kernel::R16(weapon + 0x56) : 0;
+    uint32_t carrier = table && h ? kernel::R32(table + h * 6) : 0;
+    static const bool live = std::getenv("S2_DOUBLE_LIVE") != nullptr;  // tests: as it was
+    if (live || !(DoublesThing(met) || DoubleObject(carrier) >= 0)) return false;
+    static int said = 0;
+    if (said++ < 4) LOGI("coop: a blow %s: nothing comes of it", DoubleObject(carrier) >= 0 ? "of a stand-in body's" : "met a stand-in body");
+    return true;
+}
+}  // namespace game_coop
+#define COOP_BLOW(addr, words)                                                                                            \
+    X86_EXTERN_FUNC(__imp__sub_##addr);                                                                                   \
+    X86_FUNC(sub_##addr) {                                                                                                \
+        if (game_coop::BlowIsForShow(ctx)) {                                                                              \
+            kernel::Return(ctx, 0, words);                                                                                \
+            return;                                                                                                       \
+        }                                                                                                                 \
+        __imp__sub_##addr(ctx, base);                                                                                     \
+    }
+COOP_BLOW(000EF320, 4)
+COOP_BLOW(000EF6B0, 3)
+COOP_BLOW(000EEFA0, 5)
