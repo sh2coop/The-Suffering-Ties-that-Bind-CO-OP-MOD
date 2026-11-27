@@ -21,12 +21,15 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "app/app.h"
 #include "core/log.h"
@@ -56,6 +59,7 @@ struct Latched {
     bool replacing = false;
     bool dumping = false;
     uint32_t format = 0;
+    uint32_t hd = 0;  // [local change, The Suffering: Ties That Bind] the HD set drawn: 0 none, 2 or 4 (its scale)
     bool operator==(const Latched&) const = default;
 };
 
@@ -76,6 +80,22 @@ struct Pack {
     std::unordered_set<uint64_t> asked;
     std::unordered_map<uint64_t, std::optional<Image>> loaded;  // empty: the file did not load
     std::unordered_set<uint64_t> dumped;
+    // [local change, The Suffering: Ties That Bind] the HD textures made on the player's PC (Build Recomp's maker,
+    // tools\launcher\hdtex.h): textures\hd\x2 or x4 joins the pack after textures\replacement (an image there wins).
+    // The maker writes while the game runs, so the set's folder is watched apart and new images are only added:
+    // nothing loaded is dropped (Additions). Textures shown that the HD set has not got are written once to
+    // textures\hd\seen as PNG for the maker (HUD, menus and other pictures that are not in the disc's texture files).
+    fs::path hd_dir;
+    HANDLE hd_watch = INVALID_HANDLE_VALUE;
+    uint32_t hd_watch_tries = 0;
+    std::optional<Clock::time_point> hd_changed;
+    Clock::time_point hd_listed{};
+    std::vector<std::pair<uint64_t, fs::path>> hd_found;  // the lock's: the worker's listing of hd_dir
+    fs::path hd_found_dir;
+    uint32_t additions = 1;
+    std::atomic<bool> hd_making = false;           // textures\hd\version.txt: the maker has run here (or was started)
+    bool hd_started = false;                       // StartHdMaker was called in this run
+    std::unordered_set<uint64_t> seen;             // the lock's
 };
 
 Pack g;
@@ -183,6 +203,21 @@ uint32_t VariantOf(const fs::path& rel) {
     return v;
 }
 
+// [local change, The Suffering: Ties That Bind] the HD set's images not listed yet (variant 0); -> how many
+size_t AddHd() {
+    if (g.hd_dir.empty()) return 0;
+    size_t added = 0;
+    std::error_code ec;
+    fs::directory_iterator it(g.hd_dir, ec);
+    for (; !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        const fs::path& p = it->path();
+        if (_wcsicmp(p.extension().c_str(), L".dds") != 0) continue;
+        uint64_t key = KeyInName(p.stem().wstring());
+        if (key && g.files.emplace(key, p).second) added++;
+    }
+    return added;
+}
+
 void ListPack(const fs::path& dir) {
     g.files.clear();
     std::error_code ec;
@@ -193,7 +228,8 @@ void ListPack(const fs::path& dir) {
         uint64_t key = image ? KeyInName(p.stem().wstring()) : 0;
         if (key) g.files.emplace(VariantKey(key, VariantOf(p.lexically_relative(dir))), p);
     }
-    LOGR("texture pack: %zu images in %s", g.files.size(), Utf8(dir).c_str());
+    size_t pack = g.files.size(), hd = AddHd();
+    LOGR("texture pack: %zu images in %s, %zu HD (%ux) in %s", pack, Utf8(dir).c_str(), hd, g.set.hd, Utf8(g.hd_dir).c_str());
 }
 
 // DDS files
@@ -499,13 +535,33 @@ Image Decode(const TextureDesc& d, const uint8_t* guest, const uint32_t* palette
 }
 
 // the settings into g.set; false when none changed
+// [local change, The Suffering: Ties That Bind] the HD set for the setting: by the output's height when it is 1
+uint32_t HdScale(uint32_t setting) {
+    if (setting == 2) return 2;
+    if (setting == 3) return 4;
+    if (setting == 1) return app::Output().height > 1080 ? 4 : 2;
+    return 0;
+}
+
 bool LatchSettings() {
     const app::Settings& s = app::Get();
-    Latched now{s.custom_textures, s.dump_textures, s.texture_dump_format};
+    Latched now{s.custom_textures, s.dump_textures, s.texture_dump_format, s.custom_textures ? HdScale(s.hd_textures) : 0};
     if (now == g.set) return false;
+    bool relist = now.hd != g.set.hd;
     g.set = now;
     fs::path root = app::ExeDir() / "textures";
     g.pack_dir = root / "replacement";
+    if (relist) {  // the other set, or none: listed again at once, and its folder watched
+        std::error_code ec;
+        g.hd_dir = now.hd ? root / "hd" / (now.hd == 4 ? "x4" : "x2") : fs::path();
+        g.hd_making = fs::exists(root / "hd" / "version.txt", ec);
+        if (now.hd && g.hd_making && !g.hd_started) StartHdMaker();  // to go on, and for what this run shows
+        if (g.hd_watch != INVALID_HANDLE_VALUE) FindCloseChangeNotification(g.hd_watch);
+        g.hd_watch = INVALID_HANDLE_VALUE;
+        g.hd_watch_tries = 0;
+        g.changed = Clock::time_point{};
+        LOGR("HD textures: %s%s", now.hd ? (now.hd == 4 ? "the 4x set" : "the 2x set") : "off", g.hd_making ? "" : " (none made on this PC)");
+    }
     if (now.dumping) {
         g.dump_dir = root / "dumps";
         std::error_code ec;
@@ -535,6 +591,63 @@ void NoteFolderChange(Clock::time_point now) {
     g.watch = INVALID_HANDLE_VALUE;
 }
 
+// [local change, The Suffering: Ties That Bind] images the maker has added to the HD set since, once its folder was
+// quiet for a moment; true when there were any
+constexpr auto kHdSettle = std::chrono::seconds(2);
+bool UpdateHdFiles() {
+    if (g.hd_dir.empty()) return false;
+    Clock::time_point now = Clock::now();
+    if (g.hd_watch == INVALID_HANDLE_VALUE && g.hd_watch_tries++ % kWatchRetry == 0) {
+        g.hd_watch = FindFirstChangeNotificationW(g.hd_dir.c_str(), FALSE, FILE_NOTIFY_CHANGE_FILE_NAME);
+        if (g.hd_watch != INVALID_HANDLE_VALUE) g.hd_changed = Clock::time_point{};
+    }
+    if (g.hd_watch != INVALID_HANDLE_VALUE && WaitForSingleObject(g.hd_watch, 0) == WAIT_OBJECT_0) {
+        g.hd_changed = now;
+        if (!FindNextChangeNotification(g.hd_watch)) {
+            FindCloseChangeNotification(g.hd_watch);
+            g.hd_watch = INVALID_HANDLE_VALUE;
+        }
+    }
+    // quiet for a moment, or every 10 s while the maker keeps writing (it never stops for long while the game runs)
+    if (!g.hd_changed || (now - *g.hd_changed < kHdSettle && now - g.hd_listed < std::chrono::seconds(10))) return false;
+    g.hd_listed = now;
+    g.hd_changed.reset();
+    // the folder is listed on the worker (thousands of files: no stall here); TakeHdFound takes the result in
+    Post([dir = g.hd_dir] {
+        std::vector<std::pair<uint64_t, fs::path>> found;
+        std::error_code ec;
+        fs::directory_iterator it(dir, ec);
+        for (; !ec && it != fs::directory_iterator(); it.increment(ec)) {
+            const fs::path& p = it->path();
+            if (_wcsicmp(p.extension().c_str(), L".dds") != 0) continue;
+            if (uint64_t key = KeyInName(p.stem().wstring())) found.emplace_back(key, p);
+        }
+        std::lock_guard l(g.lock);
+        g.hd_found = std::move(found);
+        g.hd_found_dir = dir;
+    });
+    return false;
+}
+
+// the worker's listing of the HD set's folder, once it is there: the images not in the pack yet are added
+bool TakeHdFound() {
+    std::vector<std::pair<uint64_t, fs::path>> found;
+    {
+        std::lock_guard l(g.lock);
+        if (g.hd_found.empty()) return false;
+        found = std::move(g.hd_found);
+        g.hd_found.clear();
+        if (g.hd_found_dir != g.hd_dir) return false;  // the set changed meanwhile
+    }
+    size_t added = 0;
+    for (auto& [key, path] : found)
+        if (g.files.emplace(key, std::move(path)).second) added++;
+    if (!added) return false;
+    g.additions++;
+    LOGI("HD textures: %zu more images (%zu in the pack)", added, g.files.size());
+    return true;
+}
+
 // lists the pack once its folder is watched, then again once its files changed and settled; true when listed
 bool UpdatePackFiles() {
     Clock::time_point now = Clock::now();
@@ -556,15 +669,44 @@ bool Update() {
     bool changed = LatchSettings();
     bool reloaded = g.set.replacing && UpdatePackFiles();
     if (changed || reloaded) g.generation++;
+    else if (g.set.replacing) {
+        UpdateHdFiles();
+        TakeHdFound();
+    }
     return reloaded;
 }
+
+uint32_t Additions() { return g.additions; }
+
+// [local change, The Suffering: Ties That Bind] "Build Recomp.exe --hd" beside the Game Files folder (it does nothing
+// when another maker runs, and ends once the set is whole and the game has closed)
+bool StartHdMaker() {
+    g.hd_started = true;
+    fs::path exe = app::ExeDir().parent_path() / "Build Recomp.exe";
+    std::wstring command = L"\"" + exe.wstring() + L"\" --hd";
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW | DETACHED_PROCESS | BELOW_NORMAL_PRIORITY_CLASS, nullptr,
+                        exe.parent_path().c_str(), &si, &pi)) {
+        LOGW("HD textures: %s could not be started (%lu)", Utf8(exe).c_str(), GetLastError());
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    g.hd_making = true;
+    LOGR("HD textures: the maker started in the background");
+    return true;
+}
+
+bool Has(uint64_t key) { return g.set.replacing && g.files.count(key) != 0; }
 
 uint32_t Generation() { return g.generation; }
 
 bool Replacing() { return g.set.replacing && !g.files.empty(); }
 
 uint64_t Key(const TextureDesc& d, const FormatInfo& fi, const uint8_t* guest, const uint32_t* palette) {
-    if (!Replacing() && !g.set.dumping) return 0;
+    if (!Replacing() && !g.set.dumping && !g.set.hd) return 0;
     return KeyOf(d, fi, guest, palette);
 }
 
@@ -581,7 +723,26 @@ uint64_t VariantKey(uint64_t key, uint32_t variant) {
     return variant ? key ^ (0x9E3779B97F4A7C15ull * variant) : key;
 }
 
+// [local change, The Suffering: Ties That Bind] a texture shown that the HD set has not got: once to textures\hd\seen
+// for the maker (its own size and key in the name), level 0 as PNG. The smallest are left (the maker skips them too).
+void Seen(uint64_t key, const TextureDesc& d, const uint8_t* guest, const uint32_t* palette) {
+    if (!g.set.hd || !g.hd_making || g.files.count(key) || d.width < 8 || d.height < 4) return;
+    {
+        std::lock_guard l(g.lock);
+        if (!g.seen.insert(key).second) return;
+    }
+    fs::path dir = app::ExeDir() / "textures" / "hd" / "seen";
+    char name[64];
+    std::snprintf(name, sizeof(name), "%ux%u_%016llx.png", d.width, d.height, static_cast<unsigned long long>(key));
+    Post([dir, path = dir / name, img = Decode(d, guest, palette)] {
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        WritePng(path, img);
+    });
+}
+
 void Dump(uint64_t key, const TextureDesc& d, const uint8_t* guest, const uint32_t* palette) {
+    if (key) Seen(key, d, guest, palette);
     if (!key || !g.set.dumping || g.files.count(key)) return;
     {
         std::lock_guard l(g.lock);

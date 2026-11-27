@@ -1,1 +1,1 @@
-58 2026-11-27 Split screen uses the whole window at every screen shape, also when Borderless is set to a resolution smaller than the monitor.
+59 2026-11-27 HD textures and HD sound, both made on your own PC from your own game image. Build Recomp asks; they are made in the background while the game builds and while you play. Options, Display and Co-op: HD textures (Off, Automatic, 2x, 4x) and HD sound. Videos stay as they are.

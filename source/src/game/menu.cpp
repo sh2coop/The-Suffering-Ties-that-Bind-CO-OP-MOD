@@ -5,9 +5,12 @@
 // rows under the slider, made of the game's own text widgets in the page's own style, one section at a time:
 //     Display   Resolution (every size the monitor offers, with its shape, and "Desktop"), Window mode (Full
 //               screen, Borderless, Windowed), Picture shape (Automatic, 4:3, 16:10, 16:9, 21:9, 32:9), Frame rate
-//               (60, 120, the monitor's, no limit), VSync
+//               (60, 120, the monitor's, no limit), VSync, HD textures (Off, Automatic, 2x, 4x: the set made on this
+//               PC by tools\launcher\hdtex.h; switching it on the first time starts the making)
 //     Co-op     Co-op (Off, Split screen), Player 1 look and Player 2 look (Normal or Inverted, each player's own),
 //               Player 2 look speed
+//     Sound     HD sound (Off, On: the set made on this PC by tools\launcher\hdsound.h; switching it on the first time
+//               starts the making, src\game\hdsound.cpp)
 // Up and down move between the slider and the rows, left and right (or A) change the row's value, and a change
 // takes effect at once and is saved. Before a new game starts the game shows its own brightness page, without
 // these rows (since 2026-11-26: the constructor's hook, below). The main menu's "Co-op" entry opens the page at its
@@ -38,6 +41,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
@@ -58,6 +62,14 @@ extern uint32_t g_p2_invert, g_p2_speed;  // Player 2's own look: inverted or no
 int Pauser();  // 0 not paused, 1 or 2: whose pause menu is up
 std::string CallersOf(X86Context& ctx);  // (traces)
 }
+namespace game_hdsound {  // hdsound.cpp
+extern uint32_t g_setting;  // settings.toml hd_sound
+void Apply();
+int State(int* made, int* total);  // 0 off, 1 on, 2 on and being made
+}
+namespace gpu::texturedumper {
+bool StartHdMaker();  // texturedumper.cpp: Build Recomp's HD textures maker, in the background
+}
 namespace game_menu {
 extern uint32_t g_invert_pitch;  // Player 1's Invert Pitch Axis, kept between runs (KeepInvert, below)
 namespace {
@@ -74,8 +86,10 @@ constexpr uint32_t kHidden = 2, kIdle = 4, kHighlighted = 5;
 // The rows. The page shows one section at a time (the first row chooses it: Display, or Co-op), so that it is
 // never crowded: a section has at most five rows under its heading, 20 apart. Player 2's own page (he opened it
 // from his pause menu) has his two rows and nothing else.
-enum Row { kSection, kResolution, kWindow, kShape, kRate, kVsync, kCoop, kLook1, kLook, kSpeed, kRows };
-int g_section = 0;  // 0 Display, 1 Co-op
+enum Row { kSection, kResolution, kWindow, kShape, kRate, kVsync, kHd, kCoop, kLook1, kLook, kSpeed, kHdSound, kRows };
+int g_section = 0;  // 0 Display, 1 Co-op, 2 Sound
+constexpr int kSections = 3;
+constexpr const char* kSectionNames[kSections] = {"Display", "Co-op", "Sound"};
 enum Coop { kOff, kSplit, kCoops };
 
 struct Page {
@@ -230,6 +244,36 @@ void SetGameInverted(bool on) {
     kernel::W32(kSwitches, on ? switches | kInverted : switches & ~kInverted);
 }
 
+// ---- the HD textures (tools\launcher\hdtex.h writes textures\hd beside the game: version.txt once it has started,
+// progress.txt "made total" as it goes, made.txt when the disc's textures are all made) -------------------------------
+struct HdState {
+    bool started = false, whole = false;
+    int made = 0, total = 0;
+};
+HdState ReadHd() {
+    static HdState last;
+    static Clock::time_point when;
+    if (when != Clock::time_point{} && Clock::now() - when < std::chrono::seconds(1)) return last;
+    when = Clock::now();
+    HdState st;
+    std::error_code ec;
+    std::filesystem::path dir = app::ExeDir() / "textures" / "hd";
+    st.started = std::filesystem::exists(dir / "version.txt", ec);
+    st.whole = std::filesystem::exists(dir / "made.txt", ec);
+    if (FILE* f = _wfopen((dir / "progress.txt").c_str(), L"r")) {
+        if (std::fscanf(f, "%d %d", &st.made, &st.total) != 2) st.made = st.total = 0;
+        std::fclose(f);
+    }
+    last = st;
+    return st;
+}
+// the set the game draws now, as texturedumper.cpp chooses it (HdScale)
+const char* HdNow(uint32_t setting) {
+    if (setting == 2) return "2x";
+    if (setting == 3) return "4x";
+    return app::Output().height > 1080 ? "4x" : "2x";
+}
+
 // ---- what the rows say -----------------------------------------------------------------------------------------
 
 // Player 2 opened this page from his own pause menu: it is his settings page, and only his rows are on it
@@ -249,8 +293,23 @@ std::string Value(int row) {
         case kShape: return kShapeNames[IndexOf(kShapes, game_view::g_shape_setting)];
         case kRate: return kRateNames[IndexOf(kRates, s.fps_cap)];
         case kVsync: return s.vsync ? "On" : "Off";
+        case kHd: {
+            if (!s.hd_textures || !ReadHd().started) return "Off";
+            if (s.hd_textures == 1) return std::string("Automatic (") + HdNow(1) + ")";
+            return s.hd_textures == 2 ? "2x" : "4x";
+        }
         case kCoop: return kCoopNames[CoopChoice()];
-        case kSection: return g_section ? "Co-op" : "Display";
+        case kSection: return kSectionNames[std::clamp(g_section, 0, kSections - 1)];
+        case kHdSound: {
+            int made, total;
+            int st = game_hdsound::State(&made, &total);
+            if (!st) return "Off";
+            if (st == 2 && total) {
+                std::snprintf(out, sizeof out, "On (being made, %d%%)", made * 100 / total);
+                return out;
+            }
+            return st == 2 ? "On (being made)" : "On";
+        }
         case kLook1: return GameInverted() ? "Inverted" : "Normal";
         case kLook: return game_coop::g_p2_invert ? "Inverted" : "Normal";
         case kSpeed:
@@ -260,7 +319,7 @@ std::string Value(int row) {
     return "";
 }
 
-constexpr const char* kLabels[kRows] = {"Settings", "Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "Co-op", "Player 1 look", "Player 2 look", "Player 2 look speed"};
+constexpr const char* kLabels[kRows] = {"Settings", "Resolution", "Window mode", "Picture shape", "Frame rate", "VSync", "HD textures", "Co-op", "Player 1 look", "Player 2 look", "Player 2 look speed", "HD sound"};
 
 // What is on the page now: Player 2's own page, his two rows; otherwise the section's rows under the row that
 // chooses the section.
@@ -269,8 +328,9 @@ bool Visible(int row) {
     if (SecondsPage()) return row == kLook || row == kSpeed;
     switch (row) {
         case kSection: return true;
-        case kResolution: case kWindow: case kShape: case kRate: case kVsync: return g_section == 0;
+        case kResolution: case kWindow: case kShape: case kRate: case kVsync: case kHd: return g_section == 0;
         case kCoop: case kLook1: case kLook: case kSpeed: return g_section == 1;
+        case kHdSound: return g_section == 2;
     }
     return false;
 }
@@ -293,10 +353,35 @@ std::string Help() {
             return game_coop::g_mode_setting == 1 ? "The picture's shape. Split screen is on: the picture fills the whole screen whatever is chosen here."
                                                   : "The picture's shape. Automatic is the screen's own; another leaves bars at the sides or above and below.";
         case kSection:
-            return g_section ? "Co-op: two players on this PC. Left or right goes to the Display settings."
-                             : "Display: resolution, window, picture shape and frame rate. Left or right goes to the Co-op settings.";
+            if (g_section == 2) return "Sound: HD sound. Left or right goes to the other settings.";
+            return g_section ? "Co-op: two players on this PC. Left or right goes to the other settings."
+                             : "Display: resolution, window, picture shape and frame rate. Left or right goes to the other settings.";
         case kCoop:
             return "Split screen: two players on this PC, side by side. Player 2 uses the second controller.";
+        case kHd: {
+            HdState hd = ReadHd();
+            const app::Settings& s = app::Get();
+            char text[200];
+            if (!hd.started || !s.hd_textures)
+                return "Sharper textures, upscaled from your own game on this PC. Right turns them on (the first time they are made in the background).";
+            if (!hd.whole && hd.total) {
+                std::snprintf(text, sizeof text, "Being made in the background: %d of %d. The ones you see come first and show up as they are done.", hd.made, hd.total);
+                return text;
+            }
+            return "Automatic: 2x up to 1080p, 4x above (1440p, 4K). 2x and 4x always use that set. Off shows the game's own textures.";
+        }
+        case kHdSound: {
+            int made, total;
+            int st = game_hdsound::State(&made, &total);
+            char text[200];
+            if (!st)
+                return "Clearer sound: the voices and effects recorded at low rates get their treble back. Right turns it on (the first time it is made, in about a minute).";
+            if (st == 2) {
+                std::snprintf(text, sizeof text, "Being made in the background: %d of %d sounds. The ones made already play in HD.", made, total);
+                return total ? text : "Being made in the background. The sounds made already play in HD.";
+            }
+            return "On: the treble of the low-rate sounds is made back and every sound is resampled smoothly. Off plays them as the console did.";
+        }
         case kLook1: return "Player 1's up and down: Inverted turns the right stick round. It is the game's Invert Pitch Axis.";
         case kLook: return "Player 2's up and down: Inverted turns his right stick round. It only changes Player 2.";
         case kSpeed: return "How fast Player 2 turns, as a share of the game's own look speed. It only changes Player 2.";
@@ -330,8 +415,20 @@ void Step(int row, int dir) {
             s.vsync = !s.vsync;
             app::ApplyDisplay();
             break;
+        case kHd: {  // Off, Automatic, 2x, 4x; the first time on, the set starts being made
+            bool started = ReadHd().started;
+            uint32_t now = started ? s.hd_textures : 0;
+            now = uint32_t((int(now) + dir + 4) % 4);
+            s.hd_textures = now;
+            if (now && !ReadHd().whole) gpu::texturedumper::StartHdMaker();
+            break;
+        }
         case kCoop: SetCoop(CoopChoice() == kOff ? kSplit : kOff); break;
-        case kSection: g_section = g_section ? 0 : 1; break;
+        case kSection: g_section = (g_section + dir + kSections) % kSections; break;
+        case kHdSound:
+            game_hdsound::g_setting = game_hdsound::g_setting ? 0 : 1;
+            game_hdsound::Apply();  // on and not made: the maker starts
+            break;
         case kLook1: SetGameInverted(!GameInverted()); break;
         case kLook: game_coop::g_p2_invert = game_coop::g_p2_invert ? 0 : 1; break;
         case kSpeed: {
@@ -469,7 +566,7 @@ void Build(X86Context& ctx, uint32_t screen) {
     float caption_top = slider_y + kSliderDrawnTop - kCaptionGap - kGlyphHeight - kGlyphTop;
     float top = slider_y + kSliderDrawnBottom + kRowsGap - kGlyphTop;
     float step = kStep;
-    constexpr int kMostLines = 6;  // the section row and the five rows of the longer section
+    constexpr int kMostLines = 7;  // the section row and the six rows of the longer section (Display)
     float last_bottom = top + step * (kMostLines - 1) + kGlyphTop + kGlyphHeight;
     if (last_bottom > ReadF(prompt + kY)) {
         LOGW("menu: no room for the display rows (%.0f to %.0f)", top, ReadF(prompt + kY));

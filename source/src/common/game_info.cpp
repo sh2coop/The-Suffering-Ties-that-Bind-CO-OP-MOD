@@ -12,6 +12,10 @@ void Init();
 void Loaded();
 }
 
+namespace game_hdsound {  // HD sound (src/game/hdsound.cpp)
+extern uint32_t g_setting;
+void Apply();
+}
 namespace game_watchdog { void Init(); }  // freeze report (src/game/watchdog.cpp)
 namespace game_record { void Init(); }    // the session record: clock, load, window, controllers (src/game/record.cpp)
 namespace game_detail { void Init(); }    // the detail record: every frame, every object, pictures (src/game/detail.cpp)
@@ -31,6 +35,7 @@ static void GameInit() {
     game_watchdog::Init();
     game_detail::Init();
     game_record::Init();
+    game_hdsound::Apply();
 }
 
 // the game window is up, before boot: the overlay's fonts, which the renderer builds with its first frame
@@ -58,7 +63,7 @@ const app::GameInfo app::kGame = {
     .images = {{"default.xbe", "Suffering2"}},  // each recompiled xbe and its exe, for title launches
     .options = {{"picture_shape", nullptr, &game_view::g_shape_setting}, {"coop", nullptr, &game_coop::g_mode_setting},
                 {"p2_look_inverted", nullptr, &game_coop::g_p2_invert}, {"p2_look_speed", nullptr, &game_coop::g_p2_speed},
-                {"invert_pitch", nullptr, &game_menu::g_invert_pitch}},  // game settings kept in the settings file
+                {"invert_pitch", nullptr, &game_menu::g_invert_pitch}, {"hd_sound", nullptr, &game_hdsound::g_setting}},  // game settings kept in the settings file
     .load = LoadMore,                     // reads more from the settings file's toml::table
     .save = nullptr,                      // writes more into it
     .init = GameInit,                      // after the settings load, before the window and boot

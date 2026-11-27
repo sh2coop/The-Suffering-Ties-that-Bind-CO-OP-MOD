@@ -1,2 +1,4 @@
 // the executable's icon (Explorer, the taskbar, the window): made from icon_source.png, the picture chosen for the project
 1 ICON "suffering2.ico"
+// the HD textures' upscaler weights (hdtex.h, hdgpu.h; third_party\REALESRGAN_LICENSE.txt)
+2 RCDATA "third_party\\realesr-animevideov3-x2.bin"

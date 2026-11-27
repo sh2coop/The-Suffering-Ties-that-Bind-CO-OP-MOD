@@ -1,0 +1,18 @@
+# Options, Display and Co-op: down to HD textures (the seventh row), held for a picture, switched Off, held,
+# switched On again (tools\winshot.py at about 50.5, 55.5 and 60.5 s)
+28 RIGHT
+29.5 RIGHT
+31 A
+35 RIGHT
+36.5 RIGHT
+38 A
+41 DOWN
+42 DOWN
+43 DOWN
+44 DOWN
+45 DOWN
+46 DOWN
+47 DOWN
+52 RIGHT
+57 RIGHT
+62 B

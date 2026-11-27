@@ -95,6 +95,9 @@ constexpr uint32_t kPacketPending = 0x8000000A, kFlushed = 0x80004004;  // E_PEN
 struct Packet {
     uint32_t data, size, completed_ptr, status_ptr, context;
     uint32_t used = 0;
+    // [local change, The Suffering: Ties That Bind] HD sound: the packet's data is block hd_block on of this copy
+    const audio::HdWave* hd = nullptr;
+    uint32_t hd_block = 0;
 };
 
 // DSMIXBIN numbers the host mixes by name
@@ -158,10 +161,18 @@ struct Voice {
     float itd = 0;
     float ear[kEarLength] = {};
     uint32_t ear_pos = 0;
-    // ADPCM block cache: the block read last and the one read before it, a frame between two blocks reads both
-    int64_t block[2] = {-1, -1};
+    // ADPCM block cache: the blocks read lately, a frame between two blocks reads both [local change, The Suffering:
+    // Ties That Bind: four, was two; the cubic of HD sound reads the frames before and after as well]
+    int64_t block[4] = {-1, -1, -1, -1};
     uint8_t last = 0;  // decoded[last] holds block[last]
-    int16_t decoded[2][65 * 8];
+    int16_t decoded[4][65 * 8];
+    // [local change, The Suffering: Ties That Bind] HD sound: the copy the buffer's data is (block hd_block of it at
+    // data), where a stream's next packet should go on, and the guest address of the block checked last
+    const audio::HdWave* hd = nullptr;
+    uint32_t hd_block = 0;
+    const audio::HdWave* hd_next = nullptr;
+    uint32_t hd_next_block = 0;
+    int64_t hd_checked = -1;
 };
 
 struct Done {
@@ -189,8 +200,8 @@ struct Segment {
 std::vector<Segment> g_effect_states;  // each effect's state segment of the downloaded image
 
 void ForgetBlocks(Voice& v) {
-    v.block[0] = -1;
-    v.block[1] = -1;
+    for (int64_t& b : v.block) b = -1;
+    v.hd_checked = -1;
 }
 
 float Db(int32_t hundredths) { return hundredths <= -10000 ? 0.0f : std::pow(10.0f, hundredths / 2000.0f); }
@@ -234,12 +245,12 @@ void DecodeBlock(const uint8_t* b, int ch, int16_t* out) {
 
 // the decoded ADPCM block at guest address at, decoded once while it stays in the cache
 const int16_t* DecodedBlock(Voice& v, int64_t at) {
-    for (uint8_t k = 0; k < 2; k++) {
+    for (uint8_t k = 0; k < 4; k++) {
         if (v.block[k] != at) continue;
         v.last = k;
         return v.decoded[k];
     }
-    uint8_t k = v.last ^ 1;  // the slot not read last
+    uint8_t k = uint8_t((v.last + 1) & 3);  // the slot filled longest ago
     DecodeBlock(static_cast<const uint8_t*>(HostPtr(uint32_t(at))), std::min<int>(v.channels, 8), v.decoded[k]);
     v.block[k] = at;
     v.last = k;
@@ -506,6 +517,10 @@ struct Cursor {
     uint32_t f;
     uint32_t next_data;
     uint32_t next_f;
+    // [local change, The Suffering: Ties That Bind] frames from data on (the cubic's reach), the HD copy
+    uint32_t frames = 0;
+    const audio::HdWave* hd = nullptr;
+    uint32_t hd_block = 0;
 };
 
 // the stream's frame at its position, none once its packets ran out
@@ -526,6 +541,9 @@ std::optional<Cursor> StreamFrame(Voice& v) {
     }
     Packet& pk = v.packets.front();
     Cursor at = {pk.data, f, pk.data, f};
+    at.frames = FramesOf(v, pk.size);
+    at.hd = pk.hd;
+    at.hd_block = pk.hd_block;
     if (f + 1 < FramesOf(v, pk.size)) {
         at.next_f = f + 1;
     } else if (v.packets.size() > 1) {
@@ -552,12 +570,73 @@ std::optional<Cursor> BufferFrame(Voice& v) {
     if (!v.data) return std::nullopt;
     uint32_t base = v.data + v.play_start;
     Cursor at = {base, f, base, f};
+    at.frames = end;
+    at.hd = v.hd;
+    at.hd_block = v.hd_block + (v.tag == 0x69 ? v.play_start / (36u * v.channels) : 0);
     if (f + 1 < end) {
         at.next_f = f + 1;
     } else if (v.looping) {
         at.next_f = start;
     }
     return at;
+}
+
+// [local change, The Suffering: Ties That Bind] HD sound. A copy is read while each block the voice comes to still
+// holds the bytes it was made from; one that does not ends the copy for that buffer or packet (the ADPCM plays).
+void CheckHd(Voice& v, Cursor& at) {
+    if (!at.hd) return;
+    if (!audio::g_hd) {
+        at.hd = nullptr;
+        return;
+    }
+    int64_t addr = int64_t(at.data) + int64_t(at.f / 64) * 36 * v.channels;
+    if (addr == v.hd_checked) return;
+    if (audio::g_hd->check(at.hd, at.hd_block + at.f / 64, static_cast<const uint8_t*>(HostPtr(uint32_t(addr))))) {
+        v.hd_checked = addr;
+        return;
+    }
+    LOG_FIRST(16, "dsound: HD sound: block %u of a copy no longer matches the voice's memory, the ADPCM plays",
+              at.hd_block + at.f / 64);
+    at.hd = nullptr;
+    if (v.stream && !v.packets.empty()) v.packets.front().hd = nullptr;
+    else if (!v.stream) v.hd = nullptr;
+}
+// channel c between the cursor's frame and the next (t): the HD copy, else the console samples, with straight lines
+// as the console reads them, or a cubic while HD sound is on
+float Read(Voice& v, const Cursor& at, int c, float t) {
+    if (at.hd) return audio::g_hd->sample(at.hd, double(at.hd_block) * 64 + at.f + t, uint32_t(c));
+    float x = Sample(v, at.data, at.f, c);
+    float y = Sample(v, at.next_data, at.next_f, c);
+    if (!audio::g_cubic) return x + (y - x) * t;
+    float p0 = at.f > 0 ? Sample(v, at.data, at.f - 1, c) : x;
+    float p3 = at.next_data == at.data && at.next_f == at.f + 1 && at.next_f + 1 < at.frames
+                   ? Sample(v, at.data, at.next_f + 1, c)
+                   : y;
+    return x + 0.5f * t * (y - p0 + t * (2.0f * p0 - 5.0f * x + 4.0f * y - p3 + t * (3.0f * (x - y) + p3 - p0)));
+}
+void HdBuffer(Voice& v) {
+    v.hd = nullptr;
+    v.hd_checked = -1;
+    if (!audio::g_hd || v.tag != 0x69 || !v.data || v.bytes < 36u * v.channels) return;
+    uint32_t index = 0;
+    v.hd = audio::g_hd->find(static_cast<const uint8_t*>(HostPtr(v.data)), v.channels, v.rate,
+                             v.bytes / (36u * v.channels), nullptr, 0, &index);
+    v.hd_block = index;
+}
+void HdPacket(Voice& v, Packet& pk) {
+    if (!audio::g_hd || v.tag != 0x69 || !pk.data || pk.size < 36u * v.channels) {
+        v.hd_next = nullptr;
+        return;
+    }
+    uint32_t index = 0;
+    pk.hd = audio::g_hd->find(static_cast<const uint8_t*>(HostPtr(pk.data)), v.channels, v.rate, 0, v.hd_next,
+                              v.hd_next_block, &index);
+    pk.hd_block = index;
+    if (!pk.hd && v.rate < 32000)
+        LOG_FIRST(40, "dsound: HD sound: stream %08X packet of %u bytes at %08X has no copy (the one before: %s)", v.obj,
+                  pk.size, pk.data, v.hd_next ? "had one" : "had none");
+    v.hd_next = pk.hd;
+    v.hd_next_block = index + pk.size / (36u * v.channels);
 }
 
 // adds the voice to the bins, frames of kBins interleaved, its levels ramped across the block
@@ -579,16 +658,17 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
         if (lane.row < kMaxChannels) read |= 1u << lane.row;
     }
     double rate = double(v.freq ? v.freq : v.rate) / audio::kRate;
-    v.block[v.last ^ 1] = -1;  // the title may have rewritten that block's memory since the last mix
+    for (uint8_t k = 0; k < 4; k++)  // the title may have rewritten those blocks' memory since the last mix
+        if (k != v.last) v.block[k] = -1;
     for (uint32_t i = 0; i < frames; i++) {
         std::optional<Cursor> cursor = v.stream ? StreamFrame(v) : BufferFrame(v);
         if (!cursor) break;
+        CheckHd(v, *cursor);
         float t = float(v.pos - cursor->f);
         float row[kRows] = {};
         for (uint32_t c = 0; c < channels; c++) {
             if (!(read >> c & 1)) continue;
-            float x = Sample(v, cursor->data, cursor->f, int(c));
-            row[c] = x + (Sample(v, cursor->next_data, cursor->next_f, int(c)) - x) * t;
+            row[c] = Read(v, *cursor, int(c), t);
         }
         if (ears) {
             v.itd += itd_step;
@@ -967,9 +1047,11 @@ BUFFER(SetBufferData, 3) {
     v.play_start = v.loop_start = 0;
     v.pos = 0;
     ForgetBlocks(v);
+    HdBuffer(v);
     return 0;
 }
 BUFFER(Play, 4) {
+    HdBuffer(v);  // [local change] its memory may hold another sound since SetBufferData (the same place and size)
     v.has_gain = false;  // a new sound does not ramp from the last one's levels
     v.playing = true;
     v.looping = a[3] & 1;
@@ -1158,6 +1240,7 @@ STREAM(SetFormat, 2) {
     ReadFormat(v, a[1]);
     v.freq = 0;  // the XDK sets the pitch back to the new format's own rate
     ForgetBlocks(v);
+    v.hd_next = nullptr;
     return 0;
 }
 STREAM(Release, 1) {
@@ -1186,6 +1269,7 @@ STREAM(Process, 3) {
     Packet pk{R32(in), R32(in + 4), R32(in + 8), R32(in + 12), R32(in + 16)};
     if (pk.completed_ptr) W32(pk.completed_ptr, 0);
     if (pk.status_ptr) W32(pk.status_ptr, kPacketPending);
+    HdPacket(v, pk);  // [local change, The Suffering: Ties That Bind]
     v.packets.push_back(pk);
     if (!v.active) v.has_gain = false;  // after going quiet a stream starts its levels fresh
     v.active = true;

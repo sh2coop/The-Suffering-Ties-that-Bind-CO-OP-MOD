@@ -34,6 +34,12 @@ bool Update();
 uint32_t Generation();
 // replacement on and the pack holds images
 bool Replacing();
+// [local change, The Suffering: Ties That Bind] changes when images were added to the pack without a new listing (the
+// HD set while it is being made): a texture without a pack image asks Has again, nothing else is looked up anew
+uint32_t Additions();
+bool Has(uint64_t key);
+// starts the HD textures maker in the background ("Build Recomp.exe --hd" beside the Game Files folder)
+bool StartHdMaker();
 
 // the key of a texture's image for a variant (State::variant): images in the pack's "player<n+1>" folder, n > 0
 uint64_t VariantKey(uint64_t key, uint32_t variant);

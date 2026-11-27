@@ -361,6 +361,7 @@ struct Tex {
     uint32_t swap_variant = 0;
     uint64_t pack_key_v = 0;
     uint32_t pack_gen = 0;      // texturedumper::Generation the key was taken at, 0 after new bytes
+    uint32_t pack_add = 0;      // [local change, The Suffering: Ties That Bind] texturedumper::Additions then
 };
 
 struct PsoKey {
@@ -1988,6 +1989,11 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
         }
     }
     if (tx.pack_gen != texturedumper::Generation()) LatchPackKey(tx, d, fi, colours);
+    // [local change, The Suffering: Ties That Bind] the HD set grew (it is made while the game runs): asked again
+    else if (!tx.pack_key && !tx.swap && tx.base_key && tx.pack_add != texturedumper::Additions()) {
+        tx.pack_add = texturedumper::Additions();
+        if (texturedumper::Has(tx.base_key)) tx.pack_key = tx.base_key;
+    }
     if (tx.pack_key) LatchPackImage(tx);
     // a variant's draw: its own image when the pack has one, else as any other
     if (s.variant && tx.base_key && texturedumper::Replacing() && tx.swap_variant != s.variant) {
@@ -2008,6 +2014,7 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
 void D3D12Backend::LatchPackKey(Tex& tx, const TextureDesc& d, const FormatInfo& fi, const uint32_t* colours) {
     const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
     tx.pack_gen = texturedumper::Generation();
+    tx.pack_add = texturedumper::Additions();
     tx.swap = nullptr;
     uint64_t key = texturedumper::Key(d, fi, p, colours);
     tx.base_key = key;

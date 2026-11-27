@@ -33,6 +33,27 @@ KEYBOARD
   Arrows = d-pad, Enter = START, Backspace = BACK, Space or J = A, K = B, U = X, I = Y,
   O = white, P = black, W A S D = move, Q and E = triggers, numpad 8 2 4 6 = look.
 
+HD TEXTURES
+
+  Build Recomp asks whether to make HD textures. They are made on your PC from your own game image,
+  by an AI upscaler (Real-ESRGAN) built into the program, on the graphics card. Nothing is downloaded.
+  It runs in the background while the game builds and while you play; the textures you see come first
+  and show up as they are done. About 4 minutes on a fast graphics card, about 2.4 GB on the drive.
+  In the game: Options, Display and Co-op, HD textures: Off, Automatic (2x up to 1080p, 4x above),
+  2x or 4x. Said No at first? Switch it on there, or double-click Build Recomp again.
+  The videos (the intro logos, the main menu's background, the pre-rendered scenes) stay as they are.
+
+HD SOUND
+
+  Build Recomp also asks whether to make HD sound. Most voices and many effects of the game were
+  recorded at a low rate (22 kHz or less): their top end is missing, and the console's way of playing
+  them adds a faint mirror hiss above it. HD sound makes clean copies of those sounds on your PC,
+  from your own game image (resampled with a long filter, and the missing treble made back from the
+  octave below it, continuing each moment's own tone), and reads every sound more smoothly.
+  Nothing is downloaded and no game sound comes with this folder. About a minute, about 0.6 GB.
+  In the game: Options, Display and Co-op, Sound settings (left or right on the top row), HD sound.
+  Off plays everything as the console did.
+
 UPDATES
 
   Double-click "Update". It fetches the newest version when there is one.

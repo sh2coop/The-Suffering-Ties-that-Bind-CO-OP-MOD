@@ -19,6 +19,8 @@
 static wchar_t g_root[MAX_PATH * 2];
 static HWND g_window;
 static wchar_t g_line[400];
+static volatile LONG g_hd_stop;   // HD textures (hdtex.h): stop after the step
+static int g_hd_running;
 
 static void Path(wchar_t* out, size_t count, const wchar_t* rest) { _snwprintf(out, count, L"%ls\\%ls", g_root, rest); out[count - 1] = 0; }
 static int Exists(const wchar_t* path) { return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES; }
@@ -153,6 +155,85 @@ static int RunQuiet(wchar_t* command) {
 }
 
 #include "update.h"
+#include "hdtex.h"
+#include "hdsound.h"
+
+// HD sound (hdsound.h), asked for on 2026-11-27: made in the background by "Build Recomp.exe --hd-sound", started
+// after Build Recomp's question or by the game when HD sound is switched on. About a minute, about 0.6 GB.
+static int HsDone(void) {
+    wchar_t marker[MAX_PATH * 2];
+    char text[64];
+    Path(marker, MAX_PATH * 2, L"Game Files\\sound\\hd\\made.txt");
+    return ReadSmall(marker, text, sizeof text) && atoi(text) == HS_VERSION;
+}
+static int MakeHdSound(void) {
+    HANDLE one = CreateMutexW(NULL, TRUE, L"Local\\Suffering2HdSound");  // one maker at a time
+    if (one && GetLastError() == ERROR_ALREADY_EXISTS) { CloseHandle(one); return 0; }
+    wchar_t assets[MAX_PATH * 2], dir[MAX_PATH * 2], log[MAX_PATH * 2];
+    Path(assets, MAX_PATH * 2, L"Game Files\\assets");
+    Path(dir, MAX_PATH * 2, L"Game Files\\sound");
+    CreateDirectoryW(dir, NULL);
+    Path(dir, MAX_PATH * 2, L"Game Files\\sound\\hd");
+    Path(log, MAX_PATH * 2, L"Logs");
+    CreateDirectoryW(log, NULL);
+    Path(log, MAX_PATH * 2, L"Logs\\hd_sound.log");
+    int whole = HsDone() || MakeHdSoundIn(assets, dir, log, NULL, GameRunning, 0);
+    if (one) { ReleaseMutex(one); CloseHandle(one); }
+    return whole;
+}
+static int StartHdSoundInBackground(void) {
+    wchar_t self[MAX_PATH * 2], command[MAX_PATH * 3];
+    GetModuleFileNameW(NULL, self, MAX_PATH * 2);
+    _snwprintf(command, MAX_PATH * 3, L"\"%ls\" --hd-sound", self);
+    STARTUPINFOW si = {sizeof si};
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS | BELOW_NORMAL_PRIORITY_CLASS, NULL, g_root, &si, &pi)) return 0;
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return 1;
+}
+// picked at Build Recomp: the game starts with HD sound on (hd_sound = 1 in Game Files\settings.toml, a flat file)
+static void HsTurnOn(void) {
+    wchar_t path[MAX_PATH * 2];
+    Path(path, MAX_PATH * 2, L"Game Files\\settings.toml");
+    DWORD size = 0;
+    char* old = NULL;
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+        size = GetFileSize(f, NULL);
+        old = (char*)calloc(size + 1, 1);
+        DWORD got = 0;
+        if (!old || !ReadFile(f, old, size, &got, NULL)) size = 0;
+        else size = got;
+        CloseHandle(f);
+    }
+    char* out = (char*)malloc(size + 32);
+    size_t n = 0;
+    // every line but an old hd_sound one, then ours
+    for (DWORD i = 0; i < size;) {
+        DWORD e = i;
+        while (e < size && old[e] != '\n') e++;
+        if (e < size) e++;
+        if (strncmp(old + i, "hd_sound", 8) != 0) { memcpy(out + n, old + i, e - i); n += e - i; }
+        i = e;
+    }
+    if (n && out[n - 1] != '\n') out[n++] = '\n';
+    memcpy(out + n, "hd_sound = 1\n", 13);
+    n += 13;
+    f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+        DWORD put;
+        WriteFile(f, out, (DWORD)n, &put, NULL);
+        CloseHandle(f);
+    }
+    free(old);
+    free(out);
+}
+static const wchar_t kHsQuestion[] = L"Make HD sound too?\n\nYour game's sounds recorded at low rates (most voices, many effects) get their missing treble made back and are resampled cleanly, on this PC from your own disc. It takes about a minute in the background and about 0.6 GB on this drive.\n\nIn the game: Options, Display and Co-op, Sound settings, HD sound.";
+
+// Build Recomp's question (asked for on 2026-11-27: "make sure u can build it when building the game"). The making
+// runs in the background, beside the game's own build and while playing; nothing waits for it.
+static const wchar_t kHdQuestion[] = L"Make HD textures too?\n\nYour game's textures, the HUD and the menus are upscaled with an AI upscaler (Real-ESRGAN) built into this program. It runs on your graphics card, quietly in the background while the game builds and while you play: the textures you see get done first. It takes about 2 GB on this drive.\n\nIn the game: Options, Display, HD textures.";
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR args, int show) {
     (void)inst; (void)prev; (void)show;
@@ -164,6 +245,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR args, int show) {
     int update = slash && wcsstr(slash, L"Update") != NULL;
     if (slash) *slash = 0;
     if (update) return Update();  // "Update.exe" (update.h)
+    if (args && wcsstr(args, L"--hd-sound")) return MakeHdSound() ? 0 : 1;  // the HD sound maker (hdsound.h)
+    if (args && wcsstr(args, L"--hd")) {  // the HD textures maker, in the background (hdtex.h)
+        g_hd_background = 1;
+        return MakeHdTextures() ? 0 : 1;
+    }
 
     wchar_t files[MAX_PATH * 2], game[MAX_PATH * 2], assets[MAX_PATH * 2], og[MAX_PATH * 2], found[MAX_PATH * 2], probe[MAX_PATH * 2];
     Path(files, MAX_PATH * 2, L"Game Files");
@@ -205,6 +291,19 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR args, int show) {
         Tell(L"The game has not been built yet.\n\n1. Put your Xbox disc image (the .iso file) into the folder \"drop xbox iso here\".\n2. Double-click \"Build Recomp\".\n\nThen start \"The Suffering 2\" again.", MB_ICONINFORMATION);
         return 0;
     }
+    if (build && placed && Exists(dll) && !HdDone()) {  // built before (or without) HD textures: only those
+        if (Tell(L"The game is already built.\n\nMake its HD textures now? They are made in the background; you can play meanwhile.", MB_ICONQUESTION | MB_YESNO) == IDYES) {
+            if (!StartHdInBackground()) Tell(L"The HD textures could not be started (Logs\\hd_textures.log says more).", MB_ICONINFORMATION);
+            return 0;
+        }
+    }
+    if (build && placed && Exists(dll) && !HsDone()) {  // built before (or without) HD sound
+        if (Tell(L"The game is already built.\n\nMake its HD sound now? It takes about a minute in the background (about 0.6 GB); you can play meanwhile.", MB_ICONQUESTION | MB_YESNO) == IDYES) {
+            if (!StartHdSoundInBackground()) Tell(L"The HD sound could not be started.", MB_ICONINFORMATION);
+            else HsTurnOn();
+            return 0;
+        }
+    }
     if (build && placed && Exists(dll) &&
         Tell(L"The game is already built.\n\nStart \"The Suffering 2\" to play. Build it again anyway?", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) != IDYES)
         return 0;
@@ -243,7 +342,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR args, int show) {
             }
         }
     }
-    if (g_window) DestroyWindow(g_window);
+    if (g_window) { DestroyWindow(g_window); g_window = NULL; }
+    if (build && !HdDone() && Tell(kHdQuestion, MB_ICONQUESTION | MB_YESNO) == IDYES) StartHdInBackground();
+    if (build && !HsDone() && Tell(kHsQuestion, MB_ICONQUESTION | MB_YESNO) == IDYES) {
+        StartHdSoundInBackground();
+        HsTurnOn();
+    }
 
     // the port: its first start builds the game's code from the image (a progress window), then it is the game
     wchar_t command[MAX_PATH * 4];

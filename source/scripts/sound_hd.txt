@@ -1,0 +1,14 @@
+# Options, Display and Co-op: the section row to Sound, down to HD sound (Off), held for a picture, switched On,
+# held, then back (captures at about 47 and 52 s)
+28 RIGHT
+29.5 RIGHT
+31 A
+35 RIGHT
+36.5 RIGHT
+38 A
+41 DOWN
+42 RIGHT
+43 RIGHT
+44 DOWN
+49 RIGHT
+55 B

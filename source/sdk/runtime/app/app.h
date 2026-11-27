@@ -27,7 +27,10 @@ struct Settings {
     bool custom_textures = true;     // images in textures\replacement\ beside the exe replace the game's
     bool dump_textures = false;      // each texture once into textures\dumps\ beside the exe
     uint32_t texture_dump_format = 0;  // 0 PNG, 1 DDS
-    std::string join_ip;                   // co-op: a host past the LAN the system link search also asks
+    // [local change, The Suffering: Ties That Bind] the HD textures made on the player's PC (textures\hd): 0 off,
+    // 1 by the output's height (2x up to 1080 rows, else 4x), 2 the 2x set, 3 the 4x set
+    uint32_t hd_textures = 1;
+    std::string join_ip;                  // co-op: a host past the LAN the system link search also asks
 };
 
 Settings& Get();

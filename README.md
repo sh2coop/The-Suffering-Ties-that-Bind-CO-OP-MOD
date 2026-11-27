@@ -52,6 +52,18 @@ Two players on one PC, their views side by side. Controller 1 is Player 1, contr
 
 There is no online play: it was tried and taken out again, split screen is the co-op of this port.
 
+## HD textures and HD sound (optional)
+
+`Build Recomp` asks about both. Each is made on your PC from your own game image, in the background while the game
+builds and while you play; nothing is downloaded and no game data comes with this folder.
+
+- **HD textures**: the game's textures, HUD and menus upscaled by an AI upscaler (Real-ESRGAN's network, built into
+  the program, on the graphics card). About 2.4 GB. *Options, Display and Co-op, HD textures*.
+- **HD sound**: most voices and many effects were recorded at 22 kHz or less, so their top end is missing and the
+  console's way of playing them adds a faint mirror hiss above it. HD sound makes clean copies of those sounds
+  (resampled with a long filter, the missing octave of treble made back from the octave below it) and reads every
+  sound more smoothly. About a minute and 0.6 GB. *Options, Display and Co-op, Sound settings, HD sound*.
+
 ## Also in this port
 
 - 60 or 120 frames a second at the game's correct speed, widescreen and ultrawide, a resolution list, window modes
