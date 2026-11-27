@@ -11,7 +11,8 @@
 //     Co-op         Off, Split screen, Host online, Join online
 //     (online)      hosting: this PC's address, for the friend who joins; joining: the host's address, to enter
 // Up and down move between the slider and the rows, left and right (or A) change the row's value, and a change
-// takes effect at once and is saved. The same page is shown before a new game starts.
+// takes effect at once and is saved. Before a new game starts the game shows its own brightness page, without
+// these rows (since 2026-11-26: the constructor's hook, below).
 //
 // Co-op online. Host online: the game listens (net.cpp) and the row under it shows the address a friend has to
 // enter. Join online: A on the Host address row starts entering the address, digit by digit (up and down change
@@ -1370,10 +1371,21 @@ X86_EXTERN_FUNC(__imp__sub_0014AE60);
 X86_EXTERN_FUNC(__imp__sub_00157A60);
 X86_EXTERN_FUNC(__imp__sub_00154550);
 
-// the Brightness screen's constructor (this, template): the page as the game makes it, then the display rows
+// the Brightness screen's constructor (this, template): the page as the game makes it, then the display rows.
+// The game makes the screen in two places: for the Options menu (0x14B97C; Play with a Friend makes it the same
+// way, OpenFriends) and in the main menu's code before a new game starts (0x157652). Before a new game it is the
+// game's own brightness page and nothing more: until 2026-11-26 it had the display and co-op rows there too, and
+// the owner asked for them to go ("i dont want to be able to change my resolution upon entering a new game ... the
+// display for brightness is fine tho, it just made it a bit confusing when my friend joined"). Resolution and the
+// rest are in Options, from the main menu and from the pause menu.
 X86_FUNC(sub_0014BF00) {
     uint32_t screen = ctx.ecx;
+    bool before_new_game = kernel::R32(ctx.esp) == 0x157657;  // (the address the call at 0x157652 returns to)
     __imp__sub_0014BF00(ctx, base);
+    if (before_new_game) {
+        LOGI("menu: the brightness page before a new game is the game's own (no display rows on it)");
+        return;
+    }
     game_menu::Build(ctx, screen);
 }
 

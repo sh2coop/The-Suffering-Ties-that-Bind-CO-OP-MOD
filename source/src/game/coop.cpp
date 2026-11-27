@@ -236,6 +236,8 @@ void Downs(X86Context& ctx);
 bool g_screen_pass = false;     // the engine is drawing Player 2's view camera
 void StreamLayer(X86Context& ctx);  // online: the menu system's 2D layer for Player 2, drawn over his view before it is taken
 bool StreamHasLayer();              // ... and whether it was, in the frame's picture for him
+uint32_t FlashlightOf(uint32_t player);  // a Player's Flashlight (the class object; 0: he has none)
+void Flashlights();                      // ... and both players', looked at once a frame for the log
 uint64_t Frames() { return g_frames; }
 
 // Player 2's view camera, wherever it is in the list now (0: none)
@@ -591,26 +593,92 @@ void SplitOn(X86Context& ctx);
 // for a save, the gun he held stayed where his hand had been ("there were floating guns around the place",
 // 2026-11-26: nine saves in that session; run guns1 shows one).
 uint32_t Named(uint32_t player, uint32_t at);
+// Player 2's flashlight as it was when he was last taken out (a save, a level's end): 1 on, 0 off, -1 not known. He
+// comes back with it that way (FlashlightAsFirst), within two minutes; else as Player 1's is.
+int g_torch2 = -1;
+std::chrono::steady_clock::time_point g_torch2_at{};
+std::vector<std::pair<uint32_t, uint32_t>> g_trace_left;  // (S2_COOP_HELD_TRACE: what was still there right after he was taken out; looked at again 90 frames later)
+uint64_t g_trace_left_at = 0;
+uint32_t ClassOf(uint32_t object);
+constexpr uint32_t kFlashlightClass = 0xCF3A3FA5;
 void EndSecond(X86Context& ctx, const char* why) {
     EndDoubles(ctx, why);
+    if (uint32_t light = FlashlightOf(g_second)) g_torch2 = int(kernel::R32(light + 0xA8) & 1), g_torch2_at = std::chrono::steady_clock::now();
     uint32_t ecx = ctx.ecx;
     static const bool leave = std::getenv("S2_COOP_LEAVE_GUNS") != nullptr;  // tests: as before 2026-11-26
-    uint32_t held[2] = {leave ? 0 : Named(g_second, 0x3AC), leave ? 0 : Named(g_second, 0x3AE)};
+    static const bool trace = std::getenv("S2_COOP_HELD_TRACE") != nullptr;  // tests: what is near him and names him, before and after
+    // What goes with him. Ending a Player ends none of the things he carries: his weapons stayed in the air where he
+    // stood (until 2026-11-26), and the grenade on his belt fell to the ground there (seen 2026-11-26 in the pictures
+    // of the flashlight tests; it lay there after every save). They are:
+    //   - what his own handles name: the weapons in his hands (+0x3AC, +0x3AE) and his flashlight (+0x16C);
+    //   - every object near him whose class object names him as the one who carries it: the items (weapons, the
+    //     flashlight: the handle at +0x56) and the loose things on him (class BouncingObject 0xEB13B226: the grenade
+    //     on his belt, his other weapon's body; the handle at +0x92).
+    // His Collider (class FA5951FC, it names him at +0x0C) is the engine's own business and is not touched.
+    std::vector<uint32_t> held;
+    struct Near {
+        uint32_t object, index, cls;
+        std::string where;
+    };
+    std::vector<Near> near;
+    if (!leave && g_second && g_second_object) {
+        for (uint32_t at : {0x3ACu, 0x3AEu, 0x16Cu})
+            if (uint32_t object = Named(g_second, at)) held.push_back(object);
+        // (The handle table: entries of six bytes, an object and how many hold its handle, at the object manager
+        // +0x0C; how many entries there are at +0x14; an object knows its own handle, the word at +0xE6: 0x18E970.
+        // Past the table's end the memory holds other things, old copies of object addresses among them: a scan
+        // that ran on to 0x4000 counted Player 2's flashlight twice in some runs.)
+        uint32_t table = kernel::R32(kObjectManager + 0x0C), entries = std::min<uint32_t>(kernel::R32(kObjectManager + 0x14), 0x4000);
+        uint32_t mine = kernel::R16(g_second_object + 0xE6);
+        if (!table || !mine || mine >= entries || kernel::R32(table + mine * 6) != g_second_object) mine = 0;
+        for (uint32_t i = 1; table && mine && i < entries && mem::IsCommitted(table + i * 6 + 4); i++) {
+            uint32_t object = kernel::R32(table + i * 6);
+            // (a free entry holds a small number, the next free one, not an object)
+            if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0 || object == g_second_object) continue;
+            if (kernel::R16(object + 0xE6) != i) continue;
+            float d2 = 0;
+            for (int k = 0; k < 3; k++) {
+                float d = ReadF(object + kPosition + k * 4) - ReadF(g_second_object + kPosition + k * 4);
+                d2 += d * d;
+            }
+            if (!(d2 <= 16.0f)) continue;  // (four metres: what he carries is on him)
+            uint32_t c = kernel::R32(object + kClassObject), cls = ClassOf(object);
+            if (!c || !mem::IsCommitted(c + 0x100)) continue;
+            bool item = cls == 0x9710D816 || cls == 0x22E48520 || cls == 0xFE9F718D || cls == kFlashlightClass;
+            bool loose = cls == 0xEB13B226;
+            if ((item && kernel::R16(c + 0x56) == mine) || (loose && kernel::R16(c + 0x92) == mine)) held.push_back(object);
+            if (trace) {
+                std::string where;
+                char one[16];
+                for (uint32_t at = 0; at < 0x100; at += 2)
+                    if (kernel::R16(c + at) == mine) std::snprintf(one, sizeof one, " +%02X", at), where += one;
+                if (!where.empty()) near.push_back({object, i, cls, where});
+            }
+        }
+    }
     for (uint32_t object : {g_camera2_object, g_second_object}) {
         if (!object || int32_t(kernel::R32(object + 8)) < 0) continue;
         ctx.ecx = object;
         kernel::CallGuest(ctx, kObjectEnd, {});
     }
     int ended = 0;
+    std::sort(held.begin(), held.end());
+    held.erase(std::unique(held.begin(), held.end()), held.end());
     for (uint32_t object : held) {
         if (!object || object == g_second_object || object == g_player_object || int32_t(kernel::R32(object + 8)) < 0) continue;
-        // (never what Player 1 holds: the two never share a weapon's object, but a wrong handle must not cost him his gun)
-        if (g_player && (Named(g_player, 0x3AC) == object || Named(g_player, 0x3AE) == object)) continue;
+        // (never what Player 1 holds: the two never share an object, but a wrong handle must not cost him his gun)
+        if (g_player && (Named(g_player, 0x3AC) == object || Named(g_player, 0x3AE) == object || Named(g_player, 0x16C) == object)) continue;
         ctx.ecx = object;
         kernel::CallGuest(ctx, kObjectEnd, {});
         ended++;
     }
-    if (ended) LOGI("coop: what Player 2 held goes with him (%d object%s)", ended, ended == 1 ? "" : "s");
+    if (ended) LOGI("coop: what Player 2 carried goes with him (%d object%s: his weapons, his flashlight, what hung on him)", ended, ended == 1 ? "" : "s");
+    for (const Near& n : near) {
+        uint32_t table = kernel::R32(kObjectManager + 0x0C);
+        bool there = table && kernel::R32(table + n.index * 6) == n.object && int32_t(kernel::R32(n.object + 8)) >= 0;
+        LOGI("held trace: object %08X (handle %X) of class %08X named him at%s: %s", n.object, n.index, n.cls, n.where.c_str(), there ? "STILL THERE after he was taken out" : "gone with him");
+        if (there) g_trace_left.push_back({n.object, n.index}), g_trace_left_at = g_frames + 90;
+    }
     ctx.ecx = ecx;
     SecondGone(ctx, why);
 }
@@ -649,6 +717,8 @@ const char* KindName(uint32_t cls);            // what the players use, by its c
 uint32_t Named(uint32_t player, uint32_t at);  // the object a Player's handle names (+0x33E: what he is using, +0x340: what he could use)
 bool ForBoth(uint32_t cls);
 void Spare(X86Context& ctx);
+void FlashlightAsFirst(X86Context& ctx);
+uint32_t g_hints_after = 0;  // Player 2's marks for the hints shown, set once his things are given (Arm)
 void Arm(X86Context& ctx) {
     uint32_t ecx = ctx.ecx;
     // Each thing Player 1 carries that is for both (weapons, ammunition, grenades, health: ForBoth) is GIVEN to Player
@@ -664,10 +734,18 @@ void Arm(X86Context& ctx) {
             if (int32_t(count) > 0 && ForBoth(ClassOfTemplate(item))) items.push_back({item, count});
         }
         AsSecond as(g_second);
+        // A Player keeps a mark for each of the game's hints he has been shown (+0xB8, one bit a hint; 0x2EE80, this =
+        // Player, hint, - shows a hint once and sets its bit). Player 2 is made anew after every save and level
+        // change, so being given his things showed "Use Y to switch between your two current weapons" each time,
+        // and with a flashlight of his own "Use right thumbstick to turn your flashlight on and off" as well. While
+        // he is given his things every hint counts as shown; afterwards he has Player 1's marks, and those two.
+        constexpr uint32_t kHintsShown = 0xB8;
+        kernel::W32(g_second + kHintsShown, 0xFFFFFFFF);
         for (const auto& [item, count] : items) {
             ctx.ecx = g_second;
             kernel::CallGuest(ctx, 0x153A0, {item, count});
         }
+        g_hints_after = kernel::R32(g_player + kHintsShown) | (1u << 2) | (1u << 4);
         uint32_t mine = kernel::R32(g_second + kInventory), mine_n = kernel::R32(g_second + kInventory + 8);
         for (uint32_t i = 0; mine && i < mine_n && i < 256; i++)
             for (const auto& [item, count] : items)
@@ -687,6 +765,9 @@ void Arm(X86Context& ctx) {
             kernel::CallGuest(ctx, kEquip, {weapon, 1});
         }
     }
+    FlashlightAsFirst(ctx);
+    LOGI("coop: Player 2's marks for the hints he has been shown: %08X (Player 1's %08X, and the two for what he was just given)", g_hints_after, kernel::R32(g_player + 0xB8));
+    kernel::W32(g_second + 0xB8, g_hints_after);
     // (what he was given, for Spare below: his weapon loads itself from it a moment later)
     g_spare = items;
     g_spare_at = g_frames + 90;
@@ -1895,7 +1976,8 @@ void DetailFrame(X86Context& ctx) {
                           "(changes when any changes), target size | d2 = the same for Player 2's view (- in frames it was not drawn) | s = the screen "
                           "flashes (pictures over the whole screen, the red one after an innocent is killed among them): how many, then of up to three "
                           "of them: strength, colour, texture (0 none), class of the object that owns it (P1 or P2: that Player's own, the flash when he is "
-                          "hurt, drawn for him only); L when the game's 2D was drawn into Player 2's picture");
+                          "hurt, drawn for him only); L when the game's 2D was drawn into Player 2's picture | t = the flashlights, Player 1's then "
+                          "Player 2's: flags (1 on, 2 the battery is giving out, 4 the battery is dead) and charge in seconds (- he has none)");
     }
     char line[1200];
     int n = 0;
@@ -1964,6 +2046,14 @@ void DetailFrame(X86Context& ctx) {
         owners_before.swap(owners);
         if (g_stream_view && second && StreamHasLayer()) n += std::snprintf(line + n, sizeof line - size_t(n), " L");
     }
+    {   // the flashlights: each player's, its flags (1 on, 2 its battery is giving out, 4 the battery is dead) and charge
+        n += std::snprintf(line + n, sizeof line - size_t(n), " | t");
+        for (uint32_t who : {g_player, second ? g_second : 0u}) {
+            uint32_t light = FlashlightOf(who);
+            if (light) n += std::snprintf(line + n, sizeof line - size_t(n), " %X %.0f", kernel::R32(light + 0xA8) & 7, ReadF(light + 0xAC));
+            else n += std::snprintf(line + n, sizeof line - size_t(n), " -");
+        }
+    }
     game_detail::Line("%s", line);
 
     // ---- once a second: every object that is new, has moved, has changed or has ended
@@ -1980,9 +2070,18 @@ void DetailFrame(X86Context& ctx) {
         round++;
         uint32_t table = kernel::R32(kObjectManager + 0x0C), written = 0;
         const uint32_t hands[4] = {Named(g_player, 0x3AC), Named(g_player, 0x3AE), second ? Named(g_second, 0x3AC) : 0, second ? Named(g_second, 0x3AE) : 0};
-        for (uint32_t h = 1; table && h < 0x4000 && mem::IsCommitted(table + h * 6 + 4); h++) {
+        // (the table has as many entries as the word at the object manager +0x14 says, and an object knows its own
+        // handle, +0xE6: until 2026-11-26 this ran on to 0x4000, into memory that is not the table, and the record
+        // had "objects" in it that were old copies of addresses, with wild places)
+        uint32_t entries = std::min<uint32_t>(kernel::R32(kObjectManager + 0x14), 0x4000), other_handle = 0, objects = 0;
+        for (uint32_t h = 1; table && h < entries && mem::IsCommitted(table + h * 6 + 4); h++) {
             uint32_t object = kernel::R32(table + h * 6);
             if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
+            objects++;
+            if (kernel::R16(object + 0xE6) != h) {
+                other_handle++;
+                continue;
+            }
             Seen& was = seen[h];
             float at[3] = {ReadF(object + kPosition), ReadF(object + kPosition + 4), ReadF(object + kPosition + 8)};
             uint32_t flags = kernel::R32(object + 8), model = kernel::R32(object + 0x64);
@@ -2005,6 +2104,10 @@ void DetailFrame(X86Context& ctx) {
             }
             game_detail::Line("x %X", it->first);
             it = seen.erase(it);
+        }
+        {
+            static int said = 0;
+            if (said < 2 && objects) said++, LOGI("record: the handle table has %u entries, %u of them objects, %u of those under another handle than their own (left out)", entries, objects, other_handle);
         }
     }
 }
@@ -2074,6 +2177,7 @@ void Frame(X86Context& ctx) {
     TestFace(ctx);
     TestExit(ctx);
     TestCensus();
+    Flashlights();
     TestMeter(ctx);
     TestCall(ctx);
     TestBody();
@@ -3286,6 +3390,7 @@ bool ForBoth(uint32_t cls) {
         case 0xFE9F718D:  // Missile Item (grenades and the like)
         case 0x19F64171:  // Health Bonus Item
         case 0x5A410DDE:  // Item (ammunition)
+        case 0xCF3A3FA5:  // Flashlight (each player has his own: "the flashlight", below)
             return true;
     }
     return false;
@@ -3304,6 +3409,8 @@ X86_FUNC(sub_000153A0) {
         inside = true;
         game_coop::AsSecond as(game_coop::g_second);
         uint32_t ecx = ctx.ecx, eax = ctx.eax;
+        // (the hint Player 1's pickup has just shown is not shown a second time for Player 2's copy: Arm, +0xB8)
+        kernel::W32(game_coop::g_second + 0xB8, kernel::R32(game_coop::g_second + 0xB8) | kernel::R32(player + 0xB8));
         ctx.ecx = game_coop::g_second;
         kernel::CallGuest(ctx, 0x153A0, {item, count});
         ctx.ecx = ecx;
@@ -3792,9 +3899,9 @@ namespace game_coop {
 void TestExit(X86Context& ctx) {
     static const char* v = std::getenv("S2_COOP_EXIT");
     if (!v || !g_player_object || g_frames != uint64_t(std::atoll(v))) return;
-    uint32_t table = kernel::R32(kObjectManager + 0x0C);
+    uint32_t table = kernel::R32(kObjectManager + 0x0C), entries = std::min<uint32_t>(kernel::R32(kObjectManager + 0x14), 0x4000);
     int seen = 0;
-    for (uint32_t i = 0; table && i < 0x4000 && mem::IsCommitted(table + i * 6 + 4); i++) {
+    for (uint32_t i = 0; table && i < entries && mem::IsCommitted(table + i * 6 + 4); i++) {
         uint32_t object = kernel::R32(table + i * 6);
         // (a free entry holds a small number, the next free one, not an object)
         if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
@@ -3924,8 +4031,8 @@ const Kind kKinds[] = {{0x69A9942B, "Mountable"}, {0xC0DCDE7E, "MountedWeapon"},
 
 template <typename F>
 void EachObject(F&& f) {
-    uint32_t table = kernel::R32(kObjectManager + 0x0C);
-    for (uint32_t i = 0; table && i < 0x4000 && mem::IsCommitted(table + i * 6 + 4); i++) {
+    uint32_t table = kernel::R32(kObjectManager + 0x0C), entries = std::min<uint32_t>(kernel::R32(kObjectManager + 0x14), 0x4000);
+    for (uint32_t i = 0; table && i < entries && mem::IsCommitted(table + i * 6 + 4); i++) {
         uint32_t object = kernel::R32(table + i * 6);
         if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
         f(object);
@@ -4518,6 +4625,7 @@ X86_FUNC(sub_0017C450) {
 #include "app/app.h"
 namespace game_coop {
 bool g_drawing_second = false;  // the engine is drawing Player 2's object (0x1D1970)
+int g_draw_depth = 0;           // how many object draws (0x1D1970) are open, one inside another
 
 // Player 2's outfit (decided 2026-11-24: blue trousers and a black tank top; straps, boots, skin and blood as they
 // are). His model is drawn with the same textures as Player 1's. Two of them are the clothes: the trousers
@@ -4684,8 +4792,63 @@ static const int g_draw_variant_set = (gpu::g_draw_variant = DrawVariant, 0);
 
 // An object is drawn (0x1D1970, the object on the stack): its meshes go out from inside this call, so the draws made
 // meanwhile are that object's. Player 2's are marked for the runtime (texture pack variant 1: his own outfit).
+//
+// One call can draw several objects. The renderer sorts what a view sees by model (0x1D1840 puts each object into
+// one of 128 lists by its model number, the word at +0x64), links the objects that are drawn alike into a chain (the
+// next one at +0xD4; 0x1D1BCA) and calls 0x1D1970 for the first of a chain only: the rest are drawn from inside that
+// call (0x1D1AAD: the next of the chain, its link cleared, and round again). Everything this hook decides, it
+// decided for the first one: the others went by unseen. Found 2026-11-26 in a picture of the flashlight tests: with
+// Player 2 in first person a second body in his clothes stood where the stand-in bodies had been made. It was
+// Player 1's stand-in, put away and not to be drawn, linked behind Player 2's (two objects of one model) and drawn
+// with it, in its clothes. The same way a put-away stand-in at the front of a chain took the bodies or the weapons
+// behind it out of the picture, and one player's weapon could be drawn in the other's outfit pass. A chain that has
+// one of the players' things in it is now taken apart: each object gets a call of its own and is judged by itself.
 X86_EXTERN_FUNC(__imp__sub_001D1970);
+namespace game_coop {
+void DrawOne(X86Context& ctx, uint8_t* base);
+// the players, their stand-in bodies, and what any of them holds
+bool PlayersThing(uint32_t object) {
+    if (!object) return false;
+    if (object == g_player_object || object == g_second_object) return true;
+    for (const Double& d : g_doubles)
+        if (d.object && (object == d.object || object == d.held[0] || object == d.held[1] || object == d.owner_held[0] || object == d.owner_held[1])) return true;
+    for (uint32_t player : {g_player, g_second})
+        if (player && (object == Named(player, 0x3AC) || object == Named(player, 0x3AE))) return true;
+    return false;
+}
+}  // namespace game_coop
 X86_FUNC(sub_001D1970) {
+    using namespace game_coop;
+    constexpr uint32_t kNextAlike = 0xD4;
+    uint32_t first = kernel::R32(ctx.esp + 4), renderer = ctx.ecx;
+    uint32_t rest[64];
+    int count = 0;
+    static const bool whole = std::getenv("S2_COOP_WHOLE_CHAINS") != nullptr;  // tests: as before 2026-11-26
+    if (!whole && g_second_object && first && mem::IsCommitted(first + 0x110) && kernel::R32(first + kNextAlike)) {
+        bool ours = PlayersThing(first);
+        int length = 0;
+        for (uint32_t o = kernel::R32(first + kNextAlike); o && length < 64 && mem::IsCommitted(o + 0x110); o = kernel::R32(o + kNextAlike), length++) ours |= PlayersThing(o);
+        if (ours && length < 64) {
+            for (uint32_t o = kernel::R32(first + kNextAlike); o && count < 64;) {
+                uint32_t next = kernel::R32(o + kNextAlike);
+                kernel::W32(o + kNextAlike, 0);
+                rest[count++] = o;
+                o = next;
+            }
+            kernel::W32(first + kNextAlike, 0);
+            static bool said = false;
+            if (!said) said = true, LOGI("coop: a chain of %d objects drawn alike has one of the players' things in it: each is drawn by its own call", count + 1);
+        }
+    }
+    DrawOne(ctx, base);
+    for (int i = 0; i < count; i++) {
+        uint32_t eax = ctx.eax;
+        ctx.ecx = renderer;
+        kernel::CallGuest(ctx, 0x1D1970, {rest[i]});
+        ctx.eax = eax;
+    }
+}
+void game_coop::DrawOne(X86Context& ctx, uint8_t* base) {
     {
         using namespace game_coop;
         // A stand-in body and what it holds: in every view but its owner's, and nowhere while it is put away or the
@@ -4693,22 +4856,49 @@ X86_FUNC(sub_001D1970) {
         // (whose view is being drawn: Player 2's while the engine draws his view camera, else Player 1's)
         uint32_t object = kernel::R32(ctx.esp + 4);
         int view = g_screen_pass ? 2 : 1;
+        // (tests: S2_BODY_TRACE=<frame> lists every Player's object the engine draws in that frame, and what is done with it)
+        static const uint64_t body_trace = std::getenv("S2_BODY_TRACE") ? uint64_t(std::atoll(std::getenv("S2_BODY_TRACE"))) : 0;
+        bool traced = body_trace && g_frames == body_trace && object && mem::IsCommitted(object + 0x110) && ClassOf(object) == 0xC8BC44E1;
+        auto who = [&]() -> const char* {
+            return object == g_player_object ? "Player 1" : object == g_second_object ? "Player 2" : object == g_doubles[0].object ? "Player 1's stand-in" :
+                   object == g_doubles[1].object ? "Player 2's stand-in" : "ANOTHER Player object";
+        };
         for (int which = 0; object && which < 2; which++) {
             const Double& d = g_doubles[which];
             if (!d.object) continue;
             bool its = object == d.object || object == d.held[0] || object == d.held[1];
             bool his = d.out && (object == (which ? g_second_object : g_player_object) || object == d.owner_held[0] || object == d.owner_held[1]);
             if ((its && (!d.out || view == which + 1 || g_one_view)) || (his && view != which + 1 && !g_one_view)) {
+                if (traced) LOGI("body trace: view %d: %s (object %08X at %.2f %.2f %.2f, flags %08X) is NOT drawn", view, who(), object, ReadF(object + kPosition), ReadF(object + kPosition + 4), ReadF(object + kPosition + 8), kernel::R32(object + 8));
                 kernel::Return(ctx, 0, 1);
                 return;
             }
         }
+        if (traced) LOGI("body trace: view %d: %s (object %08X at %.2f %.2f %.2f, flags %08X) is drawn, called from %s", view, who(), object, ReadF(object + kPosition), ReadF(object + kPosition + 4), ReadF(object + kPosition + 8), kernel::R32(object + 8), Callers(ctx, 6).c_str());
     }
     bool before = game_coop::g_drawing_second;
     // (Player 2's outfit: for his own object, and for his stand-in)
     game_coop::g_drawing_second = game_coop::g_second_object && (kernel::R32(ctx.esp + 4) == game_coop::g_second_object ||
                                                                  (game_coop::g_doubles[1].object && kernel::R32(ctx.esp + 4) == game_coop::g_doubles[1].object));
+    {   // (S2_BODY_TRACE: every object drawn in that frame within four metres of Player 1, with how deep inside another's draw it is)
+        using namespace game_coop;
+        static const uint64_t body_trace = std::getenv("S2_BODY_TRACE") ? uint64_t(std::atoll(std::getenv("S2_BODY_TRACE"))) : 0;
+        uint32_t object = kernel::R32(ctx.esp + 4);
+        if (body_trace && g_frames == body_trace && object && mem::IsCommitted(object + 0x110) && g_player_object) {
+            float d2 = 0;
+            for (int k = 0; k < 3; k++) {
+                float d = ReadF(object + kPosition + k * 4) - ReadF(g_player_object + kPosition + k * 4);
+                d2 += d * d;
+            }
+            if (d2 < 16.0f)
+                LOGI("body trace: view %d depth %d: object %08X class %08X template %u at %.2f %.2f %.2f flags %08X, outfit %d, called from %s", g_screen_pass ? 2 : 1, g_draw_depth, object,
+                     ClassOf(object), kernel::R32(object + kTemplateWord) & 0xFFFF, ReadF(object + kPosition), ReadF(object + kPosition + 4), ReadF(object + kPosition + 8), kernel::R32(object + 8),
+                     int(g_drawing_second), Callers(ctx, 5).c_str());
+        }
+    }
+    game_coop::g_draw_depth++;
     __imp__sub_001D1970(ctx, base);
+    game_coop::g_draw_depth--;
     game_coop::g_drawing_second = before;
 }
 
@@ -4744,6 +4934,159 @@ X86_FUNC(sub_00191070) {
         if (place && mem::IsCommitted(place + 12)) std::memcpy(at, kernel::HostPtr(place), 12);
         LOGI("sound trace: wave %08X place %08X (%.1f %.1f %.1f) flags %X scale %.2f from %08X gave %08X", sound, place, at[0], at[1], at[2], flags, scale, from, ctx.eax);
     }
+}
+
+// ---- the flashlight --------------------------------------------------------------------------------------------------
+// Reported 2026-11-26: "i also noticed player 2 doesnt get a flashlight", and asked for the same day: "can we make the
+// flashlight always have infinite battery too".
+// How the game has it:
+//   - The flashlight is a thing a Player carries: an item of the class Flashlight (0xCF3A3FA5) in his inventory, and
+//     an object of that class fixed to his skeleton (0x13A00: bone 0x10, 0x18AD50), its handle at Player +0x16C.
+//     0x12570 (this = Player) gives his Flashlight (the class object). 0x153A0, the one way things are given, makes
+//     it for the first Flashlight he is given and gives batteries (its property 0x4E, an item) for every further one.
+//   - The Flashlight: flags at +0xA8 (1 on, 2 the battery is giving out, 4 the battery is dead), the charge in
+//     seconds at +0xAC (full: property 0x4C), the time it takes to give out at +0xB0, the handle of who carries it at
+//     +0x56, its light (class 54E01F83) at +0xC0 and its cone at +0xC2. Method +0x98 (0xEAEB0) switches it on, +0x9C
+//     (0xEAD60) off; 0xEA550 puts a new battery in. Its once-a-frame method +0x1C (0xEA840) runs the battery down
+//     while it is on and points the beam: by the flashlight's own place for "the player" in first person (0x2F7D0),
+//     else by the game's Camera.
+//   - The button (action 0x3F6, the right stick's click) is read in the Player's input method (0x1BC90 at 0x1C6EB)
+//     and switches HIS flashlight. His once-a-frame method (at 0x30043) puts in a spare battery when one gives out.
+// Cause of the report: Player 2 had no flashlight to switch. He is given what Player 1 carries of weapons,
+// ammunition, grenades and health (ForBoth), and the Flashlight's class was not among them.
+// What is done:
+//   - The Flashlight is for both: Player 2 is given one when he comes in and whenever Player 1 is given one, the
+//     game's own way. His starts as Player 1's is at that moment, on or off.
+//   - A Flashlight's once-a-frame method runs as Player 2 when he carries it (AsSecond): "the player" is him and
+//     the game's Camera is his, so his beam goes where HE looks.
+//   - The battery never runs down for a flashlight a Player carries, alone or with two: before its once-a-frame
+//     method its charge is filled up, and one that came back dead from a saved game gets a new battery from nowhere
+//     the first time it is on. Spare batteries are never used up.
+//   S2_TORCH_BATTERY=1: the game's own battery (tests)
+namespace game_coop {
+uint32_t FlashlightOf(uint32_t player) {
+    if (!player || !mem::IsCommitted(player + 0x170)) return 0;
+    uint32_t table = kernel::R32(kObjectManager + 0x0C), h = kernel::R16(player + 0x16C);
+    uint32_t object = table && h ? kernel::R32(table + h * 6) : 0;
+    if (!object || !mem::IsCommitted(object + 0x110) || ClassOf(object) != kFlashlightClass) return 0;
+    return kernel::R32(object + kClassObject);
+}
+// one of an object's properties as a float (the object's own property reader: its method +8, number and -1)
+float PropertyF(X86Context& ctx, uint32_t object, uint32_t number, float otherwise) {
+    uint32_t props = object && mem::IsCommitted(object + 0xF0) ? kernel::R32(object + 0xEC) : 0;
+    if (!props || !mem::IsCommitted(props)) return otherwise;
+    uint32_t ecx = ctx.ecx, eax = ctx.eax;
+    ctx.ecx = props;
+    uint32_t at = kernel::CallGuest(ctx, kernel::R32(kernel::R32(props) + 8), {number, 0xFFFFFFFF});
+    ctx.ecx = ecx, ctx.eax = eax;
+    return at && mem::IsCommitted(at + 4) ? ReadF(at) : otherwise;
+}
+// the players' flashlights, once a frame: what they are doing, into the log when it changes
+void Flashlights() {
+    if (g_trace_left_at && g_frames >= g_trace_left_at) {
+        uint32_t table = kernel::R32(kObjectManager + 0x0C);
+        for (const auto& [object, index] : g_trace_left) {
+            bool there = table && kernel::R32(table + index * 6) == object && mem::IsCommitted(object + 0x110) && int32_t(kernel::R32(object + 8)) >= 0;
+            LOGI("held trace: object %08X (handle %X), still there right after he was taken out, is %s 90 frames later (class now %08X, flags %08X)", object, index,
+                 there ? "STILL THERE" : "gone", there ? ClassOf(object) : 0, there ? kernel::R32(object + 8) : 0);
+        }
+        g_trace_left.clear();
+        g_trace_left_at = 0;
+    }
+    static uint32_t before[2] = {0xFF, 0xFF};
+    uint32_t players[2] = {g_player, g_second};
+    for (int i = 0; i < 2; i++) {
+        uint32_t light = FlashlightOf(players[i]);
+        uint32_t now = light ? kernel::R32(light + 0xA8) & 7 : 0x80;
+        if (now == before[i]) continue;
+        if (before[i] != 0xFF || light) {
+            if (!light) LOGI("coop: Player %d has no flashlight%s", i + 1, players[i] ? "" : " (he is not in)");
+            else
+                LOGI("coop: Player %d's flashlight is %s%s (charge %.0f s)", i + 1, now & 1 ? "on" : "off",
+                     now & 4 ? ", its battery dead" : now & 2 ? ", its battery giving out" : "", ReadF(light + 0xAC));
+        }
+        before[i] = now;
+    }
+    // once a second: how many Flashlight objects there are in the level, and how many of them are carried by a
+    // player (one left behind when Player 2 is taken out would stay alight where he stood)
+    if (g_frames % 60 == 11) {
+        static int said_all = -1, said_carried = -1;
+        uint32_t table = kernel::R32(kObjectManager + 0x0C), entries = std::min<uint32_t>(kernel::R32(kObjectManager + 0x14), 0x4000);
+        int all = 0, carried = 0;
+        for (uint32_t i = 1; table && i < entries && mem::IsCommitted(table + i * 6 + 4); i++) {
+            uint32_t object = kernel::R32(table + i * 6);
+            // (a free entry holds a small number, the next free one, not an object; an object knows its own handle)
+            if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
+            if (kernel::R16(object + 0xE6) != i || ClassOf(object) != kFlashlightClass) continue;
+            all++;
+            uint32_t light = kernel::R32(object + kClassObject);
+            if (light && (light == FlashlightOf(g_player) || light == FlashlightOf(g_second))) carried++;
+        }
+        if (all != said_all || carried != said_carried) {
+            LOGI("coop: %d flashlight%s in the level, %d carried by a player", all, all == 1 ? "" : "s", carried);
+            said_all = all, said_carried = carried;
+            // (each of them: which object, who carries it by its own word, where it is)
+            for (uint32_t i = 1; table && i < entries && mem::IsCommitted(table + i * 6 + 4); i++) {
+                uint32_t object = kernel::R32(table + i * 6);
+                if (object < 0x400000 || !mem::IsCommitted(object) || !mem::IsCommitted(object + 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
+                if (kernel::R16(object + 0xE6) != i || ClassOf(object) != kFlashlightClass) continue;
+                uint32_t light = kernel::R32(object + kClassObject), h = light && mem::IsCommitted(light + 0xD0) ? kernel::R16(light + 0x56) : 0;
+                uint32_t owner = h ? kernel::R32(table + h * 6) : 0;
+                LOGI("coop:   flashlight object %08X (handle %X), its Flashlight %08X, flags %X, carried by %s (object %08X), at %.2f %.2f %.2f", object, i, light,
+                     light ? kernel::R32(light + 0xA8) & 7 : 0,
+                     !owner ? "nobody" : owner == g_player_object ? "Player 1" : owner == g_second_object ? "Player 2" : owner == g_doubles[0].object ? "Player 1's stand-in" :
+                     owner == g_doubles[1].object ? "Player 2's stand-in" : "another object",
+                     owner, ReadF(object + kPosition), ReadF(object + kPosition + 4), ReadF(object + kPosition + 8));
+            }
+        }
+    }
+}
+// Player 2 has just been given his things (Arm): his flashlight is on or off as Player 1's is
+void FlashlightAsFirst(X86Context& ctx) {
+    uint32_t mine = FlashlightOf(g_second), his = FlashlightOf(g_player);
+    if (!mine) {
+        LOGI("coop: Player 2 has no flashlight (Player 1 %s)", his ? "has one: it was not given" : "has none either");
+        return;
+    }
+    bool kept = g_torch2 >= 0 && std::chrono::steady_clock::now() - g_torch2_at < std::chrono::seconds(120);
+    bool on = (kernel::R32(mine + 0xA8) & 1) != 0, want = kept ? g_torch2 == 1 : his && (kernel::R32(his + 0xA8) & 1);
+    g_torch2 = -1;
+    if (on != want) {
+        AsSecond as(g_second);
+        uint32_t ecx = ctx.ecx, eax = ctx.eax;
+        ctx.ecx = mine;
+        kernel::CallGuest(ctx, kernel::R32(kernel::R32(mine) + (want ? 0x98 : 0x9C)), {});
+        ctx.ecx = ecx, ctx.eax = eax;
+    }
+    LOGI("coop: Player 2 has his own flashlight (%s, as %s)", want ? "on" : "off", kept ? "he had it when he was taken out" : "Player 1's is");
+}
+}  // namespace game_coop
+
+X86_EXTERN_FUNC(__imp__sub_000EA840);
+X86_FUNC(sub_000EA840) {
+    using namespace game_coop;
+    uint32_t light = ctx.ecx;
+    uint32_t table = kernel::R32(kObjectManager + 0x0C), h = mem::IsCommitted(light + 0xD0) ? kernel::R16(light + 0x56) : 0;
+    uint32_t owner = table && h ? kernel::R32(table + h * 6) : 0;
+    bool second = owner && g_second_object && owner == g_second_object;
+    bool players = owner && (owner == g_player_object || second);
+    static const bool battery = std::getenv("S2_TORCH_BATTERY") != nullptr;
+    if (players && !battery) {
+        uint32_t flags = kernel::R32(light + 0xA8);
+        if ((flags & 1) && (flags & 6)) {  // on, and its battery has given out: a new one (what the game does with a spare)
+            AsSecond as(second ? g_second : 0);
+            uint32_t eax = ctx.eax;
+            kernel::CallGuest(ctx, 0xEA550, {});  // (this = the Flashlight, still in ecx)
+            ctx.ecx = light, ctx.eax = eax;
+            static int said = 0;
+            if (said++ < 4) LOGI("coop: Player %d's flashlight had a battery that gave out: a new one is put in (the battery is endless)", second ? 2 : 1);
+        } else if (!(flags & 6)) {
+            float full = PropertyF(ctx, kernel::R32(light + 4), 0x4C, 0.0f);
+            if (full > 0 && ReadF(light + 0xAC) < full) std::memcpy(kernel::HostPtr(light + 0xAC), &full, 4);
+        }
+    }
+    AsSecond as(second ? g_second : 0);
+    __imp__sub_000EA840(ctx, base);
 }
 
 // Tests: S2_SPAWN_TRACE=<class id in hex> logs every object of that class the game makes from a template
