@@ -987,6 +987,28 @@ X86_FUNC(sub_0014DA30) {  // the logo film's screen, once a frame (this)
     }
     __imp__sub_0014DA30(ctx, base);
 }
+// The logo screen's handling of the A button (0x14D830, this = the screen, 1 for A): it tells its film player
+// (+0x6C) to stop, through the player's method +0x30. Once the films were skipped above, the player is gone: an A
+// pressed in that moment called a null method and the game stopped (the owner's session 017 at 170.8 s: "indirect
+// call to 00000000" at 0x14D849, the A pressed 0.8 s after the skip, while the title's files loaded). A skipped
+// screen, or one whose player has no such method, now only notes that its film has ended.
+X86_EXTERN_FUNC(__imp__sub_0014D830);
+X86_FUNC(sub_0014D830) {
+    uint32_t screen = ctx.ecx, event = kernel::R32(ctx.esp + 4);
+    if (event == 1 && screen && mem::IsCommitted(screen + 0x74)) {
+        uint32_t player = kernel::R32(screen + 0x6C);
+        uint32_t methods = player && mem::IsCommitted(player + 4) ? kernel::R32(player) : 0;
+        uint32_t stop = methods && mem::IsCommitted(methods + 0x34) ? kernel::R32(methods + 0x30) : 0;
+        if (!stop || kernel::R32(screen + 0x68) == 0x7FFF) {
+            static int said = 0;
+            if (said++ < 3) LOGI("menu: A on the logo screen after its films were skipped (player %08X): nothing to stop", player);
+            kernel::W32(screen + 0x70, 1);
+            kernel::Return(ctx, 0, 1);
+            return;
+        }
+    }
+    __imp__sub_0014D830(ctx, base);
+}
 X86_EXTERN_FUNC(__imp__sub_0014C590);
 X86_FUNC(sub_0014C590) {  // the title and legal screen, once a frame (this)
     static uint32_t asked = 0;  // the screen a button was pressed on (while it still loads: remembered until it waits)

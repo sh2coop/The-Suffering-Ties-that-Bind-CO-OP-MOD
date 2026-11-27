@@ -1,1 +1,1 @@
-60 2026-11-27 Split screen: the game's pictures over the whole screen go across both views. HD textures version 4 (cleaner soft edges). HD sound: several voices of one sound no longer decode it over and over; the logs now say why a sound is refused and whether the sound output stops.
+61 2026-11-27 Fixes a crash right at the start: pressing A just after skipping the logo films could stop the game.
