@@ -852,6 +852,15 @@ bool InScene() {
     static const bool nohold = std::getenv("S2_TEST_NO_HOLD") != nullptr;  // tests: as before 2026-11-26
     if (held > 12 && !nohold) return g_scene_why = "the story holds Player 1 (he sits, or is walked along)", true;
     if (g_player && (kernel::R32(g_player + 0xBC) & 0x400000)) return false;
+    // Player 1 in an enemy's grip is not a scene either (the owner, 2026-11-28: "if player 1 is grabbed, player 2
+    // cant move"): the grab moves the camera like a sequence does, and Player 2 lost his view and his controls while
+    // he could have helped. Player 1's states HeadGrab (33) and BodySlam (38), bits 1 and 6 of +0xC0, and Hit
+    // Reacting (16) mark it; a story scene holds him in Controlled (11) alone.
+    if (g_player && mem::Spans(g_player, 0xC4) && ((kernel::R32(g_player + 0xC0) & 0x42) || (kernel::R32(g_player + 0xBC) & 0x10000))) {
+        static uint64_t said = 0;
+        if (g_frames - said > 600) said = g_frames, LOGI("coop: Player 1 is held by an enemy (states %08X %02X): not a scene, Player 2 plays on", kernel::R32(g_player + 0xBC), kernel::R32(g_player + 0xC0) & 0x7F);
+        return false;
+    }
     if (mode != 3 && mode != 0) return g_scene_why = "the camera is neither following nor the Player's own", true;
     // ... or a sequence moves it: bit 1 of its flags at +0x2C (its own once-a-frame method does nothing then)
     if (kernel::R32(camera + 0x2C) & 1) return g_scene_why = "a sequence moves the camera", true;
@@ -2457,19 +2466,21 @@ void Frame(X86Context& ctx) {
             if (said < 20) said++, LOGR("record: frame %llu's line was left out after a bad read", (unsigned long long)g_frames);
         }
     }
-    // ---- Player 2's ammunition never runs out (the owner, 2026-11-28: "can u give player 2 infinite ammo"): the
-    // rounds in the gun in his hands (Player +0x140) are kept at what its clip holds (0x17400; 0 for a melee weapon)
-    // every frame, so he never reloads and never takes from what he carries. Player 1 plays as the game has it.
-    if (g_second && mem::Spans(g_second, 0x540) && !(kernel::R32(g_second + 0xBC) & 0xC0000)) {
+    // ---- Both players' ammunition never runs out (the owner, 2026-11-28: "can u give player 2 infinite ammo", then
+    // "give player 1 unlmitied ammo too"): the rounds in the gun in a player's hands (Player +0x140) are kept at what
+    // its clip holds (0x17400; 0 for a melee weapon) every frame, so he never reloads and never takes from what he
+    // carries. (A creature form, state bits 0xC0000, has no gun.)
+    for (uint32_t who : {g_player, g_second}) {
+        if (!who || !mem::Spans(who, 0x540) || (kernel::R32(who + 0xBC) & 0xC0000)) continue;
         uint32_t ecx = ctx.ecx, eax = ctx.eax;
-        ctx.ecx = g_second;
+        ctx.ecx = who;
         int clip = int(kernel::CallGuest(ctx, 0x17400, {}));
         ctx.ecx = ecx, ctx.eax = eax;
-        int rounds = int(kernel::R32(g_second + 0x140));
+        int rounds = int(kernel::R32(who + 0x140));
         if (clip > 0 && clip < 1000 && rounds < clip) {
-            kernel::W32(g_second + 0x140, uint32_t(clip));
+            kernel::W32(who + 0x140, uint32_t(clip));
             static int said = 0;
-            if (said < 5) said++, LOGI("ammo: Player 2's gun filled again (%d of %d), infinite ammunition", rounds, clip);
+            if (said < 5) said++, LOGI("ammo: Player %d's gun filled again (%d of %d), infinite ammunition", who == g_second ? 2 : 1, rounds, clip);
         }
     }
     {   // tests: S2_FP_PROBE=<frame>: Player 1's model, its resource and his skeleton at that frame and 180 frames later
@@ -2715,6 +2726,8 @@ void Frame(X86Context& ctx) {
         float most = g_second ? ReadF(g_second + 0x1A) : 0;
         gpu::g_second_health = most > 0 ? (g_down_until ? 0.0f : std::clamp(ReadF(g_second + 0x16) / most, 0.0f, 1.0f)) : -1.0f;
         // ... and each player's partner's, thin, under his own (Player 2's blue): Player 1's health for Player 2's view
+        // ... and Player 2's insanity meter (+0x48A, 0 to 100: the title's shows Player 1's only)
+        gpu::g_second_meter = g_second && !g_down_until ? std::clamp(ReadF(g_second + 0x48A) / 100.0f, 0.0f, 1.0f) : -1.0f;
         float most1 = g_player ? ReadF(g_player + 0x1A) : 0;
         gpu::g_first_health = most1 > 0 ? std::clamp(ReadF(g_player + 0x16) / most1, 0.0f, 1.0f) : -1.0f;
         // The arrow above the partner's head (decided 2026-11-24: tiny, the game's orange, through walls, no name
@@ -2881,7 +2894,7 @@ void Frame(X86Context& ctx) {
         char two[96] = "";
         if (g_second && mem::Spans(g_second, 0x490))
             std::snprintf(two, sizeof two, "; Player 2 %08X %08X meter %.0f", kernel::R32(g_second + 0xB0), kernel::R32(g_second + 0xBC), ReadF(g_second + 0x48A));
-        LOGI("state: Player 1 %08X %08X meter %.0f morality %.0f%s; %u view cameras, %s", kernel::R32(g_player + 0xB0), kernel::R32(g_player + 0xBC),
+        LOGI("state: Player 1 %08X %08X %02X meter %.0f morality %.0f%s; %u view cameras, %s", kernel::R32(g_player + 0xB0), kernel::R32(g_player + 0xBC), kernel::R32(g_player + 0xC0) & 0x7F,
              ReadF(g_player + 0x48A), ReadF(g_player + 0x482), two, view ? kernel::R32(view + kViewCount) : 0,
              g_one_view ? "one view" : g_second_object ? "split" : "alone");
     }
@@ -3404,7 +3417,19 @@ X86_EXTERN_FUNC(__imp__sub_0016C980);
 X86_FUNC(sub_0016C980) {
     uint32_t manager = kernel::R32(0x391D64);
     if (game_coop::g_layer_inside || !manager || !game_coop::TwoLayers()) {
+        // In a scene (one view, Player 1 held by the story) the game leaves its crosshair out because "the player"
+        // cannot aim; with Player 2 in the list of players it drew one (the owner, 2026-11-28: "crosshairs in
+        // cutscenes"). For the 2D of a scene the list holds Player 1 alone.
+        uint32_t list_count = game_coop::kObjectManager + 0x12C, count = 0;
+        bool alone = game_coop::g_one_view && game_coop::g_second_object && !game_coop::g_layer_inside;
+        if (alone) {
+            count = kernel::R32(list_count);
+            uint32_t list = kernel::R32(game_coop::kObjectManager + 0x124);
+            if (count >= 2 && list && kernel::R32(list) == game_coop::g_player_object) kernel::W32(list_count, 1);
+            else alone = false;
+        }
         __imp__sub_0016C980(ctx, base);
+        if (alone) kernel::W32(list_count, count);
         return;
     }
     // The function as the game has it, with its drawing done twice: once a frame the menu manager's own turn
@@ -4568,6 +4593,7 @@ namespace game_coop {
 // change until its change back, Player 2's meter is kept at Player 1's, and he is changed again if he is not the
 // creature.
 bool g_story_creature = false;
+bool g_story_form_call = false;  // the story's change of form for Player 2 is being made (the hook of 0x25CD0 lets it through)
 void StoryHold(X86Context& ctx) {
     if (!g_story_creature) return;
     if (!g_player || !mem::Spans(g_player, 0x490)) {
@@ -4587,7 +4613,7 @@ void StoryHold(X86Context& ctx) {
         tried = g_frames;
         uint32_t ecx = ctx.ecx;
         ctx.ecx = g_second;
-        kernel::CallGuest(ctx, 0x2B230, {});
+        g_story_form_call = true, kernel::CallGuest(ctx, 0x2B230, {}), g_story_form_call = false;
         ctx.ecx = ecx;
         LOGI("coop: the story keeps the player as the creature: Player 2 is changed again");
     }
@@ -4607,10 +4633,10 @@ void StoryForm(X86Context& ctx, int what) {
         kernel::CallGuest(ctx, 0x2ADD0, {0x461C4000});  // (10000.0: the function keeps it to the most)
         LOGI("coop: the story fills the insanity meter: Player 2's too (%.1f)", ReadF(p2 + 0x48A));
     } else if (what == 1 && !creature) {
-        kernel::CallGuest(ctx, 0x2B230, {});
+        g_story_form_call = true, kernel::CallGuest(ctx, 0x2B230, {}), g_story_form_call = false;
         LOGI("coop: the story turns the player into the creature: Player 2 too");
     } else if (what == 2 && creature) {
-        kernel::CallGuest(ctx, 0x2B230, {});
+        g_story_form_call = true, kernel::CallGuest(ctx, 0x2B230, {}), g_story_form_call = false;
         ctx.ecx = p2;
         kernel::CallGuest(ctx, 0x2ADD0, {0});
         LOGI("coop: the story turns the player back: Player 2 too");
@@ -5619,6 +5645,41 @@ uint32_t WeaponShooter(uint32_t part) {
     return owner && g_second_object && owner == g_second_object ? g_second : 0;
 }
 }  // namespace game_coop
+// ---- an object with no model is not drawn (the owner's version 70 crashed in 0x1A9CF0, the draw of one object:
+// it reads the object's model at +0x68 and calls through it, and the object being drawn had none, just after the
+// pause menu closed with Player 2 coming back up). The draw is left out and the object named in the log.
+// ---- Player 2 does not change form by his own button for now (2026-11-28). In the owner's session 31 Player 2's
+// creature was drawn broken (the creature with Torque's things on it) and its attack crashed the game: 0x23C70, his
+// state function, read through a null at 0x24291 (property 0x127 of his body gave no template). Until his creature
+// is made right, the button's change (0x1C21E: state 18, Morph, through 0x25CD0) is refused for him; the story's
+// changes (StoryForm, StoryHold) still go through. S2_P2_CREATURE=1 lets his button through (tests).
+X86_EXTERN_FUNC(__imp__sub_00025CD0);
+X86_FUNC(sub_00025CD0) {
+    static const bool allow = std::getenv("S2_P2_CREATURE") != nullptr;
+    if (!allow && game_coop::g_second && ctx.ecx == game_coop::g_second && kernel::R32(ctx.esp + 4) == 0x12 && !game_coop::g_story_form_call &&
+        !(kernel::R32(game_coop::g_second + 0xBC) & 0x80000)) {
+        static int said = 0;
+        if (said < 5) said++, LOGI("coop: Player 2's own change of form is refused (his creature is not ready yet)");
+        kernel::Return(ctx, 0, 1);
+        return;
+    }
+    __imp__sub_00025CD0(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_001A9CF0);
+X86_FUNC(sub_001A9CF0) {
+    uint32_t object = ctx.ecx;
+    uint32_t model = mem::Spans(object, 0x104) ? kernel::R32(object + 0x68) : 0;
+    if (!model || !mem::Spans(model, 0x28)) {
+        static int said = 0;
+        if (said < 10) said++, LOGR("draw: an object with no model is left out (%08X, %s, model %08X)", object,
+                                    mem::Spans(object, 0x114) ? game_coop::WhoIs(object).c_str() : "not there", model);
+        kernel::Return(ctx, 0, 1);
+        return;
+    }
+    __imp__sub_001A9CF0(ctx, base);
+}
+
 X86_EXTERN_FUNC(__imp__sub_000F1E70);
 X86_FUNC(sub_000F1E70) {
     game_coop::AsSecond as(game_coop::WeaponShooter(ctx.ecx));

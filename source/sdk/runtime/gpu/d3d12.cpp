@@ -2103,7 +2103,11 @@ bool D3D12Backend::SamplesTarget(Target& t, const TextureDesc& d, const FormatIn
     static const bool old = std::getenv("S2_GPU_OLD_TARGETS") != nullptr;
     if (t.depth) return true;
     if (t.taken) return old;
-    if (frame_ - t.rt_frame <= kStaleFrames) return true;
+    // (not after a few frames: a target the title draws into now and then, a reflection or a light's picture made
+    // every dozen frames, was taken for a texture 13 frames after it was made and the pipes of 03b showed rows of
+    // green dots, its stale bytes; the owner's session 31, 2026-11-28. A level lets go of its targets for good.)
+    constexpr uint64_t kLetGoFrames = 600;
+    if (frame_ - t.rt_frame <= kLetGoFrames) return true;
     if (t.now_frame != frame_) {
         t.now_frame = frame_;
         t.now_sig = MemSig(t.data, t.bytes);
@@ -3477,6 +3481,19 @@ void D3D12Backend::BlitFrame(Target& t, D3D12_CPU_DESCRIPTOR_HANDLE rh) {
             // below that, so that it never covers the meter)
             bar(320.0f + inset, 0.5f * across, down, 86.0f, 0.65f, h1, false);  // ... and his partner's under it
             bar(inset, 0.5f * across, down, 86.0f, 0.65f, h2, true);             // Player 1's partner, under the title's bar and meter
+            // Player 2's insanity meter, where the title's sits under its health bar: a thin bar, its fill the pale
+            // gold of a meter filling, white once it is full (he can change form then)
+            float m2 = g_second_meter.load();
+            if (m2 >= 0) {
+                float from = 320.0f + inset, part = 0.5f * across, rows = 480.0f - 2 * kOverscan;
+                float x0 = vp.TopLeftX + (from + 37.0f * part) / 640.0f * vw, x1 = vp.TopLeftX + (from + 150.0f * part) / 640.0f * vw;
+                float y0 = vp.TopLeftY + (60.0f * down - kOverscan) / rows * vh, y1 = vp.TopLeftY + (68.0f * down - kOverscan) / rows * vh;
+                float filled = x0 + (x1 - x0) * std::clamp(m2, 0.0f, 1.0f);
+                bool full = m2 >= 0.999f;
+                rect(x0 - edge, y0 - edge, x1 + edge, y1 + edge, 0.02f, 0.01f, 0.01f);
+                rect(x0, y0, x1, y1, 0.12f, 0.10f, 0.06f);
+                if (filled > x0) rect(x0, y0, filled, y1, full ? 0.97f : 0.86f, full ? 0.97f : 0.74f, full ? 0.92f : 0.36f);
+            }
         }
         // (the arrows above the partners' heads are drawn smooth in the ImGui layer: the title's GameInfo::ui)
     }

@@ -39,6 +39,7 @@ namespace game_coop {
 void Controller2(input::Pad& p);  // coop.cpp
 bool SecondStart();               // Player 2 is pressing START: the pause is both players'
 void SecondLook(input::Pad& p);   // Player 2's own look settings, on his right stick
+bool InLevel();                   // a level is in play
 bool PausedBySecond();            // the pause menu is up and Player 2 opened it: it is his to use
 input::Pad SecondRaw();
 }
@@ -222,6 +223,9 @@ void Hook(int port, input::Pad& p) {
         return;
     }
     if (port != 0) return;
+    // Out of a level (the title, the main menu, loading) the controller that is used is Player 1's: whoever uses the
+    // menus plays Player 1 (input.cpp SetMenusPickFirst). In a level the controllers keep their places.
+    input::SetMenusPickFirst(!game_coop::InLevel() && !hidden);
     // (S2_PAD_SCRIPT=<file> names another script file than pad_script.txt)
     static const std::vector<Press> script = LoadScript(std::getenv("S2_PAD_SCRIPT") ? std::getenv("S2_PAD_SCRIPT") : "pad_script.txt");
     g_polls++;

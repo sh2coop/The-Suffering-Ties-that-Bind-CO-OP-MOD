@@ -2,6 +2,7 @@
 #include "core/input.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <iterator>
 #include <mutex>
 #include <utility>
@@ -37,6 +38,29 @@ void RemovePad(SDL_JoystickID id) {
         g_pads[i] = nullptr;
         LOGI("input: controller %d unplugged", i + 1);
     }
+}
+
+// [local change, The Suffering: Ties That Bind] The ports are given in the order the controllers were found, which
+// is not the order Windows numbers them in: with an Xbox 360 and an Xbox One controller plugged in, the owner's
+// presses on his own (Windows' first) reached port 1, and the title and the main menu did nothing (2026-11-28,
+// version 70). While the game is in its menus (SetMenusPickFirst), the controller that is used takes port 0.
+bool g_menus_pick = false;
+bool Used(SDL_Gamepad* pad) {
+    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; b++)
+        if (SDL_GetGamepadButton(pad, SDL_GamepadButton(b))) return true;
+    for (SDL_GamepadAxis a : {SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY})
+        if (std::abs(int(SDL_GetGamepadAxis(pad, a))) > 20000) return true;
+    return SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000 || SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000;
+}
+void PickFirst() {
+    if (!g_menus_pick || (g_pads[0] && Used(g_pads[0]))) return;
+    for (int i = 1; i < 4; i++)
+        if (g_pads[i] && Used(g_pads[i])) {
+            std::swap(g_pads[0], g_pads[i]);
+            const char* name = SDL_GetGamepadName(g_pads[0]);
+            LOGI("input: controller %d is used in the menus: it is controller 1 now (%s), controller 1 is %d", i + 1, name ? name : "", i + 1);
+            return;
+        }
 }
 
 // once a millisecond at most, however many ports and threads read
@@ -85,6 +109,7 @@ Pad Poll(int port) {
     {
         std::lock_guard lock(g_lock);
         UpdatePads();
+        if (port == 0) PickFirst();
         if (SDL_Gamepad* pad = port >= 0 && port < 4 ? g_pads[port] : nullptr) {
             p.connected = true;
             constexpr SDL_GamepadButton kButtons[] = {
@@ -112,6 +137,8 @@ Pad Poll(int port) {
     if (app::kGame.pad) app::kGame.pad(port, p);
     return p;
 }
+
+void SetMenusPickFirst(bool on) { g_menus_pick = on; }
 
 uint16_t HeldOnAnyController() {
     constexpr std::pair<SDL_GamepadButton, uint16_t> kFaceButtons[] = {

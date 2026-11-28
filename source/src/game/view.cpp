@@ -48,6 +48,7 @@
 #include "gpu/backend.h"
 #include "xdk/hle.h"
 
+namespace game_coop { extern uint32_t g_no_texture; }  // coop.cpp: the stand-in texture of Player 2's view camera
 namespace game_view {
 namespace {
 constexpr double kPi = 3.14159265358979323846;
@@ -181,9 +182,29 @@ void Frame(X86Context& ctx) {
     uint32_t ecx = ctx.ecx;
     for (uint32_t i = 0; cameras && i < count && i < 16; i++) {
         uint32_t cam = cameras + i * kCameraSize;
-        for (uint32_t field : {kDistance, kDistanceToo}) {
-            float d = ReadF(cam + field);
-            if (d > 1e-4f) WriteF(cam + field, float(kHalf / convert(kHalf / d)));
+        // a camera that draws into a texture of its own (a monitor's, the theatre's projector in 03b) is not the
+        // screen's: its angle is left as the game has it (2026-11-28: it was widened or narrowed again at every
+        // change between one view and two, and the doctor on the theatre's screen fell out of its picture)
+        uint32_t texture = kernel::R32(cam + 0x04);
+        if (i > 0 && texture && texture != game_coop::g_no_texture) continue;
+        // Player 1's camera (the first) going from two views into one for a scene: its angles are kept, and when
+        // the two views come back they are put back as they were (the owner, 2026-11-28: "after some cutscenes,
+        // player 1's camera gets zoomed in": a scene sets the camera's angle itself, and the change back was worked
+        // from the scene's angle, not from the one the game had before)
+        static float kept[2] = {0, 0};
+        static bool have_kept = false;
+        bool into_one = old_share < 1 && share >= 1 && std::fabs(want - old) < 0.002f;
+        bool back_to_two = old_share >= 1 && share < 1 && std::fabs(want - old) < 0.002f;
+        if (i == 0 && into_one) kept[0] = ReadF(cam + kDistance), kept[1] = ReadF(cam + kDistanceToo), have_kept = true;
+        if (i == 0 && back_to_two && have_kept && kept[0] > 1e-4f) {
+            WriteF(cam + kDistance, kept[0]), WriteF(cam + kDistanceToo, kept[1]);
+            have_kept = false;
+        } else {
+            if (i == 0 && !into_one) have_kept = false;
+            for (uint32_t field : {kDistance, kDistanceToo}) {
+                float d = ReadF(cam + field);
+                if (d > 1e-4f) WriteF(cam + field, float(kHalf / convert(kHalf / d)));
+            }
         }
         // method 0 (x, y, width, height) works the rest out again from the distance and the shape
         ctx.ecx = cam;

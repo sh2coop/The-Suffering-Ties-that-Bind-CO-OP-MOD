@@ -159,6 +159,9 @@ inline std::atomic<float> g_second_health{-1.0f};
 // the partner's; Player 2's bar is blue): a thin bar under the player's own. g_first_health is Player 1's, for the
 // thin bar in Player 2's view.
 inline std::atomic<float> g_first_health{-1.0f};
+// ... and the second player's insanity meter, 0 to 1 (below 0: none), under his health bar in his half (the owner,
+// 2026-11-28: "player 2 cant see his rage bar"; the title's own meter shows Player 1's)
+inline std::atomic<float> g_second_meter{-1.0f};
 // The title's own health bar art, for those bars: the part of its HUD texture (256 x 256, DXT5) that holds the bar's
 // strips, columns 0 to 99 and rows 208 to 255, decoded when the game uploads that texture. Rows 0 to 47: as the
 // title has it (red); rows 48 to 95: the same with red and blue swapped (Player 2's). In it the filled strip is

@@ -1,1 +1,1 @@
-70 2026-11-27 Player 2's shots go where he faces (they went by Player 1's aim, behind him when the two faced different ways).
+71 2026-11-27 No more green dots on pipes and walls; no crash from an object without a model; Player 2's transform is off for now (his creature crashed the game); both players' ammo never runs out; Player 2 has a rage bar; whoever uses the menus is Player 1; Player 2 plays on while Player 1 is grabbed; no crosshair in scenes; Player 1's camera is not left zoomed after scenes; the theatre's projection shows.
