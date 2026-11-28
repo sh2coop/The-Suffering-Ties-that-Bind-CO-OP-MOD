@@ -1,1 +1,1 @@
-68 2026-11-27 No crash after using a door: an object the game no longer has is never read (the same check now guards every place the mod reads the game's objects). The Load Game save times keep their first digit.
+69 2026-11-27 Player 2's ammunition never runs out. The game goes on if its frame-by-frame record ever reads something the game has just let go of.

@@ -2066,6 +2066,10 @@ void DetailFrame(X86Context& ctx) {
     PassStats pass[2] = {g_pass[0], g_pass[1]};
     g_pass[0] = g_pass[1] = PassStats{};
     static bool was_in = false;
+    {   // tests: S2_TEST_RECORD_FAULT=<frame>: a read of memory that is not there at that frame (the guard must hold)
+        static const uint64_t fault = std::getenv("S2_TEST_RECORD_FAULT") ? uint64_t(std::atoll(std::getenv("S2_TEST_RECORD_FAULT"))) : 0;
+        if (fault && g_frames == fault) LOGR("test: the record reads 0000FFF4: %08X", kernel::R32(0xFFF4));
+    }
     bool in = InLevel() && Whole(g_player, 0x494) && Whole(g_player_object, 0x114);
     static std::chrono::steady_clock::time_point before = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
@@ -2395,6 +2399,17 @@ void DetailFrame(X86Context& ctx) {
     }
 }
 
+// runs a part of the record under a structured-exception guard: false when a read in it faulted
+// (no C++ objects here: the guard and C++ unwinding do not mix in one function)
+bool RecordGuarded(void (*part)(X86Context&), X86Context& ctx) {
+    __try {
+        part(ctx);
+        return true;
+    } __except (1 /* EXCEPTION_EXECUTE_HANDLER */) {
+        return false;
+    }
+}
+
 void Frame(X86Context& ctx) {
     static const uint64_t spawn_at = [] {
         const char* v = std::getenv("S2_COOP_SPAWN");
@@ -2402,7 +2417,31 @@ void Frame(X86Context& ctx) {
     }();
     static const bool forced = std::getenv("S2_COOP") != nullptr;
     ++g_frames;
-    DetailFrame(ctx);
+    {   // The per-frame record only reads: a read it gets wrong (an object the game has just let go of) leaves that
+        // frame's line out and is noted, and never ends the game (three of the four crashes of the owner's
+        // versions 63 to 67 were reads in this record).
+        X86Context before = ctx;
+        if (!RecordGuarded(DetailFrame, ctx)) {
+            ctx = before;
+            static int said = 0;
+            if (said < 20) said++, LOGR("record: frame %llu's line was left out after a bad read", (unsigned long long)g_frames);
+        }
+    }
+    // ---- Player 2's ammunition never runs out (the owner, 2026-11-28: "can u give player 2 infinite ammo"): the
+    // rounds in the gun in his hands (Player +0x140) are kept at what its clip holds (0x17400; 0 for a melee weapon)
+    // every frame, so he never reloads and never takes from what he carries. Player 1 plays as the game has it.
+    if (g_second && mem::Spans(g_second, 0x540) && !(kernel::R32(g_second + 0xBC) & 0xC0000)) {
+        uint32_t ecx = ctx.ecx, eax = ctx.eax;
+        ctx.ecx = g_second;
+        int clip = int(kernel::CallGuest(ctx, 0x17400, {}));
+        ctx.ecx = ecx, ctx.eax = eax;
+        int rounds = int(kernel::R32(g_second + 0x140));
+        if (clip > 0 && clip < 1000 && rounds < clip) {
+            kernel::W32(g_second + 0x140, uint32_t(clip));
+            static int said = 0;
+            if (said < 5) said++, LOGI("ammo: Player 2's gun filled again (%d of %d), infinite ammunition", rounds, clip);
+        }
+    }
     {   // tests: S2_FP_PROBE=<frame>: Player 1's model, its resource and his skeleton at that frame and 180 frames later
         // (a script goes into first person in between): what the first-person model shares with the body
         static const uint64_t probe = std::getenv("S2_FP_PROBE") ? uint64_t(std::atoll(std::getenv("S2_FP_PROBE"))) : 0;
