@@ -2066,6 +2066,36 @@ void DetailFrame(X86Context& ctx) {
     PassStats pass[2] = {g_pass[0], g_pass[1]};
     g_pass[0] = g_pass[1] = PassStats{};
     static bool was_in = false;
+    {   // tests: S2_WEAPON_PROBE=1: each player's weapon in hand, where it is and which way it points, twice a second
+        static const int probe = std::getenv("S2_WEAPON_PROBE") ? std::max(1, std::atoi(std::getenv("S2_WEAPON_PROBE"))) : 0;
+        if (probe && g_frames % probe == 0) {
+            const uint32_t pl[2] = {g_player, g_second}, body[2] = {g_player_object, g_second_object};
+            for (int i = 0; i < 2; i++) {
+                if (!mem::Spans(pl[i], 0x540) || !mem::Spans(body[i], 0x114)) continue;
+                uint32_t w = Named(pl[i], 0x3AC);
+                if (!w) continue;
+                LOGI("weapon probe: Player %d at %.2f %.2f facing %.0f; weapon %08X at %.2f %.2f %.2f way %.2f %.2f, owner handle %04X (body %04X), skeleton %08X, parent %08X",
+                     i + 1, ReadF(body[i] + kPosition), ReadF(body[i] + kPosition + 8), Facing(body[i]), w, ReadF(w + kPosition), ReadF(w + kPosition + 4),
+                     ReadF(w + kPosition + 8), ReadF(w + kMatrix + 0x20), ReadF(w + kMatrix + 0x28), kernel::R16(w + 0x56), kernel::R16(body[i] + 0xE6),
+                     kernel::R32(w + 0xE8), kernel::R32(w + 0x5C));
+                uint32_t sk = kernel::R32(w + 0xE8);
+                if (mem::Spans(sk, 0x150)) {
+                    uint32_t of = kernel::R32(sk + 0xFC), bones = kernel::R32(sk + 0x140), n = kernel::R32(sk + 0x148);
+                    std::string b;
+                    for (uint32_t k = 0; k < n && k < 4 && mem::Spans(bones + k * 0x7C, 0x7C); k++) {
+                        char one[160];
+                        std::snprintf(one, sizeof one, " [%u: x %.2f %.2f %.2f z %.2f %.2f %.2f at %.2f %.2f %.2f]", k, ReadF(bones + k * 0x7C), ReadF(bones + k * 0x7C + 0x10),
+                                      ReadF(bones + k * 0x7C + 0x20), ReadF(bones + k * 0x7C + 8), ReadF(bones + k * 0x7C + 0x18), ReadF(bones + k * 0x7C + 0x28),
+                                      ReadF(bones + k * 0x7C + 0x30), ReadF(bones + k * 0x7C + 0x34), ReadF(bones + k * 0x7C + 0x38));
+                        b += one;
+                    }
+                    LOGI("weapon probe: Player %d's weapon skeleton %08X: of %08X (%s at %.2f %.2f facing %.0f), %u bones:%s", i + 1, sk, of,
+                         of == w ? "the weapon" : of == body[i] ? "his body" : of == g_player_object ? "PLAYER 1's body" : of == g_second_object ? "PLAYER 2's body" : "other",
+                         mem::Spans(of, 0x114) ? ReadF(of + kPosition) : 0.0f, mem::Spans(of, 0x114) ? ReadF(of + kPosition + 8) : 0.0f, mem::Spans(of, 0x114) ? Facing(of) : 0.0f, n, b.c_str());
+                }
+            }
+        }
+    }
     {   // tests: S2_TEST_RECORD_FAULT=<frame>: a read of memory that is not there at that frame (the guard must hold)
         static const uint64_t fault = std::getenv("S2_TEST_RECORD_FAULT") ? uint64_t(std::atoll(std::getenv("S2_TEST_RECORD_FAULT"))) : 0;
         if (fault && g_frames == fault) LOGR("test: the record reads 0000FFF4: %08X", kernel::R32(0xFFF4));
@@ -5575,6 +5605,31 @@ X86_FUNC(sub_000EA840) {
     __imp__sub_000EA840(ctx, base);
 }
 
+// ---- Player 2's shots go where he aims (the owner, 2026-11-28: "player 2's bullets are shooting behind him").
+// A ranged weapon fires (0xF1E70, this = the weapon's own part: its owner's handle at +0x56, the weapon at +4) and
+// throws out its shell (0xF1D20) when its Fire message comes, from the objects' run, not inside its owner's own
+// update: the place and way of the shot came from "the player" and the game's camera, which are Player 1's then,
+// so Player 2's shots started on Player 1's side of him and flew where Player 1 looked. When the weapon is Player
+// 2's, it fires as his own update does: he first in the player list, his Camera the game's, his view current.
+namespace game_coop {
+uint32_t WeaponShooter(uint32_t part) {
+    if (!mem::Spans(part, 0x58)) return 0;
+    uint32_t table = kernel::R32(kObjectManager + 0x0C), h = kernel::R16(part + 0x56);
+    uint32_t owner = table && h && h < kernel::R32(kObjectManager + 0x14) ? kernel::R32(table + h * 6) : 0;
+    return owner && g_second_object && owner == g_second_object ? g_second : 0;
+}
+}  // namespace game_coop
+X86_EXTERN_FUNC(__imp__sub_000F1E70);
+X86_FUNC(sub_000F1E70) {
+    game_coop::AsSecond as(game_coop::WeaponShooter(ctx.ecx));
+    __imp__sub_000F1E70(ctx, base);
+}
+X86_EXTERN_FUNC(__imp__sub_000F1D20);
+X86_FUNC(sub_000F1D20) {
+    game_coop::AsSecond as(game_coop::WeaponShooter(ctx.ecx));
+    __imp__sub_000F1D20(ctx, base);
+}
+
 // Tests: S2_SPAWN_TRACE=<class id in hex> logs every object of that class the game makes from a template
 // (0x18C370: owner, matrix, -, template), with the place and who asked. (Who makes the short pale flash at a hit:
 // a Screen Fader, class 21C015A3.)
@@ -5584,10 +5639,13 @@ X86_FUNC(sub_0018C370) {
     // (S2_SPAWN_TRACE=all with S2_SPAWN_FROM=<frame>: everything made in the sixty frames from that one)
     static const bool all = std::getenv("S2_SPAWN_TRACE") && !std::strcmp(std::getenv("S2_SPAWN_TRACE"), "all");
     static const uint64_t from = std::getenv("S2_SPAWN_FROM") ? uint64_t(std::atoll(std::getenv("S2_SPAWN_FROM"))) : 0;
-    if (all && game_coop::Frames() >= from && game_coop::Frames() < from + 60) {
+    static const uint64_t span = std::getenv("S2_SPAWN_FOR") ? uint64_t(std::atoll(std::getenv("S2_SPAWN_FOR"))) : 60;
+    if (all && game_coop::Frames() >= from && game_coop::Frames() < from + span) {
         uint32_t owner = kernel::R32(ctx.esp + 4), matrix = kernel::R32(ctx.esp + 8), tmpl = kernel::R32(ctx.esp + 16);
         float at[3] = {0, 0, 0};
-        if (matrix && mem::Spans(matrix, 64)) std::memcpy(at, kernel::HostPtr(matrix + 48), 12);
+        float way[3] = {0, 0, 0};
+        if (matrix && mem::Spans(matrix, 64)) std::memcpy(at, kernel::HostPtr(matrix + 48), 12), std::memcpy(way, kernel::HostPtr(matrix + 32), 12);
+        LOGI("spawn trace: way %.2f %.2f %.2f", way[0], way[1], way[2]);
         LOGI("spawn trace: frame %llu: template %u of class %08X at %.2f %.2f %.2f, owner %s (class %08X), asked from %s", (unsigned long long)game_coop::Frames(), tmpl,
              tmpl < 0x10000 ? game_coop::ClassOfTemplate(tmpl) : 0, at[0], at[1], at[2], owner && mem::Spans(owner, 0x110) ? game_coop::WhoIs(owner).c_str() : "none",
              owner && mem::Spans(owner, 0x110) ? game_coop::ClassOf(owner) : 0, game_coop::Callers(ctx, 10).c_str());

@@ -1,1 +1,1 @@
-69 2026-11-27 Player 2's ammunition never runs out. The game goes on if its frame-by-frame record ever reads something the game has just let go of.
+70 2026-11-27 Player 2's shots go where he faces (they went by Player 1's aim, behind him when the two faced different ways).
