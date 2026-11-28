@@ -81,6 +81,7 @@ namespace game_coop {
 int BodyOwner(uint32_t object);              // coop.cpp: 0 or 1 for a player's object or his stand-in's, else -1
 uint32_t PlayerOf(int who);                  // the Player (class object) of player 0 or 1, 0 when none
 uint32_t DoublePlayerOf(int who);            // the Player of that player's stand-in, 0 when none
+bool DoubleOut(int who);                     // ... and it is out (its owner is in first person)
 }
 
 namespace game_chief {  // chief.cpp: Chief's body from the owner's zip
@@ -94,6 +95,7 @@ void PackImages();  // (below)
 
 namespace {
 constexpr uint32_t kVersion = 7;  // the made files are made again when this changes
+constexpr uint32_t kObjectManager = 0x394678;
 constexpr uint32_t kSetModel = 0x186030, kSwapModel = 0x26400, kResource = 0x1A21B0, kResourceManager = 0x384B90;
 
 std::mutex g_lock;
@@ -684,6 +686,7 @@ uint32_t Want(int who) {
 uint32_t g_blackmore_resource = 0;
 std::map<uint32_t, uint32_t> g_torque_resource;  // Torque's bodies asked for: id -> resource
 uint32_t g_last_torque = 0;                       // the Torque body last taken off a player (put back on a change)
+uint32_t g_own_torque[2] = {0, 0};                // each player's own Torque body, the first he was given (his creature is a set in it)
 
 uint32_t ModelId(uint32_t resource);
 uint32_t Resource(X86Context& ctx, uint32_t id) {
@@ -727,6 +730,14 @@ uint32_t Torque(X86Context& ctx, uint32_t id) {
     return r;
 }
 uint32_t ModelId(uint32_t resource) { return resource && mem::Spans(resource, 0x10) ? kernel::R32(resource + 4) : 0; }
+// the Torque body to give a player back: his own (the man's body he had when first seen as a man, 0x3C0001 in the
+// tests of 2026-11-28), else that one, else the last seen. (The last Torque body the game had handed out anyone was
+// given back until then: the creature's body, 0x3C000A, if a change had just been made.)
+uint32_t OwnTorque(int who) {
+    if (g_own_torque[who]) return g_own_torque[who];
+    if (g_torque.count(0x3C0001)) return 0x3C0001;
+    return g_last_torque ? g_last_torque : *g_torque.begin();
+}
 
 }  // namespace
 
@@ -743,20 +754,38 @@ void Frame(X86Context& ctx) {
     for (int who = 0; who < 2; who++) {
         for (uint32_t player : {game_coop::PlayerOf(who), game_coop::DoublePlayerOf(who)}) {
             if (!player || !mem::Spans(player, 0x770)) continue;
+            // A stand-in is given its character when it comes out, not while it is put away: a body given to a
+            // put-away stand-in hung its weapons (the bat on its back, its shotgun) in the air beside the players
+            // (the owner, 2026-11-28: "when swapping models, sometimes the weapons start floating").
+            if (player != game_coop::PlayerOf(who) && !game_coop::DoubleOut(who)) continue;
             uint32_t object = kernel::R32(player + 4);
             if (!object || !mem::Spans(object, 0x110) || int32_t(kernel::R32(object + 8)) < 0) continue;
             uint32_t now = kernel::R32(object + 0x64);
+            {   // (once for each: the body each player has when he is first seen, for the log)
+                static bool said[2] = {};
+                if (!said[who] && player == game_coop::PlayerOf(who)) said[who] = true, LOGR("skins: player %d is first seen with model %X", who + 1, now);
+                if (!g_own_torque[who] && player == game_coop::PlayerOf(who) && g_torque.count(now) && !(kernel::R32(player + 0xBC) & 0xC0000)) g_own_torque[who] = now;
+            }
             bool first_person = (kernel::R32(player + 0xBC) & 0x8000) != 0;
-            uint32_t want = Want(who);
+            // In the creature form (state bit 0x80000) he wears Torque's body: the creature is a set of meshes inside
+            // Torque's model (the change picks it, Player +0x76C), which Blackmore's and Chief's models do not have.
+            // Worn by them, the creature's skeleton bent their bodies out of shape and its blows hit nothing (the
+            // owner, 2026-11-28: "when i was chief, and i transforemd, it was bugged, and i coudlnt evn attack or do
+            // damage"). His own comes back once he is a man again. While he changes (bit 0x40000) nothing is
+            // changed: a body given then left the change waiting for its end for ever.
+            uint32_t bc = kernel::R32(player + 0xBC);
+            if (bc & 0x40000) continue;
+            bool creature = (bc & 0x80000) != 0;
+            uint32_t want = creature ? 0 : Want(who);
             uint32_t give = 0, wears = CharacterOf(now);
             if (want && (g_torque.count(now) || (wears && wears != want))) give = Wear(ctx, want);
-            else if (!want && wears) give = Torque(ctx, g_last_torque ? g_last_torque : *g_torque.begin());
+            else if (!want && wears) give = Torque(ctx, OwnTorque(who));
             if (first_person) {  // the body he gets back when first person ends
                 uint32_t kept = kernel::R32(player + 0x764), kept_id = ModelId(kept), kept_wears = CharacterOf(kept_id);
                 if (want && (g_torque.count(kept_id) || (kept_wears && kept_wears != want))) {
                     if (uint32_t b = Wear(ctx, want)) kernel::W32(player + 0x764, b);
                 } else if (!want && kept_wears) {
-                    if (uint32_t t = Torque(ctx, g_last_torque ? g_last_torque : *g_torque.begin())) kernel::W32(player + 0x764, t);
+                    if (uint32_t t = Torque(ctx, OwnTorque(who))) kernel::W32(player + 0x764, t);
                 }
                 continue;
             }
@@ -764,6 +793,12 @@ void Frame(X86Context& ctx) {
             uint32_t set = kernel::R32(player + 0x76C);
             uint32_t ecx = ctx.ecx, eax = ctx.eax;
             ctx.ecx = player;
+            // The thing he carries on his back (a bat) hangs at the point the model names for it (0x26090(0x12)).
+            // The swap makes it anew on the new model (0x18310, at 0x2664D, when Player +0x86C names one); the game
+            // takes the old one off first (0x161B0) by looking for it at the point, and the new model's point is
+            // another: the old bat stayed, off its point, at his feet (the owner, 2026-11-28: "when swapping models,
+            // sometimes the weapons start floating"). It is taken off here, while the old model is still on.
+            if (kernel::R32(player + 0x86C) != 0xFFFFFFFF) kernel::CallGuest(ctx, 0x161B0, {}), ctx.ecx = player;
             kernel::CallGuest(ctx, kSwapModel, {give, set, set});
             ctx.ecx = ecx, ctx.eax = eax;
             LOGR("skins: player %d%s is now %s (model %X)", who + 1, player == game_coop::PlayerOf(who) ? "" : "'s stand-in",
@@ -773,6 +808,13 @@ void Frame(X86Context& ctx) {
 }
 
 bool Available() { return g_blackmore != 0; }
+// Does player who wear a body his creature can be made from: his own Torque body (or, before it is known, any of
+// Torque's)? (coop.cpp: Player 2's own change of form waits for that)
+bool CreatureReady(int who, uint32_t model) {
+    if (!g_blackmore) return true;
+    if (CharacterOf(model)) return true;  // (Blackmore's or Chief's: the change gives him Torque's creature)
+    return g_torque.count(model) != 0;  // (a Torque body: the change picks the creature's from it)
+}
 bool ChiefAvailable() { return g_chief != 0; }
 
 // Is this engine object a player's body (or his stand-in) wearing Blackmore? 1 then, else 0.
@@ -820,9 +862,11 @@ X86_FUNC(sub_00186030) {
     if (g_blackmore && resource) {
         uint32_t id = ModelId(resource);
         int who = g_torque.count(id) ? game_coop::BodyOwner(object) : -1;
+        uint32_t player = who >= 0 ? game_coop::PlayerOf(who) : 0;
+        bool creature = player && mem::Spans(player, 0xC0) && kernel::R32(player + 4) == object && (kernel::R32(player + 0xBC) & 0xC0000);
         if (who >= 0) {
             g_last_torque = id;
-            if (uint32_t c = Want(who)) {
+            if (uint32_t c = creature ? 0 : Want(who)) {
                 if (uint32_t b = Wear(ctx, c)) kernel::W32(ctx.esp + 4, b);
             }
         }

@@ -1529,8 +1529,23 @@ int DoubleObject(uint32_t object) {  // the same, by its engine object
     if (!object) return -1;
     return g_doubles[0].object == object ? 0 : g_doubles[1].object == object ? 1 : -1;
 }
+uint32_t OwnerOfThing(uint32_t object);
 bool OfDouble(const Double& d, uint32_t object) {  // its body, what it holds, or what hangs on it
-    return d.object && object && (object == d.object || object == d.held[0] || object == d.held[1] || object == d.loose[0] || object == d.loose[1]);
+    if (!d.object || !object) return false;
+    if (object == d.object || object == d.held[0] || object == d.held[1] || object == d.loose[0] || object == d.loose[1]) return true;
+    // ... or anything else it carries: the weapons on its back and at its belt (the owner, 2026-11-28: weapons
+    // floating beside the players: a put-away stand-in's carried bat and shotgun were drawn, its body not)
+    return OwnerOfThing(object) == d.object;
+}
+// the engine object that carries a weapon or another carried thing (its part's owner handle at +0x56), else 0
+uint32_t OwnerOfThing(uint32_t object) {
+    if (!mem::Spans(object, 0x114)) return 0;
+    uint32_t part = kernel::R32(object + kClassObject);
+    if (!mem::Spans(part, 0x58)) return 0;
+    uint32_t cls = ClassOf(object);
+    if (cls != 0x9710D816 && cls != 0x22E48520) return 0;  // (ranged and melee weapons)
+    uint32_t table = kernel::R32(kObjectManager + 0x0C), h = kernel::R16(part + 0x56);
+    return table && h && h < kernel::R32(kObjectManager + 0x14) ? kernel::R32(table + h * 6) : 0;
 }
 bool DoublesThing(uint32_t object) {  // a stand-in body, or what one holds
     if (!object) return false;
@@ -2081,6 +2096,11 @@ void DetailFrame(X86Context& ctx) {
             const uint32_t pl[2] = {g_player, g_second}, body[2] = {g_player_object, g_second_object};
             for (int i = 0; i < 2; i++) {
                 if (!mem::Spans(pl[i], 0x540) || !mem::Spans(body[i], 0x114)) continue;
+                for (uint32_t at : {0x3ACu, 0x3AEu}) {  // (what is in each hand: the second is the one carried, on his back)
+                    uint32_t x = Named(pl[i], at);
+                    if (x) LOGI("weapon probe: Player %d +%X: %08X (template %u) at %.2f %.2f %.2f, he is at %.2f %.2f %.2f", i + 1, at, x, kernel::R32(x + kTemplateWord) & 0xFFFF,
+                                ReadF(x + kPosition), ReadF(x + kPosition + 4), ReadF(x + kPosition + 8), ReadF(body[i] + kPosition), ReadF(body[i] + kPosition + 4), ReadF(body[i] + kPosition + 8));
+                }
                 uint32_t w = Named(pl[i], 0x3AC);
                 if (!w) continue;
                 LOGI("weapon probe: Player %d at %.2f %.2f facing %.0f; weapon %08X at %.2f %.2f %.2f way %.2f %.2f, owner handle %04X (body %04X), skeleton %08X, parent %08X",
@@ -3008,6 +3028,7 @@ int BodyOwner(uint32_t object) {
 }
 uint32_t PlayerOf(int who) { return who ? (g_second_object ? g_second : 0) : g_player; }
 uint32_t DoublePlayerOf(int who) { return g_doubles[who & 1].object ? g_doubles[who & 1].player : 0; }
+bool DoubleOut(int who) { return g_doubles[who & 1].object && g_doubles[who & 1].out; }  // (skins.cpp)
 }  // namespace game_coop
 
 // the class factory (this = registry, object, class id), returns the new class object
@@ -4542,7 +4563,8 @@ void TestGoto(X86Context& ctx) {
     EachObject([&](uint32_t object) {
         if (ClassOf(object) != cls) return;
         if (n < 24)
-            LOGR("goto: %08X number %d at %.1f %.1f %.1f", cls, n, ReadF(object + kPosition), ReadF(object + kPosition + 4), ReadF(object + kPosition + 8));
+            LOGR("goto: %08X number %d at %.1f %.1f %.1f (object %08X, carried by %08X; stand-ins %08X %08X, players %08X %08X; a stand-in's: %d)", cls, n, ReadF(object + kPosition), ReadF(object + kPosition + 4), ReadF(object + kPosition + 8),
+                 object, OwnerOfThing(object), g_doubles[0].object, g_doubles[1].object, g_player_object, g_second_object, int(DoublesThing(object)));
         if (n++ == which) target = object;
     });
     if (!target) {
@@ -5648,18 +5670,21 @@ uint32_t WeaponShooter(uint32_t part) {
 // ---- an object with no model is not drawn (the owner's version 70 crashed in 0x1A9CF0, the draw of one object:
 // it reads the object's model at +0x68 and calls through it, and the object being drawn had none, just after the
 // pause menu closed with Player 2 coming back up). The draw is left out and the object named in the log.
-// ---- Player 2 does not change form by his own button for now (2026-11-28). In the owner's session 31 Player 2's
-// creature was drawn broken (the creature with Torque's things on it) and its attack crashed the game: 0x23C70, his
-// state function, read through a null at 0x24291 (property 0x127 of his body gave no template). Until his creature
-// is made right, the button's change (0x1C21E: state 18, Morph, through 0x25CD0) is refused for him; the story's
-// changes (StoryForm, StoryHold) still go through. S2_P2_CREATURE=1 lets his button through (tests).
+// ---- Player 2's own change of form, only from a body his creature can be made from (2026-11-28). In the owner's
+// session 31 Player 2's creature was drawn broken (the creature with Torque's things on it) and its attack crashed
+// the game: 0x23C70, his state function, read through a null at 0x24291 (property 0x127 gave no template). He had
+// been made Chief and Torque again in Options just before, and was given back the last Torque body the game had
+// handed out, not his own: the creature is a set of meshes in his own (skins.cpp). That is put right now, and the
+// button's change (0x1C21E: state 18, Morph, through 0x25CD0) is refused only while he does not wear his own body.
+namespace game_skins { bool CreatureReady(int who, uint32_t model); }
 X86_EXTERN_FUNC(__imp__sub_00025CD0);
 X86_FUNC(sub_00025CD0) {
     static const bool allow = std::getenv("S2_P2_CREATURE") != nullptr;
+    uint32_t body = game_coop::g_second_object && mem::Spans(game_coop::g_second_object, 0x68) ? kernel::R32(game_coop::g_second_object + 0x64) : 0;
     if (!allow && game_coop::g_second && ctx.ecx == game_coop::g_second && kernel::R32(ctx.esp + 4) == 0x12 && !game_coop::g_story_form_call &&
-        !(kernel::R32(game_coop::g_second + 0xBC) & 0x80000)) {
+        !(kernel::R32(game_coop::g_second + 0xBC) & 0x80000) && !game_skins::CreatureReady(1, body)) {
         static int said = 0;
-        if (said < 5) said++, LOGI("coop: Player 2's own change of form is refused (his creature is not ready yet)");
+        if (said < 5) said++, LOGI("coop: Player 2's own change of form is refused: he wears model %X, not his own body", body);
         kernel::Return(ctx, 0, 1);
         return;
     }

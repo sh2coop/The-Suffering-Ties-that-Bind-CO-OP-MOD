@@ -894,7 +894,9 @@ void FriendsEntry(X86Context& ctx, uint32_t menu) {
 // its entry's words: "Friends" becomes "Co-op", once for each pause screen (they come some frames after it is made)
 void PauseFriends(X86Context& ctx, uint32_t pause) {
     static uint32_t named = 0;
-    if (named == pause || !mem::Spans(pause, kCount + 4)) return;
+    // (looked at every time: a new pause screen can be made at the address of the one before, and the owner's
+    // session 32 showed "Friends" again; an entry already renamed no longer reads "Friends")
+    if (!mem::Spans(pause, kCount + 4)) return;
     uint32_t widgets = kernel::R32(pause + kChildren), n = kernel::R32(pause + kCount);
     for (uint32_t i = 0; widgets && i < n && i < 64; i++) {
         uint32_t w = kernel::R32(widgets + i * 4);
@@ -906,7 +908,7 @@ void PauseFriends(X86Context& ctx, uint32_t pause) {
         for (uint32_t k = 0; k < 7 && same; k++) same = kernel::R16(at + k * 2) == uint16_t(kWas[k]);
         if (!same) continue;
         SetText(ctx, w, kFriendsName);
-        named = pause;
+        named = pause, (void)named;
         static int said = 0;
         if (said++ < 3) LOGI("menu: the pause screen's Friends entry is now %s", kFriendsName);
         return;

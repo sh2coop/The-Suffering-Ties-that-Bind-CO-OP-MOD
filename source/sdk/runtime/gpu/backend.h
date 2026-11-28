@@ -177,9 +177,13 @@ inline uint32_t (*g_draw_variant)(X86Context& ctx, const State& s) = nullptr;
 // image for stage 0 by its key (State::force_image; the hook's draw only, cleared after it)
 inline uint64_t g_draw_force_image = 0;
 constexpr uint32_t kHudArtW = 100, kHudArtH = 48;
+// ... and, below those two, the insanity meter's strips (rows 152 to 211 of the same texture: its glow when full,
+// 155 to 178; its empty strip, 183 to 195; its filling strip, 197 to 209), for Player 2's meter (2026-11-28: "the
+// rage bar should look like player 1's rage bar for player 2")
+constexpr uint32_t kHudMeterTop = 152, kHudMeterH = 60;
 struct HudArt {
     std::mutex lock;
-    std::vector<uint8_t> bgra;       // kHudArtW x 2 kHudArtH, four bytes a texel
+    std::vector<uint8_t> bgra;       // kHudArtW x (2 kHudArtH + kHudMeterH), four bytes a texel
     std::atomic<uint32_t> ready{0};  // counts up each time it is taken anew
 };
 inline HudArt g_hud_art;

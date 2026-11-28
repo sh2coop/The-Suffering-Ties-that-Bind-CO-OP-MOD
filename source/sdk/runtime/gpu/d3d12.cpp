@@ -641,6 +641,7 @@ private:
     struct HudBar {
         float x0, y0, x1, y1, health;
         bool blue;
+        bool meter = false;  // the insanity meter (its own strips), not a health bar
     };
     std::vector<HudBar> hud_bars_;
     Tex hud_art_tex_;
@@ -3487,12 +3488,18 @@ void D3D12Backend::BlitFrame(Target& t, D3D12_CPU_DESCRIPTOR_HANDLE rh) {
             if (m2 >= 0) {
                 float from = 320.0f + inset, part = 0.5f * across, rows = 480.0f - 2 * kOverscan;
                 float x0 = vp.TopLeftX + (from + 37.0f * part) / 640.0f * vw, x1 = vp.TopLeftX + (from + 150.0f * part) / 640.0f * vw;
-                float y0 = vp.TopLeftY + (60.0f * down - kOverscan) / rows * vh, y1 = vp.TopLeftY + (68.0f * down - kOverscan) / rows * vh;
+                float y0 = vp.TopLeftY + (58.0f * down - kOverscan) / rows * vh, y1 = vp.TopLeftY + (71.0f * down - kOverscan) / rows * vh;
+                if (hud_art_made_) {  // in the title's own meter art, as Player 1's (DrawHudBars)
+                    HudBar hb{x0, y0, x1, y1, std::clamp(m2, 0.0f, 1.0f), false};
+                    hb.meter = true;
+                    hud_bars_.push_back(hb);
+                } else {
                 float filled = x0 + (x1 - x0) * std::clamp(m2, 0.0f, 1.0f);
                 bool full = m2 >= 0.999f;
                 rect(x0 - edge, y0 - edge, x1 + edge, y1 + edge, 0.02f, 0.01f, 0.01f);
                 rect(x0, y0, x1, y1, 0.12f, 0.10f, 0.06f);
                 if (filled > x0) rect(x0, y0, filled, y1, full ? 0.97f : 0.86f, full ? 0.97f : 0.74f, full ? 0.92f : 0.36f);
+                }
             }
         }
         // (the arrows above the partners' heads are drawn smooth in the ImGui layer: the title's GameInfo::ui)
@@ -3508,8 +3515,8 @@ void D3D12Backend::NoteHudArt(const TextureDesc& d, const uint8_t* guest) {
     DecodeLevel(d, 0, 0, guest, nullptr, blocks, pitch);
     if (pitch < 64 * 16 || blocks.size() < size_t(pitch) * 64) return;
     constexpr uint32_t kTop = 256 - kHudArtH;
-    std::vector<uint8_t> art(size_t(kHudArtW) * kHudArtH * 2 * 4);
-    for (uint32_t by = kTop / 4; by < 64; by++)
+    std::vector<uint8_t> art(size_t(kHudArtW) * (kHudArtH * 2 + kHudMeterH) * 4);
+    for (uint32_t by = kHudMeterTop / 4; by < 64; by++)
         for (uint32_t bx = 0; bx < kHudArtW / 4; bx++) {
             const uint8_t* b = blocks.data() + size_t(by) * pitch + size_t(bx) * 16;
             uint32_t alpha[8] = {b[0], b[1]};
@@ -3530,9 +3537,15 @@ void D3D12Backend::NoteHudArt(const TextureDesc& d, const uint8_t* guest) {
             }
             uint32_t cpick = uint32_t(b[12] | b[13] << 8 | b[14] << 16 | uint32_t(b[15]) << 24);
             for (uint32_t t = 0; t < 16; t++) {
-                uint32_t x = bx * 4 + (t & 3), y = by * 4 + (t >> 2) - kTop;
+                uint32_t row = by * 4 + (t >> 2);
                 const uint32_t* col = rgb[(cpick >> (2 * t)) & 3];
                 uint8_t a = uint8_t(alpha[(apick >> (3 * t)) & 7]);
+                if (row < kHudMeterTop + kHudMeterH) {  // the insanity meter's strips, as they are
+                    uint8_t* m = art.data() + (size_t(kHudArtH * 2 + row - kHudMeterTop) * kHudArtW + bx * 4 + (t & 3)) * 4;
+                    m[0] = uint8_t(col[2]), m[1] = uint8_t(col[1]), m[2] = uint8_t(col[0]), m[3] = a;
+                }
+                if (row < kTop) continue;
+                uint32_t x = bx * 4 + (t & 3), y = row - kTop;
                 uint8_t* red = art.data() + (size_t(y) * kHudArtW + x) * 4;
                 uint8_t* blue = art.data() + (size_t(y + kHudArtH) * kHudArtW + x) * 4;
                 red[0] = uint8_t(col[2]), red[1] = uint8_t(col[1]), red[2] = uint8_t(col[0]), red[3] = a;      // B G R A
@@ -3564,7 +3577,7 @@ void D3D12Backend::DrawHudBars() {
     if (ready != hud_art_made_) {
         texturedumper::Image img;
         img.format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        img.width = kHudArtW, img.height = kHudArtH * 2;
+        img.width = kHudArtW, img.height = kHudArtH * 2 + kHudMeterH;
         img.levels.resize(1);
         {
             std::lock_guard l(g_hud_art.lock);
@@ -3591,8 +3604,20 @@ void D3D12Backend::DrawHudBars() {
         g.ptr += ui_inc_;
         ImTextureID id = reinterpret_cast<ImTextureID>(uintptr_t(g.ptr));
         ImDrawList* draw = ImGui::GetBackgroundDrawList();
-        constexpr float kRows = float(kHudArtH * 2), kAcross = 98.0f / float(kHudArtW);
+        constexpr float kRows = float(kHudArtH * 2 + kHudMeterH), kAcross = 98.0f / float(kHudArtW);
         for (const HudBar& b : hud_bars_) {
+            if (b.meter) {  // the insanity meter: its empty strip, the filling strip over it, its glow when full
+                auto row = [&](float r) { return (float(kHudArtH * 2) + r - float(kHudMeterTop)) / kRows; };
+                float h = b.y1 - b.y0;
+                draw->AddImage(id, ImVec2(b.x0, b.y0), ImVec2(b.x1, b.y1), ImVec2(0.0f, row(183.0f)), ImVec2(kAcross, row(196.0f)));
+                bool full = b.health >= 0.999f;
+                if (full)
+                    draw->AddImage(id, ImVec2(b.x0, b.y0 - h * 0.6f), ImVec2(b.x1, b.y1 + h * 0.6f), ImVec2(0.0f, row(155.0f)), ImVec2(kAcross, row(179.0f)));
+                else if (b.health > 0.0f)
+                    draw->AddImage(id, ImVec2(b.x0, b.y0), ImVec2(b.x0 + (b.x1 - b.x0) * b.health, b.y1), ImVec2(0.0f, row(197.0f)),
+                                   ImVec2(kAcross * b.health, row(210.0f)));
+                continue;
+            }
             float v = b.blue ? float(kHudArtH) : 0.0f, h = b.y1 - b.y0;
             // (the empty bar's strip is 16 rows to the filled strip's 13: it stands out a little above and below)
             draw->AddImage(id, ImVec2(b.x0, b.y0 - h * 1.5f / 13.0f), ImVec2(b.x1, b.y1 + h * 1.5f / 13.0f),
