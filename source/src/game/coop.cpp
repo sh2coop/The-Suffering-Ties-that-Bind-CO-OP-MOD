@@ -3596,10 +3596,11 @@ bool NotForSecond(uint32_t cls) {
         case 0x4286A498:  // Edge Passage
         case 0xE66D645E:  // Teleport Pad
         // things to pick up (Ammo Box 0x202383E5, Ranged Weapon 0x9710D816 and Missile Item 0xFE9F718D were here until
-        // 2026-11-27: Player 2 picks up ammunition)
-        case 0x22E48520:  // Melee Weapon
+        // 2026-11-27: Player 2 picks up ammunition; Melee Weapon 0x22E48520 until 2026-11-28: "player 2 can't get their
+        // own weapon without player 1 picking it up". Player 1 is given a copy of what Player 2 picks up, the hook of
+        // 0x153A0)
         case 0x5ED5D552:  // Quest Item Pickup
-        case 0x19F64171:  // Health Bonus Item
+        case 0x19F64171:  // Health Bonus Item: Xombium (the owner, 2026-11-28: "Player 2 shouldn't be able to pick up xombium")
         case 0x0F86449A:  // Archive Page
         case 0x0FE41EA4:  // Key
         case 0x2A068D9B:  // Map Pack
@@ -4589,13 +4590,15 @@ void TestGoto(X86Context& ctx) {
     static uint32_t matrix = mem::AllocSystem(64);
     std::memcpy(kernel::HostPtr(matrix), m, 64);
     uint32_t ecx = ctx.ecx;
-    ctx.ecx = g_player;
+    static const bool second = std::getenv("S2_TEST_GOTO_P2") != nullptr && g_second;  // (tests: Player 2 is put there instead)
+    uint32_t who = second ? g_second : g_player;
+    ctx.ecx = who;
     kernel::CallGuest(ctx, kPlayerStop, {});
-    ctx.ecx = g_player;
+    ctx.ecx = who;
     kernel::CallGuest(ctx, kPlayerTeleport, {matrix});
     ctx.ecx = ecx;
-    LOGR("goto: Player 1 put at %.1f %.1f %.1f, %.1f m from object %08X of class %08X", m[12], m[13], m[14], far, target, cls);
-    BesideFirst(ctx);
+    LOGR("goto: Player %d put at %.1f %.1f %.1f, %.1f m from object %08X of class %08X", second ? 2 : 1, m[12], m[13], m[14], far, target, cls);
+    if (!second) BesideFirst(ctx);
 }
 }  // namespace game_coop
 

@@ -1,1 +1,1 @@
-72 2026-11-28 Chief and Blackmore turn into a proper creature that can hit; Player 2 can transform again; no weapon left floating after a character change; Player 2's rage bar in the game's own art; the pause menu always says Co-op.
+73 2026-11-28 Player 2 picks up melee weapons himself (Player 1 gets one too); Xombium stays Player 1's to pick up, Player 2 gets a copy.
